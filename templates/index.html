@@ -1,0 +1,2526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Daily Report — PT. GPA</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    :root {
+      --primary:   #003366;
+      --secondary: #005B99;
+      --accent:    #C89010;
+      --area-hdr:  #1A5276;
+      --light-bg:  #D6E8F7;
+      --navbar-bg: #003366;
+    }
+    body { background: #f0f4f8; font-size: 0.9rem; }
+    .app-navbar { background: var(--navbar-bg) !important; padding: 8px 16px; position: sticky; top:0; z-index:900; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+    .section-hdr { background: var(--primary); color: white; font-weight: 600; font-size: 0.85rem; padding: 8px 14px; }
+    .area-card { border-left: 4px solid var(--area-hdr); }
+    .area-top  { background: var(--area-hdr); color: white; padding: 6px 12px; border-radius: 3px 3px 0 0; }
+    .fld-lbl   { font-size: 0.72rem; color: #555; margin-bottom: 2px; font-weight: 500; }
+    /* Autocomplete */
+    .ac-wrap   { position: relative; }
+    .ac-drop   { position: absolute; top: 100%; left: 0; right: 0; z-index: 1050;
+                 background: #fff; border: 1px solid #bbb; border-radius: 4px;
+                 max-height: 200px; overflow-y: auto; display: none;
+                 box-shadow: 0 6px 16px rgba(0,0,0,.15); }
+    .ac-drop.open { display: block; }
+    .ac-opt    { padding: 5px 10px; cursor: pointer; font-size: 0.82rem; line-height: 1.3; }
+    .ac-opt:hover, .ac-opt.hi { background: var(--light-bg); }
+    .ac-opt small { color: #888; }
+    /* Photo box */
+    .photo-box { border: 2px dashed #c0c8d4; border-radius: 8px; padding: 8px;
+                 background: #fff; display: flex; flex-direction: column; gap: 6px; min-height: 160px; }
+    .photo-box.filled { border-color: var(--primary); border-style: solid; }
+    .photo-prev { width: 100%; height: 110px; object-fit: cover; border-radius: 4px; display: none; }
+    .photo-prev.show { display: block; }
+    .photo-ph   { text-align: center; color: #bbb; padding: 24px 0; font-size: 0.78rem; flex:1; }
+    .photo-btns { display: flex; gap: 4px; flex-wrap: wrap; }
+    /* Signature box */
+    .sig-box { border: 2px dashed #c0c8d4; border-radius: 6px; min-height: 72px;
+               display: flex; align-items: center; justify-content: center;
+               background: #fafcff; overflow: hidden; cursor: pointer; position: relative; }
+    .sig-box.filled { border-color: var(--primary); border-style: solid; }
+    .sig-box:focus { outline: 2px solid var(--primary); }
+    .sig-prev { max-width: 100%; max-height: 72px; display: none; }
+    .sig-prev.show { display: block; }
+    .sig-ph { font-size: .72rem; color: #bbb; text-align: center; padding: 8px; pointer-events: none; }
+    /* Sign-off column card */
+    .so-col-card { border: 1px solid #d0d8e4; border-radius: 6px; padding: 10px;
+                   background: #fff; position: relative; }
+    .so-col-card:hover { border-color: var(--primary); }
+    .so-remove-btn { position: absolute; top: 4px; right: 4px; font-size: .7rem;
+                     padding: 1px 7px; line-height: 1.4; }
+    /* Color pair */
+    .color-pair { display: flex; gap: 6px; align-items: center; }
+    .color-pair input[type=color] { width: 40px; height: 32px; padding: 2px; border-radius: 4px; cursor: pointer; }
+    /* Loading overlay */
+    #loadingOverlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55);
+                      z-index:9999; flex-direction:column; align-items:center; justify-content:center; }
+    #loadingOverlay.show { display:flex; }
+    /* Toast */
+    .toast-msg { position:fixed; bottom:20px; right:20px; background:var(--primary); color:#fff;
+                 padding:8px 18px; border-radius:6px; font-size:.83rem; z-index:9998;
+                 box-shadow:0 3px 12px rgba(0,0,0,.3); animation: fadeOut 2.5s forwards; }
+    @keyframes fadeOut { 0%{opacity:1} 70%{opacity:1} 100%{opacity:0} }
+    /* Settings nav */
+    .stg-nav .nav-link { color: #444; text-align: left; border-radius: 4px; font-size: .85rem; padding: 7px 12px; }
+    .stg-nav .nav-link.active { background: var(--primary); color: #fff; }
+    /* Activity items */
+    .act-item { display: flex; gap: 5px; align-items: center; margin-bottom: 4px; }
+    .act-item input { flex: 1; }
+    /* Logo status */
+    .logo-ok  { color: #198754; font-size: .78rem; }
+    .logo-bad { color: #dc3545; font-size: .78rem; }
+    /* Scrollable settings pane */
+    .stg-content { max-height: 70vh; overflow-y: auto; }
+    /* Area indirect manpower toggle */
+    .area-ind-panel { border-top: 1px dashed #c0cdd8; margin-top: 8px; padding-top: 8px; }
+    /* AI Chat Panel */
+    #aiChatPanel { position:fixed; right:0; top:0; bottom:0; width:380px; max-width:92vw;
+                   background:#fff; z-index:950; box-shadow:-4px 0 20px rgba(0,0,0,.25);
+                   display:flex; flex-direction:column; transform:translateX(100%);
+                   transition:transform .25s ease; }
+    #aiChatPanel.open { transform:translateX(0); }
+    #aiChatPanel .chat-hdr { background:var(--primary); color:#fff; padding:10px 14px;
+                              display:flex; justify-content:space-between; align-items:center; }
+    #aiChatPanel .chat-hdr h6 { margin:0; font-size:.88rem; }
+    #aiChatMessages { flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:8px; }
+    .chat-msg { max-width:88%; padding:8px 12px; border-radius:12px; font-size:.82rem; line-height:1.4; word-wrap:break-word; }
+    .chat-msg.user { align-self:flex-end; background:var(--primary); color:#fff; border-bottom-right-radius:4px; }
+    .chat-msg.bot  { align-self:flex-start; background:#e9ecef; color:#222; border-bottom-left-radius:4px; }
+    .chat-msg.bot .updates-badge { display:inline-block; background:var(--accent); color:#fff; font-size:.68rem;
+                                    padding:2px 8px; border-radius:10px; margin-top:4px; cursor:pointer; }
+    .chat-msg.system { align-self:center; background:transparent; color:#888; font-size:.72rem; font-style:italic; }
+    #aiChatInput { border-top:1px solid #ddd; padding:8px 12px; display:flex; gap:6px; }
+    #aiChatInput textarea { flex:1; resize:none; font-size:.82rem; border-radius:8px; border:1px solid #ccc; padding:6px 10px; }
+    #aiChatInput textarea:focus { outline:none; border-color:var(--primary); }
+    #aiChatInput button { border:none; background:var(--primary); color:#fff; border-radius:8px;
+                           padding:6px 14px; font-size:.82rem; cursor:pointer; }
+    #aiChatInput button:disabled { opacity:.5; cursor:not-allowed; }
+    .chat-typing { color:#888; font-size:.75rem; padding:4px 12px; }
+    /* PDF preview modal */
+    #previewModal .modal-dialog { max-width: 860px; }
+    #previewFrame { width: 100%; height: 72vh; border: none; }
+    /* Navbar btn group */
+    .nav-group { display: flex; gap: 4px; align-items: center; }
+    .nav-divider { width: 1px; height: 24px; background: rgba(255,255,255,.3); margin: 0 4px; }
+    @media (max-width: 768px) {
+      .app-navbar .btn { font-size: .72rem; padding: 3px 7px; }
+      .nav-divider { display: none; }
+    }
+    /* Toast notifications */
+    #toast-wrap { position:fixed; top:58px; right:16px; z-index:9999; }
+    .app-toast  { min-width:220px; max-width:340px; padding:.6rem 1rem; border-radius:8px; margin-bottom:.4rem;
+                  color:#fff; font-size:.84rem; box-shadow:0 3px 14px rgba(0,0,0,.22);
+                  animation:fadeSlideIn .2s ease; }
+    @keyframes fadeSlideIn { from{opacity:0;transform:translateY(-8px)} to{opacity:1;transform:translateY(0)} }
+  </style>
+</head>
+<body>
+<div id="toast-wrap"></div>
+
+<!-- PDF Generation Progress Bar -->
+<div id="gen-progress" style="display:none;position:fixed;top:0;left:0;right:0;z-index:10000;background:var(--primary);padding:10px 20px;box-shadow:0 2px 8px rgba(0,0,0,.4);">
+  <div class="d-flex align-items-center gap-3">
+    <span id="gen-progress-msg" class="text-white fw-bold" style="font-size:.85rem;min-width:220px;">Generating PDF…</span>
+    <div class="progress flex-grow-1" style="height:8px;border-radius:4px;">
+      <div id="gen-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated"
+           style="width:0%;background:var(--accent);transition:width .4s ease;"></div>
+    </div>
+    <span id="gen-progress-pct" class="text-white" style="font-size:.82rem;min-width:38px;text-align:right;">0%</span>
+  </div>
+</div>
+
+<!-- Loading overlay -->
+<div id="loadingOverlay">
+  <div class="spinner-border text-light mb-3" style="width:3rem;height:3rem;"></div>
+  <div class="text-white" id="loadingMsg">Generating PDF… please wait</div>
+</div>
+
+<!-- ═══ NAVBAR ═══ -->
+<nav class="app-navbar d-flex align-items-center gap-2 flex-wrap">
+  <span class="text-white fw-bold me-2" style="font-size:.92rem;white-space:nowrap;">📋 Daily Report — PT. GPA</span>
+  <div class="d-flex gap-1 ms-auto flex-wrap align-items-center">
+    <!-- Draft controls -->
+    <div class="nav-group">
+      <button class="btn btn-sm btn-outline-light" onclick="saveDraft(true)" title="Auto-saves every 60s">💾 Save</button>
+      <button class="btn btn-sm btn-outline-light" onclick="loadDraftFromServer()" title="Load last saved draft">📂 Load</button>
+      <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#versionsModal" title="Restore a previous draft snapshot">🕐 Versions</button>
+      <button class="btn btn-sm btn-outline-light" onclick="exportDraft()" title="Download draft as JSON">⬇ Export</button>
+      <label class="btn btn-sm btn-outline-light mb-0" title="Import draft from JSON file">
+        ⬆ Import<input type="file" id="importFileInput" accept=".json" style="display:none" onchange="importDraft(this)">
+      </label>
+      <button class="btn btn-sm btn-outline-light text-warning" onclick="clearFormConfirm()" title="Clear entire form">🗑 Clear</button>
+    </div>
+    <div class="nav-divider"></div>
+    <!-- PDF controls -->
+    <div class="nav-group">
+      <button class="btn btn-sm btn-outline-info" onclick="previewPDF()" title="Preview PDF in browser">👁 Preview</button>
+      <button class="btn btn-sm btn-outline-warning" data-bs-toggle="modal" data-bs-target="#settingsModal">⚙️ Settings</button>
+      <button class="btn btn-sm fw-bold text-white" style="background:var(--accent);border-color:var(--accent);" onclick="generatePDF()">📄 Generate PDF</button>
+    </div>
+    <div class="nav-divider"></div>
+    <!-- User controls -->
+    <div class="nav-group">
+      <a href="/my_reports" class="btn btn-sm btn-outline-light">📑 My Reports</a>
+      <a href="/letters"    class="btn btn-sm btn-outline-light">📝 Letters</a>
+      <a href="/field"      class="btn btn-sm btn-outline-light" title="Supervisor field input">🏗 Field</a>
+      <button class="btn btn-sm btn-outline-light" onclick="toggleAIChat()" title="AI Report Assistant">🤖 AI</button>
+      {% if is_admin %}
+      <button class="btn btn-sm btn-outline-warning position-relative" id="reviewNavBtn" onclick="openReview()" title="Review supervisor submissions" style="display:none">
+        📋 Review<span class="badge bg-danger ms-1 py-0 px-1" id="reviewBadge" style="font-size:.65rem">0</span>
+      </button>
+      <a href="/admin" class="btn btn-sm btn-outline-light">🛡 Admin</a>
+      {% endif %}
+      <span id="autosave-indicator" class="text-white opacity-50" style="font-size:.72rem;padding:0 .25rem;" title="Last auto-saved time"></span>
+      <span class="text-white opacity-75" style="font-size:.78rem;padding:0 .25rem;">{{ username }}</span>
+      <a href="/logout" class="btn btn-sm btn-outline-danger">Logout</a>
+    </div>
+  </div>
+</nav>
+
+<div class="container-fluid py-3" style="max-width:1140px;">
+
+<!-- ── S1: Report Information ── -->
+<div class="card mb-3 border-0 shadow-sm">
+  <div class="card-header section-hdr">📋 1 · Report Information</div>
+  <div class="card-body">
+    <div class="row g-2">
+      <div class="col-6 col-md-3">
+        <div class="fld-lbl">Date</div>
+        <input type="date" id="f_date" class="form-control form-control-sm">
+      </div>
+      <div class="col-6 col-md-2">
+        <div class="fld-lbl">Working Day No. <span id="day-auto-hint" class="text-muted" style="font-size:.7rem;"></span></div>
+        <input type="number" id="f_day_no" class="form-control form-control-sm" placeholder="e.g. 47" min="1">
+      </div>
+      <div class="col-12 col-md-4">
+        <div class="fld-lbl">Project No.</div>
+        <input type="text" id="f_project_no" class="form-control form-control-sm">
+      </div>
+      <div class="col-12 col-md-3">
+        <div class="fld-lbl">Location</div>
+        <input type="text" id="f_location" class="form-control form-control-sm">
+      </div>
+      <div class="col-12 col-md-5">
+        <div class="fld-lbl">Customer</div>
+        <input type="text" id="f_customer" class="form-control form-control-sm">
+      </div>
+      <div class="col-12 col-md-4">
+        <div class="fld-lbl">Equipment / Scope</div>
+        <input type="text" id="f_equipment" class="form-control form-control-sm" placeholder="-">
+      </div>
+      <div class="col-12 col-md-8">
+        <div class="fld-lbl">Project Title / Type <span class="text-muted" style="font-size:.68rem;">(PDF header subtitle)</span></div>
+        <input type="text" id="f_project_title" class="form-control form-control-sm" placeholder="e.g. Electrical Installation &amp; Construction  /  Turbine Installation">
+      </div>
+      <div class="col-12 col-md-3">
+        <div class="fld-lbl">Prepared By</div>
+        <input type="text" id="f_prepared_by" class="form-control form-control-sm">
+      </div>
+      <div class="col-12 col-md-4">
+        <div class="fld-lbl">Checked By</div>
+        <input type="text" id="f_checked_by" class="form-control form-control-sm">
+      </div>
+      <div class="col-12 col-md-5">
+        <div class="fld-lbl">Approved By</div>
+        <input type="text" id="f_approved_by" class="form-control form-control-sm">
+      </div>
+      <div class="col-12">
+        <div class="fld-lbl">Global Remarks</div>
+        <textarea id="f_global_remarks" class="form-control form-control-sm" rows="2" placeholder="Overall remarks for today…"></textarea>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── S2: Weather ── -->
+<div class="card mb-3 border-0 shadow-sm">
+  <div class="card-header section-hdr">🌤️ 2 · Weather Report</div>
+  <div class="card-body">
+    <div class="row g-2">
+      <div class="col-6 col-md-2">
+        <div class="fld-lbl">Morning</div>
+        <select id="wx_morning" class="form-select form-select-sm">
+          <option>Sunny</option><option>Partly Cloudy</option><option>Cloudy</option><option>Rainy</option><option>Heavy Rain</option>
+        </select>
+      </div>
+      <div class="col-6 col-md-2">
+        <div class="fld-lbl">Afternoon</div>
+        <select id="wx_afternoon" class="form-select form-select-sm">
+          <option>Sunny</option><option>Partly Cloudy</option><option>Cloudy</option><option>Rainy</option><option>Heavy Rain</option>
+        </select>
+      </div>
+      <div class="col-6 col-md-2">
+        <div class="fld-lbl">Evening</div>
+        <select id="wx_evening" class="form-select form-select-sm">
+          <option>Sunny</option><option>Partly Cloudy</option><option>Cloudy</option><option>Rainy</option><option>Heavy Rain</option>
+        </select>
+      </div>
+      <div class="col-6 col-md-2">
+        <div class="fld-lbl">Wind</div>
+        <select id="wx_wind" class="form-select form-select-sm">
+          <option>Calm</option><option>Light Breeze</option><option>Moderate</option><option>Strong</option>
+        </select>
+      </div>
+      <div class="col-6 col-md-2">
+        <div class="fld-lbl">Temp (°C)</div>
+        <input type="text" id="wx_temp" class="form-control form-control-sm" placeholder="28–34">
+      </div>
+      <div class="col-6 col-md-2">
+        <div class="fld-lbl">Impact on Work</div>
+        <select id="wx_impact" class="form-select form-select-sm">
+          <option>None</option><option>Minor delay</option><option>Work stopped</option>
+        </select>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── S3: Indirect Manpower (Global) ── -->
+<div class="card mb-3 border-0 shadow-sm">
+  <div class="card-header section-hdr d-flex justify-content-between align-items-center">
+    <span>👔 3 · Indirect Manpower <span class="badge bg-secondary ms-1" style="font-size:.68rem;">Global</span></span>
+    <div class="d-flex gap-2">
+      <button class="btn btn-sm btn-outline-light" style="font-size:.72rem;" onclick="loadYesterdayCrew()" title="Copy entire crew from last saved draft">🔄 Yesterday's Crew</button>
+      <button class="btn btn-sm btn-outline-light" onclick="addIndirectRow()">+ Add Person</button>
+    </div>
+  </div>
+  <div class="card-body p-2">
+    <div class="row g-1 mb-1 px-1" style="font-size:.7rem;color:#888;">
+      <div class="col-4">Name</div>
+      <div class="col-4">Role / Position</div>
+      <div class="col-3">Working Hours</div>
+      <div class="col-1"></div>
+    </div>
+    <div id="indirectContainer"></div>
+  </div>
+</div>
+
+<!-- ── S4: Areas ── -->
+<div class="card mb-3 border-0 shadow-sm">
+  <div class="card-header section-hdr d-flex justify-content-between align-items-center">
+    <span>📍 4 · Daily Activities &amp; Manpower by Area</span>
+    <button class="btn btn-sm btn-outline-light" onclick="addAreaBlock()">+ Add Area</button>
+  </div>
+  <div class="card-body p-2">
+    <div id="areasContainer"></div>
+    <div id="noAreaHint" class="text-center py-4 text-muted" style="font-size:.88rem;">
+      Click <strong>+ Add Area</strong> above to begin
+    </div>
+  </div>
+</div>
+
+<!-- ── S5: Sign-Off Builder ── -->
+<div class="card mb-3 border-0 shadow-sm">
+  <div class="card-header section-hdr d-flex justify-content-between align-items-center">
+    <span>✍️ 5 · Sign-Off Columns</span>
+    <button class="btn btn-sm btn-outline-light" onclick="addSignOffCol()">+ Add Column</button>
+  </div>
+  <div class="card-body p-2">
+    <p class="text-muted mb-2" style="font-size:.76rem;">
+      Each column = one sign-off block in the PDF. Paste or browse signatures. Default 4 columns are pre-filled — edit as needed.
+    </p>
+    <div class="row g-2" id="signOffContainer">
+      <!-- columns injected by JS -->
+    </div>
+  </div>
+</div>
+
+<!-- Action buttons -->
+<div class="d-flex gap-3 justify-content-end mb-5 flex-wrap">
+  <button class="btn btn-outline-secondary px-4" onclick="saveDraft(true)">💾 Save Draft</button>
+  <button class="btn btn-outline-info px-4" onclick="previewPDF()">👁 Preview PDF</button>
+  <button class="btn fw-bold text-white px-5 py-2" style="background:var(--accent);border-color:var(--accent);font-size:1rem;" onclick="generatePDF()">📄 Generate PDF</button>
+</div>
+
+</div><!-- /container -->
+
+<!-- ── Live Headcount Floating Card ── -->
+<div id="headcountCard" style="position:fixed;bottom:18px;left:14px;z-index:800;background:var(--primary);color:#fff;border-radius:10px;padding:8px 14px;font-size:.75rem;box-shadow:0 3px 12px rgba(0,0,0,.35);min-width:130px;opacity:.93;">
+  <div style="font-size:.65rem;opacity:.7;margin-bottom:3px;letter-spacing:.05em;">HEADCOUNT</div>
+  <div>Indirect: <strong id="hc-indirect">0</strong></div>
+  <div>Direct: <strong id="hc-direct">0</strong></div>
+  <div style="border-top:1px solid rgba(255,255,255,.3);margin-top:4px;padding-top:4px;font-size:.82rem;">Total: <strong id="hc-total">0</strong></div>
+</div>
+
+<!-- AI Chat Panel -->
+<div id="aiChatPanel">
+  <div class="chat-hdr">
+    <h6>🤖 AI Report Assistant</h6>
+    <div class="d-flex gap-2 align-items-center">
+      <button class="btn btn-sm btn-outline-light py-0 px-2" style="font-size:.7rem;" onclick="clearAIChat()" title="New conversation">🗑</button>
+      <button class="btn btn-sm btn-outline-light py-0 px-2" style="font-size:.7rem;" onclick="toggleAIChat()">✕</button>
+    </div>
+  </div>
+  <div id="aiChatMessages">
+    <div class="chat-msg system">Describe today's work naturally — I'll fill the form for you.</div>
+  </div>
+  <div id="aiChatInput">
+    <textarea id="aiMsgBox" rows="2" placeholder="e.g. Hari ini kerja di MA-14, pasang cable tray..."></textarea>
+    <button id="aiSendBtn" onclick="sendAIMessage()">Send</button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════
+     PDF PREVIEW MODAL
+═══════════════════════════════════════════════════════════ -->
+<div class="modal fade" id="previewModal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable" style="max-width:860px;">
+    <div class="modal-content">
+      <div class="modal-header py-2" style="background:var(--primary);">
+        <h5 class="modal-title text-white fs-6">👁 PDF Preview</h5>
+        <div class="d-flex gap-2 ms-2">
+          <button class="btn btn-sm btn-outline-light" onclick="generatePDF()">⬇ Download PDF</button>
+          <button class="btn btn-sm btn-outline-success" id="waShareBtn" onclick="shareReportWA()" style="display:none" title="Share to WhatsApp">📤 WhatsApp</button>
+        </div>
+        <button type="button" class="btn-close btn-close-white ms-auto" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-0" style="background:#555;">
+        <div id="previewLoading" class="text-center py-5 text-white">
+          <div class="spinner-border mb-2"></div><br>Generating preview…
+        </div>
+        <iframe id="previewFrame" style="width:100%;height:75vh;border:none;display:none;"></iframe>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════
+     VERSIONS (DRAFT SNAPSHOT) MODAL
+═══════════════════════════════════════════════════════════ -->
+<div class="modal fade" id="versionsModal" tabindex="-1">
+  <div class="modal-dialog modal-md modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2" style="background:var(--primary);">
+        <h5 class="modal-title text-white fs-6">🕐 Draft Snapshot History</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-3">
+        <p class="text-muted" style="font-size:.8rem;">Auto-snapshots are saved every 90 s (up to 20 kept). Click <strong>Restore</strong> to reload a version.</p>
+        <div id="versionsList">
+          <div class="text-center text-muted py-4" style="font-size:.85rem;">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════
+     REVIEW SUBMISSIONS MODAL
+═══════════════════════════════════════════════════════════ -->
+<div class="modal fade" id="reviewModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2" style="background:var(--primary);">
+        <h5 class="modal-title text-white fs-6">📋 Supervisor Field Submissions</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-3">
+        <div class="d-flex gap-2 align-items-center mb-3">
+          <label class="fw-semibold" style="font-size:.85rem;white-space:nowrap">Date:</label>
+          <input type="date" id="reviewDate" class="form-control form-control-sm" style="max-width:180px" oninput="loadReview()">
+          <button class="btn btn-sm btn-outline-secondary" onclick="loadReview()">🔄 Refresh</button>
+        </div>
+        <div id="reviewList">
+          <div class="text-center text-muted py-4" style="font-size:.85rem;">Select a date to load submissions.</div>
+        </div>
+      </div>
+      <div class="modal-footer py-2">
+        <button class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+        <button class="btn btn-primary btn-sm" onclick="mergeSelected()" id="mergeSelectedBtn" disabled>Merge Selected</button>
+        <button class="btn btn-success btn-sm" onclick="mergeAll()" id="mergeAllBtn" disabled>✅ Merge All into Draft</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════
+     SETTINGS MODAL
+═══════════════════════════════════════════════════════════ -->
+<div class="modal fade" id="settingsModal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2" style="background:var(--primary);">
+        <h5 class="modal-title text-white fs-6">⚙️ Settings &amp; Configuration</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-0 d-flex" style="min-height:400px;">
+        <!-- Left nav -->
+        <div class="p-3 border-end bg-light stg-nav" style="min-width:140px;">
+          <div class="nav flex-column nav-pills gap-1" id="stgNav">
+            <button class="nav-link active" data-tab="general">📋 General</button>
+            <button class="nav-link" data-tab="appearance">🎨 Appearance</button>
+            <button class="nav-link" data-tab="manpower">👥 Manpower</button>
+            <button class="nav-link" data-tab="areas">📍 Areas</button>
+            <button class="nav-link" data-tab="ai">🤖 AI Assistant</button>
+          </div>
+        </div>
+        <!-- Content -->
+        <div class="flex-grow-1 p-3 stg-content">
+
+          <!-- General -->
+          <div class="stg-tab" id="tab-general">
+            <h6 class="mb-3 text-primary">General Settings</h6>
+            <div class="row g-2">
+              <div class="col-md-6"><div class="fld-lbl">Company Name (PDF header)</div>
+                <input type="text" id="cfg_company" class="form-control form-control-sm"></div>
+              <div class="col-md-6"><div class="fld-lbl">Customer</div>
+                <input type="text" id="cfg_customer" class="form-control form-control-sm"></div>
+              <div class="col-md-12"><div class="fld-lbl">Default Project Title / Type <span class="text-muted" style="font-size:.68rem;">(pre-fills Report Info field)</span></div>
+                <input type="text" id="cfg_project_title" class="form-control form-control-sm" placeholder="e.g. Electrical Installation &amp; Construction"></div>
+              <div class="col-md-6"><div class="fld-lbl">Default Project No.</div>
+                <input type="text" id="cfg_project_no" class="form-control form-control-sm"></div>
+              <div class="col-md-6"><div class="fld-lbl">Default Location</div>
+                <input type="text" id="cfg_location" class="form-control form-control-sm"></div>
+              <div class="col-md-4"><div class="fld-lbl">Prepared By (default)</div>
+                <input type="text" id="cfg_prepared" class="form-control form-control-sm"></div>
+              <div class="col-md-4"><div class="fld-lbl">Checked By (default)</div>
+                <input type="text" id="cfg_checked" class="form-control form-control-sm"></div>
+              <div class="col-md-4"><div class="fld-lbl">Approved By (default)</div>
+                <input type="text" id="cfg_approved" class="form-control form-control-sm"></div>
+            </div>
+            <hr class="my-3"/>
+            <h6 class="mb-2 text-primary">Letter / Surat Settings</h6>
+            <div class="row g-2">
+              <div class="col-md-6"><div class="fld-lbl">Project Start Date <span class="text-muted" style="font-size:.68rem;">(for auto day number)</span></div>
+                <input type="date" id="cfg_start_date" class="form-control form-control-sm"></div>
+              <div class="col-md-6"><div class="fld-lbl">Site / Location Name <span class="text-muted" style="font-size:.68rem;">(letter header)</span></div>
+                <input type="text" id="cfg_site_name" class="form-control form-control-sm" placeholder="Mangkajang"></div>
+              <div class="col-md-5"><div class="fld-lbl">Project Manager (Letters)</div>
+                <input type="text" id="cfg_pm_name" class="form-control form-control-sm" placeholder="Asril Naimy"></div>
+              <div class="col-md-4"><div class="fld-lbl">PM Title</div>
+                <input type="text" id="cfg_pm_title" class="form-control form-control-sm" placeholder="Project Manager"></div>
+              <div class="col-md-3"><div class="fld-lbl">Default Attn. (Up:)</div>
+                <input type="text" id="cfg_kn_attn" class="form-control form-control-sm" placeholder=""></div>
+            </div>
+          </div>
+
+          <!-- Appearance -->
+          <div class="stg-tab d-none" id="tab-appearance">
+            <h6 class="mb-3 text-primary">Theme Colors</h6>
+            <div class="row g-3 mb-4" id="colorPickerArea"></div>
+            <h6 class="mb-2 text-primary">Logos</h6>
+            <div class="row g-3">
+              <!-- GPA Logo -->
+              <div class="col-md-6">
+                <div class="border rounded p-3">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <strong style="font-size:.85rem;">GPA Logo (left)</strong>
+                    <div class="d-flex gap-2 align-items-center">
+                      <span id="gpaStatus" class="logo-bad">Not uploaded</span>
+                      <div class="form-check form-switch mb-0 ms-2">
+                        <input class="form-check-input" type="checkbox" id="gpaShow" checked title="Show / hide in PDF">
+                        <label class="form-check-label" for="gpaShow" style="font-size:.75rem;">Show</label>
+                      </div>
+                    </div>
+                  </div>
+                  <div id="gpaPreview" class="mb-2"></div>
+                  <div class="row g-1 mb-2" style="font-size:.78rem;">
+                    <div class="col-4"><div class="fld-lbl">Width (mm)</div>
+                      <input type="number" id="gpaW" class="form-control form-control-sm" value="28" min="10" max="60" step="1"></div>
+                    <div class="col-4"><div class="fld-lbl">Height (mm)</div>
+                      <input type="number" id="gpaH" class="form-control form-control-sm" value="12" min="6"  max="40" step="1"></div>
+                    <div class="col-4"><div class="fld-lbl">Y offset (mm) ↕</div>
+                      <input type="number" id="gpaY" class="form-control form-control-sm" value="0"  min="-20" max="20" step="1" title="Positive = up"></div>
+                  </div>
+                  <div class="d-flex gap-2">
+                    <label class="btn btn-sm btn-outline-primary flex-grow-1 mb-0">
+                      📁 Browse…<input type="file" id="gpaFile" accept="image/*" style="display:none" onchange="uploadLogo('gpa',this)">
+                    </label>
+                    <button class="btn btn-sm btn-outline-danger" onclick="removeLogo('gpa')" title="Remove">🗑️</button>
+                  </div>
+                </div>
+              </div>
+              <!-- KN Logo -->
+              <div class="col-md-6">
+                <div class="border rounded p-3">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <strong style="font-size:.85rem;">KN Logo (right)</strong>
+                    <div class="d-flex gap-2 align-items-center">
+                      <span id="knStatus" class="logo-bad">Not uploaded</span>
+                      <div class="form-check form-switch mb-0 ms-2">
+                        <input class="form-check-input" type="checkbox" id="knShow" checked title="Show / hide in PDF">
+                        <label class="form-check-label" for="knShow" style="font-size:.75rem;">Show</label>
+                      </div>
+                    </div>
+                  </div>
+                  <div id="knPreview" class="mb-2"></div>
+                  <div class="row g-1 mb-2" style="font-size:.78rem;">
+                    <div class="col-4"><div class="fld-lbl">Width (mm)</div>
+                      <input type="number" id="knW" class="form-control form-control-sm" value="28" min="10" max="60" step="1"></div>
+                    <div class="col-4"><div class="fld-lbl">Height (mm)</div>
+                      <input type="number" id="knH" class="form-control form-control-sm" value="12" min="6"  max="40" step="1"></div>
+                    <div class="col-4"><div class="fld-lbl">Y offset (mm) ↕</div>
+                      <input type="number" id="knY" class="form-control form-control-sm" value="0"  min="-20" max="20" step="1"></div>
+                  </div>
+                  <div class="d-flex gap-2">
+                    <label class="btn btn-sm btn-outline-primary flex-grow-1 mb-0">
+                      📁 Browse…<input type="file" id="knFile" accept="image/*" style="display:none" onchange="uploadLogo('kn',this)">
+                    </label>
+                    <button class="btn btn-sm btn-outline-danger" onclick="removeLogo('kn')" title="Remove">🗑️</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p class="text-muted mt-2 mb-0" style="font-size:.75rem;">Y offset: positive = up, negative = down within the header band.</p>
+          </div>
+
+          <!-- Manpower -->
+          <div class="stg-tab d-none" id="tab-manpower">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <h6 class="mb-0 text-primary">Manpower List</h6>
+              <button class="btn btn-sm btn-primary" onclick="addMpEntry()">+ Add</button>
+            </div>
+            <div style="max-height:420px;overflow-y:auto;">
+              <table class="table table-sm table-bordered mb-0" style="font-size:.8rem;">
+                <thead style="position:sticky;top:0;background:var(--light-bg);">
+                  <tr><th>Name</th><th>Role / Position</th><th>Type</th><th style="width:36px;"></th></tr>
+                </thead>
+                <tbody id="mpTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Areas -->
+          <div class="stg-tab d-none" id="tab-areas">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <h6 class="mb-0 text-primary">Area List</h6>
+              <button class="btn btn-sm btn-primary" onclick="addAreaEntry()">+ Add</button>
+            </div>
+            <div id="areaSettingsList" style="max-height:420px;overflow-y:auto;"></div>
+            <p class="text-muted mt-2 mb-0" style="font-size:.75rem;">Changes take effect next time you add an area.</p>
+          </div>
+
+          <!-- AI Assistant -->
+          <div class="stg-tab d-none" id="tab-ai">
+            <h6 class="mb-3 text-primary">AI Report Assistant</h6>
+            <p style="font-size:.82rem;color:#555;">The AI assistant uses Claude (Anthropic) to parse natural language descriptions of your day into structured report data. You need an API key from <a href="https://console.anthropic.com/" target="_blank">console.anthropic.com</a>.</p>
+            <div class="mb-3">
+              <div class="fld-lbl">Anthropic API Key</div>
+              <input type="password" id="cfg_ai_key" class="form-control form-control-sm" placeholder="sk-ant-...">
+              <div class="text-muted mt-1" style="font-size:.7rem;">Your key is stored in the app config on the server. Cost: ~$0.003 per report conversation.</div>
+            </div>
+            <div class="mb-2">
+              <div class="fld-lbl">How to use</div>
+              <ol style="font-size:.78rem;color:#555;padding-left:18px;">
+                <li>Click the <strong>🤖 AI</strong> button in the navbar to open the chat panel</li>
+                <li>Describe your day's work naturally (Indonesian or English)</li>
+                <li>The AI will extract data and auto-fill the form fields</li>
+                <li>Review the filled form, make any corrections, then Generate PDF</li>
+              </ol>
+            </div>
+          </div>
+
+        </div><!-- /stg-content -->
+      </div>
+      <div class="modal-footer py-2">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="saveSettings()">💾 Save Settings</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// ════════════════════════════════════════════════════════════
+// DATA FROM FLASK
+// ════════════════════════════════════════════════════════════
+const MANPOWER_DB   = {{ manpower_db|safe }};
+const AREA_LIST_DEF = {{ area_list|safe }};
+const HOURS_OPTS    = {{ hours_options|safe }};
+let   APP_CONFIG    = {{ app_config|safe }};
+const INITIAL_DATA  = {{ initial_data|safe }};
+
+let localMpDB  = MANPOWER_DB.map(p => ({...p}));
+let localAreas = [...AREA_LIST_DEF];
+
+const COLOR_DEFS = [
+  { id:'clr_primary',   key:'primary',   label:'Primary (headers, section bars)' },
+  { id:'clr_secondary', key:'secondary',  label:'Secondary (weather table header)' },
+  { id:'clr_accent',    key:'accent',     label:'Accent (gold bar & Generate button)' },
+  { id:'clr_area',      key:'area_hdr',   label:'Area Header Color' },
+  { id:'clr_light',     key:'light_bg',   label:'Light Background (table alternates)' },
+  { id:'clr_navbar',    key:'navbar_bg',  label:'Navbar / App Bar Color' },
+];
+
+// ════════════════════════════════════════════════════════════
+// THEME HELPERS
+// ════════════════════════════════════════════════════════════
+function applyTheme(t) {
+  const r = document.documentElement.style;
+  if (t.primary)   r.setProperty('--primary',    t.primary);
+  if (t.secondary) r.setProperty('--secondary',  t.secondary);
+  if (t.accent)    r.setProperty('--accent',      t.accent);
+  if (t.area_hdr)  r.setProperty('--area-hdr',   t.area_hdr);
+  if (t.light_bg)  r.setProperty('--light-bg',   t.light_bg);
+  if (t.navbar_bg) r.setProperty('--navbar-bg',  t.navbar_bg);
+}
+
+// ════════════════════════════════════════════════════════════
+// SMALL UTILITIES
+// ════════════════════════════════════════════════════════════
+function hoursOpts(selected) {
+  return HOURS_OPTS.map(h =>
+    `<option${h === selected ? ' selected' : ''}>${h}</option>`
+  ).join('');
+}
+
+function areaOpts(selected) {
+  return localAreas.map(a =>
+    `<option value="${esc(a)}"${a===selected?' selected':''}>${a}</option>`
+  ).join('') + `<option value="__custom__"${!localAreas.includes(selected)&&selected?' selected':''}>Custom…</option>`;
+}
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+
+function lookupMp(name) {
+  return localMpDB.find(p => p.name.trim().toLowerCase() === name.trim().toLowerCase());
+}
+
+let _aidx = 0;
+let _soidx = 0;
+
+// ════════════════════════════════════════════════════════════
+// AUTOCOMPLETE
+// ════════════════════════════════════════════════════════════
+function attachAC(nameEl, roleEl) {
+  const wrap = nameEl.closest('.ac-wrap');
+  let dd = wrap.querySelector('.ac-drop');
+  if (!dd) { dd = document.createElement('div'); dd.className = 'ac-drop'; wrap.appendChild(dd); }
+
+  function populate(q) {
+    if (!q) { dd.classList.remove('open'); return; }
+    const hits = localMpDB.filter(p => p.name.toLowerCase().includes(q.toLowerCase())).slice(0,14);
+    if (!hits.length) { dd.classList.remove('open'); return; }
+    dd.innerHTML = hits.map(p =>
+      `<div class="ac-opt" data-name="${esc(p.name)}" data-role="${esc(p.role)}">${esc(p.name)}<br><small>${esc(p.role)}</small></div>`
+    ).join('');
+    dd.querySelectorAll('.ac-opt').forEach(opt => opt.addEventListener('mousedown', e => {
+      e.preventDefault();
+      nameEl.value = opt.dataset.name;
+      if (roleEl && !roleEl.dataset.manual) roleEl.value = opt.dataset.role;
+      dd.classList.remove('open');
+    }));
+    dd.classList.add('open');
+  }
+
+  nameEl.addEventListener('input', () => populate(nameEl.value));
+  nameEl.addEventListener('blur',  () => setTimeout(() => dd.classList.remove('open'), 160));
+  nameEl.addEventListener('keydown', e => {
+    if (e.key === 'Escape') dd.classList.remove('open');
+    if (e.key === 'ArrowDown') {
+      const opts = [...dd.querySelectorAll('.ac-opt')];
+      const cur  = dd.querySelector('.hi');
+      const next = cur ? (opts.indexOf(cur) + 1) % opts.length : 0;
+      if (cur) cur.classList.remove('hi');
+      opts[next] && opts[next].classList.add('hi');
+      e.preventDefault();
+    }
+    if (e.key === 'Enter') {
+      const hi = dd.querySelector('.hi');
+      if (hi) { hi.dispatchEvent(new MouseEvent('mousedown')); e.preventDefault(); }
+    }
+  });
+
+  if (roleEl) roleEl.addEventListener('input', () => { roleEl.dataset.manual = '1'; });
+}
+
+// ════════════════════════════════════════════════════════════
+// INDIRECT MANPOWER (Global)
+// ════════════════════════════════════════════════════════════
+function addIndirectRow(d={}) {
+  const c = document.getElementById('indirectContainer');
+  const row = document.createElement('div');
+  row.className = 'row g-1 mb-1 align-items-center indirect-row';
+  row.innerHTML = `
+    <div class="col-4 ac-wrap">
+      <input type="text" class="form-control form-control-sm mp-name" placeholder="Name…" value="${esc(d.name||'')}">
+      <div class="ac-drop"></div>
+    </div>
+    <div class="col-4">
+      <input type="text" class="form-control form-control-sm mp-role" placeholder="Role / Position" value="${esc(d.role||'')}">
+    </div>
+    <div class="col-3">
+      <select class="form-select form-select-sm mp-hours">${hoursOpts(d.hours)}</select>
+    </div>
+    <div class="col-1 text-end">
+      <button class="btn btn-sm btn-outline-danger px-1 py-0" onclick="this.closest('.indirect-row').remove();updateHeadcount()">✕</button>
+    </div>`;
+  c.appendChild(row);
+  attachAC(row.querySelector('.mp-name'), row.querySelector('.mp-role'));
+  updateHeadcount();
+}
+
+// ════════════════════════════════════════════════════════════
+// AREA BLOCKS
+// ════════════════════════════════════════════════════════════
+function addAreaBlock(data={}) {
+  const c   = document.getElementById('areasContainer');
+  const idx = ++_aidx;
+  const aid = data.id || '';
+  const block = document.createElement('div');
+  block.className = 'card mb-3 area-card border-0 shadow-sm';
+  block.dataset.ai = idx;
+  block.innerHTML = `
+    <div class="area-top d-flex align-items-center gap-2 flex-wrap">
+      <span class="fw-bold" style="font-size:.83rem;">📍 Area:</span>
+      <select class="form-select form-select-sm area-sel" style="max-width:165px;" onchange="handleAreaSel(this)">${areaOpts(aid)}</select>
+      <input type="text" class="form-control form-control-sm area-custom d-none" placeholder="Custom area ID…" style="max-width:160px;" value="${!localAreas.includes(aid)&&aid?esc(aid):''}">
+      <div class="d-flex gap-1 ms-auto">
+        <button class="btn btn-sm btn-outline-light" style="font-size:.7rem;" onclick="saveAreaTemplate(this)" title="Save this area as a reusable template">💾 Save Template</button>
+        <button class="btn btn-sm btn-outline-light" style="font-size:.7rem;" onclick="loadAreaTemplate(this)" title="Load a saved area template into this block">📋 Template</button>
+        <button class="btn btn-sm btn-outline-light" onclick="this.closest('[data-ai]').remove();updateHint();updateHeadcount()">✕ Remove</button>
+      </div>
+    </div>
+    <div class="card-body p-2">
+      <!-- Activities -->
+      <div class="row g-2 mb-2">
+        <div class="col-md-6">
+          <div class="fld-lbl mb-1 fw-bold">Activity Today</div>
+          <div class="acts-today"></div>
+          <button class="btn btn-sm btn-outline-secondary mt-1" onclick="addAct(this,'today')">+ Activity</button>
+        </div>
+        <div class="col-md-6">
+          <div class="fld-lbl mb-1 fw-bold">Activity Tomorrow</div>
+          <div class="acts-tmr"></div>
+          <button class="btn btn-sm btn-outline-secondary mt-1" onclick="addAct(this,'tomorrow')">+ Activity</button>
+        </div>
+      </div>
+      <!-- Direct Manpower -->
+      <div class="d-flex justify-content-between align-items-center mb-1">
+        <span class="fld-lbl mb-0 fw-bold">Direct Manpower</span>
+        <button class="btn btn-sm btn-outline-primary add-dm-btn" onclick="addDM(this)">+ Add Person</button>
+      </div>
+      <div class="row g-1 mb-1 px-1" style="font-size:.7rem;color:#888;">
+        <div class="col-3">Name</div><div class="col-2">Position</div>
+        <div class="col-4">Task Today</div><div class="col-2">Hours</div><div class="col-1"></div>
+      </div>
+      <div class="dm-container"></div>
+      <!-- Area Indirect Manpower (collapsible) -->
+      <div class="area-ind-panel">
+        <div class="d-flex justify-content-between align-items-center">
+          <span class="fld-lbl mb-0 fw-bold" style="color:#555;">👔 Indirect Manpower (this area)</span>
+          <div class="form-check form-switch mb-0">
+            <input class="form-check-input area-ind-toggle" type="checkbox" id="ind_tog_${idx}"
+                   onchange="this.closest('[data-ai]').querySelector('.area-ind-body').style.display=this.checked?'':'none'">
+            <label class="form-check-label" for="ind_tog_${idx}" style="font-size:.72rem;">Show</label>
+          </div>
+        </div>
+        <div class="area-ind-body" style="display:none;margin-top:6px;">
+          <div class="row g-1 mb-1 px-1" style="font-size:.7rem;color:#888;">
+            <div class="col-4">Name</div><div class="col-4">Role / Position</div><div class="col-3">Hours</div><div class="col-1"></div>
+          </div>
+          <div class="area-ind-container"></div>
+          <button class="btn btn-sm btn-outline-secondary mt-1" onclick="addAreaIndRow(this)">+ Add Person</button>
+        </div>
+      </div>
+      <!-- Constraints / Remarks -->
+      <div class="row g-2 mt-1">
+        <div class="col-md-6">
+          <div class="fld-lbl">Constraints / Issues</div>
+          <textarea class="form-control form-control-sm area-const" rows="2" placeholder="Any constraints…"></textarea>
+        </div>
+        <div class="col-md-6">
+          <div class="fld-lbl">Remarks</div>
+          <textarea class="form-control form-control-sm area-rem" rows="2" placeholder="Any remarks…"></textarea>
+        </div>
+      </div>
+      <!-- Photos -->
+      <div class="mt-2">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <span class="fld-lbl mb-0 fw-bold">📷 Photo Documentation</span>
+          <button class="btn btn-sm btn-outline-secondary add-ph-btn" onclick="addPhoto(this)">+ Add Photo</button>
+        </div>
+        <div class="photos-row row g-2"></div>
+      </div>
+    </div>`;
+  c.appendChild(block);
+
+  const sel = block.querySelector('.area-sel');
+  const customInput = block.querySelector('.area-custom');
+  if (!localAreas.includes(aid) && aid) {
+    sel.value = '__custom__';
+    customInput.classList.remove('d-none');
+  }
+
+  if (data.activities_today)    data.activities_today.forEach(t => addAct(block.querySelector('[onclick*="today"]'), 'today', t));
+  if (data.activities_tomorrow) data.activities_tomorrow.forEach(t => addAct(block.querySelector('[onclick*="tomorrow"]'), 'tomorrow', t));
+  if (data.manpower)            data.manpower.forEach(p => addDM(block.querySelector('.add-dm-btn'), p));
+  if (data.constraints)         block.querySelector('.area-const').value = data.constraints;
+  if (data.remarks)             block.querySelector('.area-rem').value   = data.remarks;
+  if (data.photos)              data.photos.forEach(ph => addPhoto(block.querySelector('.add-ph-btn'), ph));
+
+  // Per-area indirect manpower
+  if (data.indirect_manpower && data.indirect_manpower.length) {
+    const tog = block.querySelector('.area-ind-toggle');
+    const body = block.querySelector('.area-ind-body');
+    tog.checked = true;
+    body.style.display = '';
+    data.indirect_manpower.forEach(p => addAreaIndRow(block.querySelector('[onclick="addAreaIndRow(this)"]'), p));
+  }
+
+  updateHint();
+}
+
+function handleAreaSel(sel) {
+  const custom = sel.closest('.area-top').querySelector('.area-custom');
+  if (sel.value === '__custom__') {
+    custom.classList.remove('d-none'); custom.focus();
+  } else {
+    custom.classList.add('d-none'); custom.value = '';
+  }
+}
+
+function updateHint() {
+  const hint = document.getElementById('noAreaHint');
+  const c    = document.getElementById('areasContainer');
+  if (hint) hint.style.display = c.children.length ? 'none' : '';
+}
+
+// Per-area indirect manpower row
+function addAreaIndRow(btn, d={}) {
+  const block = btn.closest('[data-ai]');
+  const cont  = block.querySelector('.area-ind-container');
+  const row   = document.createElement('div');
+  row.className = 'row g-1 mb-1 align-items-center area-ind-row';
+  row.innerHTML = `
+    <div class="col-4 ac-wrap">
+      <input type="text" class="form-control form-control-sm mp-name" placeholder="Name…" value="${esc(d.name||'')}">
+      <div class="ac-drop"></div>
+    </div>
+    <div class="col-4">
+      <input type="text" class="form-control form-control-sm mp-role" placeholder="Role / Position" value="${esc(d.role||'')}">
+    </div>
+    <div class="col-3">
+      <select class="form-select form-select-sm mp-hours">${hoursOpts(d.hours)}</select>
+    </div>
+    <div class="col-1 text-end">
+      <button class="btn btn-sm btn-outline-danger px-1 py-0" onclick="this.closest('.area-ind-row').remove();updateHeadcount()">✕</button>
+    </div>`;
+  cont.appendChild(row);
+  attachAC(row.querySelector('.mp-name'), row.querySelector('.mp-role'));
+  updateHeadcount();
+}
+
+// ════════════════════════════════════════════════════════════
+// ACTIVITIES
+// ════════════════════════════════════════════════════════════
+function addAct(btn, type, text='') {
+  const block = btn.closest('[data-ai]');
+  const cont  = block.querySelector(type==='today' ? '.acts-today' : '.acts-tmr');
+  const item  = document.createElement('div');
+  item.className = 'act-item';
+  item.innerHTML = `
+    <input type="text" class="form-control form-control-sm" placeholder="Describe activity…" value="${esc(text)}">
+    <button class="btn btn-sm btn-outline-danger px-1 py-0" onclick="this.closest('.act-item').remove()">✕</button>`;
+  cont.appendChild(item);
+}
+
+// ════════════════════════════════════════════════════════════
+// DIRECT MANPOWER
+// ════════════════════════════════════════════════════════════
+function addDM(btn, d={}) {
+  const block = btn.closest('[data-ai]');
+  const cont  = block.querySelector('.dm-container');
+  const row   = document.createElement('div');
+  row.className = 'row g-1 mb-1 align-items-center dm-row';
+  row.innerHTML = `
+    <div class="col-3 ac-wrap">
+      <input type="text" class="form-control form-control-sm mp-name" placeholder="Name…" value="${esc(d.name||'')}">
+      <div class="ac-drop"></div>
+    </div>
+    <div class="col-2">
+      <input type="text" class="form-control form-control-sm mp-role" placeholder="Position" value="${esc(d.role||'')}">
+    </div>
+    <div class="col-4">
+      <input type="text" class="form-control form-control-sm mp-task" placeholder="Task today…" value="${esc(d.task||'')}">
+    </div>
+    <div class="col-2">
+      <select class="form-select form-select-sm mp-hours">${hoursOpts(d.hours)}</select>
+    </div>
+    <div class="col-1 text-end">
+      <button class="btn btn-sm btn-outline-danger px-1 py-0" onclick="this.closest('.dm-row').remove();updateHeadcount()">✕</button>
+    </div>`;
+  cont.appendChild(row);
+  attachAC(row.querySelector('.mp-name'), row.querySelector('.mp-role'));
+  updateHeadcount();
+}
+
+// ════════════════════════════════════════════════════════════
+// PHOTOS
+// ════════════════════════════════════════════════════════════
+function addPhoto(btn, d={}) {
+  const block = btn.closest('[data-ai]');
+  const cont  = block.querySelector('.photos-row');
+  const col   = document.createElement('div');
+  col.className = 'col-12 col-sm-6 col-md-4';
+  // Support server-stored photos (photo_filename) or legacy base64 (img_data)
+  const hasFilename = !!d.photo_filename;
+  const hasImg = !hasFilename && d.img_data && d.img_data.includes(',');
+  const previewSrc = hasFilename ? `/temp_photo/${d.photo_filename}` : (hasImg ? d.img_data : '');
+  const isFilled = hasFilename || hasImg;
+  col.innerHTML = `
+    <div class="photo-box${isFilled?' filled':''}">
+      <div class="photo-ph"${isFilled?' style="display:none"':''}>📷 No photo<br><span style="font-size:.72rem">Browse or paste below</span></div>
+      <img class="photo-prev${isFilled?' show':''}" src="${previewSrc}" alt="photo">
+      <input type="text" class="form-control form-control-sm photo-desc" placeholder="Description / caption…" value="${esc(d.desc||'')}">
+      <div class="photo-btns">
+        <label class="btn btn-sm btn-outline-secondary" style="font-size:.75rem;flex:1;">
+          📁 Browse / Multi<input type="file" accept="image/*" multiple style="display:none" onchange="handlePhotoFile(this)">
+        </label>
+        <button class="btn btn-sm btn-outline-secondary" style="font-size:.75rem;" onclick="pastePhoto(this)" title="Paste from clipboard">📋 Paste</button>
+        <button class="btn btn-sm btn-outline-danger" style="font-size:.75rem;" onclick="clearPhoto(this)">✕</button>
+      </div>
+      <input type="hidden" class="photo-data" value="">
+      <input type="hidden" class="photo-filename" value="${esc(d.photo_filename||'')}">
+    </div>`;
+  cont.appendChild(col);
+
+  const box = col.querySelector('.photo-box');
+  box.setAttribute('tabindex','0');
+  box.addEventListener('paste', e => {
+    const items = (e.clipboardData||window.clipboardData).items;
+    for (const it of items) {
+      if (it.type.startsWith('image/')) {
+        e.preventDefault();
+        compressImage(it.getAsFile()).then(data => setPhoto(box, data));
+        return;
+      }
+    }
+  });
+
+  // Old-format draft: has base64 img_data but no server filename → re-compress & upload to server now
+  if (hasImg && !hasFilename) {
+    recompressDataUrl(d.img_data).then(compressed => setPhoto(box, compressed));
+  }
+}
+
+async function handlePhotoFile(input) {
+  const files = Array.from(input.files);
+  if (!files.length) return;
+  const box = input.closest('.photo-box');
+
+  // First file goes into current box
+  const first = await compressImage(files[0]);
+  setPhoto(box, first);
+
+  // Additional files: add new photo slots in same area block
+  if (files.length > 1) {
+    const block = box.closest('[data-ai]');
+    const addBtn = block ? block.querySelector('.add-ph-btn') : null;
+    for (let i = 1; i < files.length; i++) {
+      const compressed = await compressImage(files[i]);
+      if (addBtn) addPhoto(addBtn, {img_data: compressed, desc: ''});
+    }
+    toast(`✓ ${files.length} photos added`, 'success');
+  }
+}
+
+async function pastePhoto(btn) {
+  const box = btn.closest('.photo-box');
+  try {
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      for (const type of item.types) {
+        if (type.startsWith('image/')) {
+          const blob = await item.getType(type);
+          const reader = new FileReader();
+          reader.onload = e => setPhoto(box, e.target.result);
+          reader.readAsDataURL(blob); return;
+        }
+      }
+    }
+    box.focus();
+    toast('No image in clipboard — click the box and press Ctrl+V');
+  } catch {
+    box.focus();
+    toast('Click the photo box and press Ctrl+V to paste');
+  }
+}
+
+function recompressDataUrl(dataUrl, maxW=600, quality=0.55) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      let {width, height} = img;
+      if (width > maxW) { height = Math.round(height * maxW / width); width = maxW; }
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = () => resolve(dataUrl); // fallback: use as-is if image fails to load
+    img.src = dataUrl;
+  });
+}
+
+function dataUrlToBlob(dataUrl) {
+  const [header, b64] = dataUrl.split(',', 2);
+  const byteStr = atob(b64);
+  const arr = new Uint8Array(byteStr.length);
+  for (let i = 0; i < byteStr.length; i++) arr[i] = byteStr.charCodeAt(i);
+  const mime = (header.match(/:(.*?);/) || [,'image/jpeg'])[1];
+  return new Blob([arr], {type: mime});
+}
+
+function setPhoto(box, dataUrl) {
+  // Show preview immediately from local data
+  const img = box.querySelector('.photo-prev');
+  img.src = dataUrl; img.classList.add('show');
+  box.querySelector('.photo-ph').style.display = 'none';
+  box.classList.add('filled');
+  box.querySelector('.photo-data').value = dataUrl;   // temporary until server upload done
+  box.querySelector('.photo-filename').value = '';
+
+  // Upload to server as binary (FormData) — avoids base64 33% overhead → stays under nginx limit
+  _pendingUploads++;
+  const blob = dataUrlToBlob(dataUrl);
+  const fd = new FormData();
+  fd.append('photo', blob, 'photo.jpg');
+  fetch('/upload_temp_photo', {method: 'POST', body: fd})
+  .then(r => r.json())
+  .then(j => {
+    if (j.ok && j.photo_filename) {
+      box.querySelector('.photo-filename').value = j.photo_filename;
+      box.querySelector('.photo-data').value = '';   // free memory, server holds the file
+    }
+  })
+  .catch(() => { /* keep base64 in photo-data as fallback */ })
+  .finally(() => { _pendingUploads = Math.max(0, _pendingUploads - 1); });
+}
+
+function clearPhoto(btn) {
+  const box = btn.closest('.photo-box');
+  box.querySelector('.photo-data').value = '';
+  box.querySelector('.photo-filename').value = '';
+  const img = box.querySelector('.photo-prev');
+  img.src = ''; img.classList.remove('show');
+  box.querySelector('.photo-ph').style.display = '';
+  box.classList.remove('filled');
+}
+
+// ════════════════════════════════════════════════════════════
+// SIGN-OFF BUILDER
+// ════════════════════════════════════════════════════════════
+function addSignOffCol(d={}) {
+  const c   = document.getElementById('signOffContainer');
+  const idx = ++_soidx;
+  const col = document.createElement('div');
+  col.className = 'col-6 col-md-3 so-col';
+  col.dataset.si = idx;
+  col.innerHTML = `
+    <div class="so-col-card">
+      <button class="btn btn-sm btn-outline-danger so-remove-btn" onclick="this.closest('.so-col').remove()">✕</button>
+      <div class="fld-lbl mb-1">Column Label</div>
+      <input type="text" class="form-control form-control-sm so-label mb-2" placeholder="e.g. Prepared By" value="${esc(d.label||'')}">
+      <div class="fld-lbl mb-1">Name</div>
+      <input type="text" class="form-control form-control-sm so-name mb-2" placeholder="Full name" value="${esc(d.name||'')}">
+      <div class="fld-lbl mb-1">Title / Role</div>
+      <input type="text" class="form-control form-control-sm so-role mb-2" placeholder="e.g. Project Manager" value="${esc(d.role||'')}">
+      <div class="fld-lbl mb-1">Signature</div>
+      <div class="sig-box${d.sig?' filled':''}" tabindex="0"
+           title="Click here then Ctrl+V to paste signature">
+        <img class="sig-prev${d.sig?' show':''}" src="${d.sig||''}" alt="">
+        <span class="sig-ph"${d.sig?' style="display:none"':''}>✍️ No signature<br><small>Browse or paste</small></span>
+      </div>
+      <div class="d-flex gap-1 mt-1">
+        <label class="btn btn-sm btn-outline-secondary flex-grow-1 mb-0" style="font-size:.72rem;">
+          📁 Browse<input type="file" accept="image/*" style="display:none" onchange="handleSigFile(this)">
+        </label>
+        <button class="btn btn-sm btn-outline-secondary" style="font-size:.72rem;" onclick="pasteSig(this)" title="Paste from clipboard">📋</button>
+        <button class="btn btn-sm btn-outline-danger" style="font-size:.72rem;" onclick="clearSig(this)">✕</button>
+      </div>
+      <input type="hidden" class="so-sig" value="${esc(d.sig||'')}">
+    </div>`;
+  c.appendChild(col);
+
+  // Paste listener directly on sig-box
+  const box = col.querySelector('.sig-box');
+  box.addEventListener('paste', e => {
+    const items = (e.clipboardData||window.clipboardData).items;
+    for (const it of items) {
+      if (it.type.startsWith('image/')) {
+        e.preventDefault();
+        const reader = new FileReader();
+        reader.onload = ev => setSig(box, ev.target.result);
+        reader.readAsDataURL(it.getAsFile());
+        return;
+      }
+    }
+  });
+  // Click sig-box to focus for paste
+  box.addEventListener('click', () => box.focus());
+}
+
+function handleSigFile(input) {
+  const box = input.closest('.so-col-card').querySelector('.sig-box');
+  const file = input.files[0]; if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => setSig(box, e.target.result);
+  reader.readAsDataURL(file);
+}
+
+async function pasteSig(btn) {
+  const box = btn.closest('.so-col-card').querySelector('.sig-box');
+  try {
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      for (const type of item.types) {
+        if (type.startsWith('image/')) {
+          const blob = await item.getType(type);
+          const reader = new FileReader();
+          reader.onload = e => setSig(box, e.target.result);
+          reader.readAsDataURL(blob); return;
+        }
+      }
+    }
+    box.focus();
+    toast('No image in clipboard — click the sig box and press Ctrl+V');
+  } catch {
+    box.focus();
+    toast('Click the signature box and press Ctrl+V to paste');
+  }
+}
+
+function setSig(box, dataUrl) {
+  const card = box.closest('.so-col-card');
+  card.querySelector('.so-sig').value = dataUrl;
+  const img = box.querySelector('.sig-prev');
+  img.src = dataUrl; img.classList.add('show');
+  box.querySelector('.sig-ph').style.display = 'none';
+  box.classList.add('filled');
+}
+
+function clearSig(btn) {
+  const card = btn.closest('.so-col-card');
+  const box  = card.querySelector('.sig-box');
+  card.querySelector('.so-sig').value = '';
+  const img = box.querySelector('.sig-prev');
+  img.src = ''; img.classList.remove('show');
+  box.querySelector('.sig-ph').style.display = '';
+  box.classList.remove('filled');
+}
+
+function collectSignOffs() {
+  const cols = [];
+  document.querySelectorAll('#signOffContainer .so-col').forEach(col => {
+    const card = col.querySelector('.so-col-card');
+    cols.push({
+      label: card.querySelector('.so-label').value,
+      name:  card.querySelector('.so-name').value,
+      role:  card.querySelector('.so-role').value,
+      sig:   card.querySelector('.so-sig').value,
+    });
+  });
+  return cols;
+}
+
+function populateSignOffs(signOffs) {
+  document.getElementById('signOffContainer').innerHTML = '';
+  _soidx = 0;
+  (signOffs || []).forEach(s => addSignOffCol(s));
+}
+
+
+
+// (duplicate pasteSig removed — async version above is canonical)
+
+// ════════════════════════════════════════════════════════════
+// COLLECT ALL FORM DATA
+// ════════════════════════════════════════════════════════════
+function collectData() {
+  const v = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+
+  // Weather
+  const weather = {};
+  const wxFields = [
+    ['Morning',     'wx_morning'],
+    ['Afternoon',   'wx_afternoon'],
+    ['Evening',     'wx_evening'],
+    ['Wind',        'wx_wind'],
+    ['Temperature', 'wx_temp'],
+    ['Impact',      'wx_impact'],
+  ];
+  wxFields.forEach(([label, eid]) => { const el = document.getElementById(eid); if (el) weather[label] = el.value; });
+
+  // Global indirect manpower
+  const indirect_manpower = [];
+  document.querySelectorAll('#indirectContainer .indirect-row').forEach(row => {
+    indirect_manpower.push({
+      name:  row.querySelector('.mp-name').value,
+      role:  row.querySelector('.mp-role').value,
+      hours: row.querySelector('.mp-hours').value,
+    });
+  });
+
+  // Areas
+  const areas = [];
+  document.querySelectorAll('#areasContainer .area-card').forEach(block => {
+    const sel = block.querySelector('.area-sel');
+    const custom = block.querySelector('.area-custom');
+    const areaId = sel.value === '__custom__' ? custom.value : sel.value;
+
+    const activities_today = [];
+    block.querySelectorAll('.acts-today .act-item input').forEach(inp => {
+      if (inp.value.trim()) activities_today.push(inp.value.trim());
+    });
+    const activities_tomorrow = [];
+    block.querySelectorAll('.acts-tmr .act-item input').forEach(inp => {
+      if (inp.value.trim()) activities_tomorrow.push(inp.value.trim());
+    });
+
+    const manpower = [];
+    block.querySelectorAll('.dm-row').forEach(row => {
+      manpower.push({
+        name:  row.querySelector('.mp-name').value,
+        role:  row.querySelector('.mp-role').value,
+        task:  row.querySelector('.mp-task').value,
+        hours: row.querySelector('.mp-hours').value,
+      });
+    });
+
+    const indirect_manpower_area = [];
+    block.querySelectorAll('.area-ind-row').forEach(row => {
+      indirect_manpower_area.push({
+        name:  row.querySelector('.mp-name').value,
+        role:  row.querySelector('.mp-role').value,
+        hours: row.querySelector('.mp-hours').value,
+      });
+    });
+
+    const photos = [];
+    block.querySelectorAll('.photo-box').forEach(box => {
+      const data     = box.querySelector('.photo-data').value;
+      const filename = box.querySelector('.photo-filename').value;
+      const desc     = box.querySelector('.photo-desc').value;
+      if (data || filename || desc) photos.push({ img_data: data, photo_filename: filename, desc });
+    });
+
+    areas.push({
+      id: areaId,
+      activities_today,
+      activities_tomorrow,
+      manpower,
+      indirect_manpower: indirect_manpower_area,
+      constraints: (block.querySelector('.area-const') || {}).value || '',
+      remarks:     (block.querySelector('.area-rem')   || {}).value || '',
+      photos,
+    });
+  });
+
+  return {
+    date:           v('f_date'),
+    day_no:         v('f_day_no'),
+    project_no:     v('f_project_no'),
+    location:       v('f_location'),
+    customer:       v('f_customer'),
+    equipment:      v('f_equipment'),
+    project_title:  v('f_project_title'),
+    prepared_by:    v('f_prepared_by'),
+    checked_by:     v('f_checked_by'),
+    approved_by:    v('f_approved_by'),
+    global_remarks: v('f_global_remarks'),
+    weather,
+    indirect_manpower,
+    areas,
+    sign_offs: collectSignOffs(),
+  };
+}
+
+// ════════════════════════════════════════════════════════════
+// POPULATE FORM FROM DATA
+// ════════════════════════════════════════════════════════════
+function populateForm(d) {
+  const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
+  set('f_date',          d.date);
+  set('f_day_no',        d.day_no);
+  set('f_project_no',    d.project_no);
+  set('f_location',      d.location);
+  set('f_customer',      d.customer);
+  set('f_equipment',     d.equipment);
+  set('f_project_title', d.project_title);
+  set('f_prepared_by',   d.prepared_by);
+  set('f_checked_by',    d.checked_by);
+  set('f_approved_by',   d.approved_by);
+  set('f_global_remarks',d.global_remarks);
+
+  const wx = d.weather || {};
+  const wxMap = { Morning:'wx_morning', Afternoon:'wx_afternoon', Evening:'wx_evening',
+                  Wind:'wx_wind', Temperature:'wx_temp', Impact:'wx_impact' };
+  Object.entries(wxMap).forEach(([k,id]) => { if (wx[k] !== undefined) set(id, wx[k]); });
+
+  // Global indirect manpower
+  document.getElementById('indirectContainer').innerHTML = '';
+  (d.indirect_manpower || []).forEach(p => addIndirectRow(p));
+
+  // Areas
+  document.getElementById('areasContainer').innerHTML = '';
+  _aidx = 0;
+  (d.areas || []).forEach(a => addAreaBlock(a));
+  updateHint();
+
+  // Sign-offs
+  populateSignOffs(d.sign_offs);
+
+  updateHeadcount();
+}
+
+// ════════════════════════════════════════════════════════════
+// GENERATE PDF
+// ════════════════════════════════════════════════════════════
+async function generatePDF() {
+  if (!validateForm()) return;
+
+  // Check for duplicate report date
+  const reportDate = (document.getElementById('f_date') || {}).value;
+  if (reportDate) {
+    try {
+      const chk = await fetch(`/reports/check_date?date=${encodeURIComponent(reportDate)}`);
+      if (chk.ok) {
+        const chkData = await chk.json();
+        if (chkData.exists) {
+          const go = confirm(`⚠ A report for ${reportDate} already exists (${chkData.filename}).\n\nGenerate a new one anyway?`);
+          if (!go) return;
+        }
+      }
+    } catch(e) { /* non-fatal — proceed if check fails */ }
+  }
+
+  const btn = document.querySelector('[onclick="generatePDF()"]');
+  const orig = btn ? btn.innerHTML : '';
+  if (btn) { btn.innerHTML = '⏳ Generating…'; btn.disabled = true; }
+
+  try {
+    // Step 1 — wait for any in-flight photo uploads to finish
+    if (_pendingUploads > 0) {
+      _setProgress('📤 Uploading photos… please wait', 10);
+      await new Promise(resolve => {
+        const poll = setInterval(() => {
+          if (_pendingUploads === 0) { clearInterval(poll); resolve(); }
+        }, 250);
+      });
+    }
+
+    // Step 2 — send to server and animate progress while waiting
+    _setProgress('⚙️ Building PDF on server…', 20);
+    _animateProgress(20, 85, 12000);   // animate over 12 s (covers most reports)
+
+    const r = await fetch('/generate', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(collectData()),
+    });
+
+    if (_genTimer) { clearInterval(_genTimer); _genTimer = null; }
+
+    if (!r.ok) {
+      let msg = 'Server error ' + r.status;
+      if (r.status === 413) msg = 'Payload too large (413) — reduce number of photos.';
+      else { try { const j = await r.json(); if (j.error) msg = j.error; } catch(e) {} }
+      throw new Error(msg);
+    }
+
+    // Step 3 — download
+    _setProgress('📥 Downloading PDF…', 95);
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const d = collectData();
+    const fname = `Daily Report - PT GPA - KN - ${d.date||'Report'} (Day ${d.day_no||''}).pdf`;
+    a.href = url;
+    a.download = fname;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    _storeLastPdf(blob, fname, d.date, d.day_no);
+
+    _setProgress('✅ PDF ready!', 100);
+    setTimeout(_hideProgress, 1500);
+    toast('✅ PDF generated and downloaded!', 'success');
+
+  } catch(err) {
+    _hideProgress();
+    toast('❌ Error generating PDF: ' + err.message, 'danger');
+  } finally {
+    if (btn) { btn.innerHTML = orig; btn.disabled = false; }
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// PREVIEW PDF
+// ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════
+// GENERATION PROGRESS BAR
+// ════════════════════════════════════════════════════════════
+let _pendingUploads = 0;   // tracks in-flight photo uploads
+let _genTimer = null;
+
+function _setProgress(msg, pct) {
+  document.getElementById('gen-progress').style.display = '';
+  document.getElementById('gen-progress-bar').style.width = pct + '%';
+  document.getElementById('gen-progress-msg').textContent = msg;
+  document.getElementById('gen-progress-pct').textContent = pct + '%';
+}
+function _hideProgress() {
+  if (_genTimer) { clearInterval(_genTimer); _genTimer = null; }
+  document.getElementById('gen-progress').style.display = 'none';
+}
+function _animateProgress(from, to, durationMs) {
+  if (_genTimer) clearInterval(_genTimer);
+  const steps = 20;
+  const stepMs = durationMs / steps;
+  const inc = (to - from) / steps;
+  let cur = from;
+  _genTimer = setInterval(() => {
+    cur = Math.min(to, cur + inc);
+    document.getElementById('gen-progress-bar').style.width = Math.round(cur) + '%';
+    document.getElementById('gen-progress-pct').textContent = Math.round(cur) + '%';
+    if (cur >= to) { clearInterval(_genTimer); _genTimer = null; }
+  }, stepMs);
+}
+
+let _previewModal = null;
+async function previewPDF() {
+  if (!_previewModal) _previewModal = new bootstrap.Modal(document.getElementById('previewModal'));
+  const frame = document.getElementById('previewFrame');
+  const loading = document.getElementById('previewLoading');
+  frame.style.display = 'none';
+  loading.style.display = '';
+  loading.innerHTML = '<div class="spinner-border mb-2"></div><br>Generating preview…';
+  _previewModal.show();
+  try {
+    const r = await fetch('/preview', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(collectData()),
+    });
+    if (!r.ok) {
+      let msg = 'Server error ' + r.status;
+      if (r.status === 413) msg = 'Payload too large (413) — too many or too large photos. Try removing some photos.';
+      else { try { const j = await r.json(); if (j.error) msg = j.error; } catch(e) {} }
+      throw new Error(msg);
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    frame.src = url;
+    frame.onload = () => { loading.style.display = 'none'; frame.style.display = ''; };
+  } catch(err) {
+    loading.innerHTML = '<div class="text-danger p-3">❌ Failed to generate preview:<br><small>' + err.message + '</small></div>';
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// EXPORT / IMPORT / CLEAR DRAFT
+// ════════════════════════════════════════════════════════════
+function exportDraft() {
+  const data = collectData();
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `GPA_Report_Draft_${data.date || 'draft'}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function importDraft(input) {
+  const file = input.files[0]; if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const data = JSON.parse(e.target.result);
+      populateForm(data);
+    } catch(err) {
+      alert('Invalid draft file: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+  input.value = '';
+}
+
+function clearFormConfirm() {
+  if (!confirm('Clear the entire form? This cannot be undone.')) return;
+  document.getElementById('areasContainer').innerHTML = '';
+  document.getElementById('indirectContainer').innerHTML = '';
+  _aidx = 0; _soidx = 0;
+  ['f_date','f_day_no','f_project_no','f_location','f_customer','f_equipment',
+   'f_project_title','f_prepared_by','f_checked_by','f_approved_by','f_global_remarks']
+    .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  document.getElementById('signOffContainer').innerHTML = '';
+  initSignOffDefaults();
+  updateHint();
+}
+
+// ════════════════════════════════════════════════════════════
+// SETTINGS: SAVE / LOAD
+// ════════════════════════════════════════════════════════════
+function loadSettings() {
+  const c = APP_CONFIG;
+  const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
+  set('cfg_company',       c.company_name   || '');
+  set('cfg_customer',      c.customer       || '');
+  set('cfg_project_title', c.project_title  || '');
+  set('cfg_project_no',    c.project_no     || '');
+  set('cfg_location',      c.location       || '');
+  set('cfg_prepared',      c.prepared_by    || '');
+  set('cfg_checked',       c.checked_by     || '');
+  set('cfg_approved',      c.approved_by    || '');
+  set('cfg_start_date',    c.project_start_date || '');
+  set('cfg_site_name',     c.site_name      || 'Mangkajang');
+  set('cfg_pm_name',       c.pm_name        || 'Asril Naimy');
+  set('cfg_pm_title',      c.pm_title       || 'Project Manager');
+  set('cfg_kn_attn',       c.letter_kn_attn || '');
+
+  // Logo status
+  checkLogoStatus();
+
+  // Logo size fields
+  const lg = (id, val) => { const el = document.getElementById(id); if (el) el.value = val ?? el.value; };
+  lg('gpaW', c.logo_gpa_w   ?? 28); lg('gpaH', c.logo_gpa_h   ?? 12); lg('gpaY', c.logo_gpa_y_off ?? 0);
+  lg('knW',  c.logo_kn_w    ?? 28); lg('knH',  c.logo_kn_h    ?? 12); lg('knY',  c.logo_kn_y_off  ?? 0);
+  const gs = document.getElementById('gpaShow'); if (gs) gs.checked = c.show_logo_gpa !== false;
+  const ks = document.getElementById('knShow');  if (ks) ks.checked = c.show_logo_kn  !== false;
+
+  // Color pickers
+  renderColorPickers();
+
+  // Manpower table — prefer saved config, fall back to built-in list
+  localMpDB = [...(APP_CONFIG.manpower_db || MANPOWER_DB)];
+  renderMpTable();
+
+  // Area settings
+  localAreas = [...(APP_CONFIG.areas || AREA_LIST_DEF)];
+  renderAreaSettings();
+
+  // AI key
+  const aiKeyEl = document.getElementById('cfg_ai_key');
+  if (aiKeyEl) aiKeyEl.value = c.ai_api_key || '';
+}
+
+function saveSettings() {
+  const v = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+  const theme = {};
+  COLOR_DEFS.forEach(cd => {
+    const el = document.getElementById(cd.id);
+    if (el) theme[cd.key] = el.value;
+  });
+
+  const payload = {
+    company_name:    v('cfg_company'),
+    customer:        v('cfg_customer'),
+    project_title:   v('cfg_project_title'),
+    project_no:      v('cfg_project_no'),
+    location:        v('cfg_location'),
+    prepared_by:     v('cfg_prepared'),
+    checked_by:      v('cfg_checked'),
+    approved_by:     v('cfg_approved'),
+    project_start_date: v('cfg_start_date'),
+    site_name:       v('cfg_site_name') || 'Mangkajang',
+    pm_name:         v('cfg_pm_name')   || 'Asril Naimy',
+    pm_title:        v('cfg_pm_title')  || 'Project Manager',
+    letter_kn_attn:  v('cfg_kn_attn'),
+    show_logo_gpa:   (document.getElementById('gpaShow')||{}).checked !== false,
+    show_logo_kn:    (document.getElementById('knShow')||{}).checked !== false,
+    logo_gpa_w:      parseFloat(v('gpaW')) || 28,
+    logo_gpa_h:      parseFloat(v('gpaH')) || 12,
+    logo_gpa_y_off:  parseFloat(v('gpaY')) || 0,
+    logo_kn_w:       parseFloat(v('knW'))  || 28,
+    logo_kn_h:       parseFloat(v('knH'))  || 12,
+    logo_kn_y_off:   parseFloat(v('knY'))  || 0,
+    areas:           localAreas,
+    hours_options:   APP_CONFIG.hours_options || [],
+    theme,
+  };
+
+  // Collect manpower from settings table and include in payload
+  const mpRows = [];
+  document.querySelectorAll('#mpTableBody tr').forEach(tr => {
+    const inputs = tr.querySelectorAll('input, select');
+    if (inputs.length >= 3) {
+      mpRows.push({ name: inputs[0].value.trim(), role: inputs[1].value.trim(), type: inputs[2].value });
+    }
+  });
+  localMpDB = mpRows;
+  payload.manpower_db = mpRows;
+
+  // AI key
+  const aiKeyVal = (document.getElementById('cfg_ai_key') || {}).value || '';
+  if (aiKeyVal) payload.ai_api_key = aiKeyVal;
+
+  fetch('/save_config', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload),
+  })
+  .then(r => r.json())
+  .then(() => {
+    APP_CONFIG = Object.assign(APP_CONFIG, payload);
+    applyTheme(theme);
+    bootstrap.Modal.getInstance(document.getElementById('settingsModal')).hide();
+  })
+  .catch(err => alert('Save failed: ' + err.message));
+}
+
+function renderColorPickers() {
+  const area = document.getElementById('colorPickerArea'); if (!area) return;
+  const t = APP_CONFIG.theme || {};
+  area.innerHTML = COLOR_DEFS.map(cd =>
+    `<div class="col-md-4">
+       <label style="font-size:.78rem;">${cd.label}</label>
+       <div class="d-flex gap-2 align-items-center">
+         <input type="color" id="${cd.id}" class="form-control form-control-color" value="${t[cd.key]||'#003366'}" style="width:50px;height:32px;padding:2px;">
+         <input type="text" class="form-control form-control-sm" style="font-size:.78rem;" value="${t[cd.key]||'#003366'}"
+                oninput="document.getElementById('${cd.id}').value=this.value">
+       </div>
+     </div>`
+  ).join('');
+  COLOR_DEFS.forEach(cd => {
+    const picker = document.getElementById(cd.id);
+    if (picker) picker.addEventListener('input', e => {
+      const sib = picker.nextElementSibling;
+      if (sib) sib.value = e.target.value;
+    });
+  });
+}
+
+function renderMpTable() {
+  const tbody = document.getElementById('mpTableBody'); if (!tbody) return;
+  tbody.innerHTML = localMpDB.map((p, i) =>
+    `<tr>
+       <td><input class="form-control form-control-sm" value="${esc(p.name||'')}" placeholder="Name"></td>
+       <td><input class="form-control form-control-sm" value="${esc(p.role||'')}" placeholder="Role"></td>
+       <td><select class="form-select form-select-sm">
+         <option${p.type==='direct'?' selected':''}>direct</option>
+         <option${p.type==='indirect'?' selected':''}>indirect</option>
+       </select></td>
+       <td><button class="btn btn-sm btn-outline-danger px-1 py-0" onclick="this.closest('tr').remove()">✕</button></td>
+     </tr>`
+  ).join('');
+}
+
+function addMpEntry() {
+  const tbody = document.getElementById('mpTableBody'); if (!tbody) return;
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td><input class="form-control form-control-sm" placeholder="Name"></td>
+    <td><input class="form-control form-control-sm" placeholder="Role"></td>
+    <td><select class="form-select form-select-sm"><option>direct</option><option>indirect</option></select></td>
+    <td><button class="btn btn-sm btn-outline-danger px-1 py-0" onclick="this.closest('tr').remove()">✕</button></td>`;
+  tbody.appendChild(tr);
+}
+
+function renderAreaSettings() {
+  const list = document.getElementById('areaSettingsList'); if (!list) return;
+  list.innerHTML = localAreas.map((a, i) =>
+    `<div class="d-flex gap-2 mb-1 align-items-center area-setting-row">
+       <input class="form-control form-control-sm" value="${esc(a)}" placeholder="Area ID">
+       <button class="btn btn-sm btn-outline-danger px-2" onclick="this.closest('.area-setting-row').remove()">✕</button>
+     </div>`
+  ).join('');
+}
+
+function addAreaEntry() {
+  const list = document.getElementById('areaSettingsList'); if (!list) return;
+  const div = document.createElement('div');
+  div.className = 'd-flex gap-2 mb-1 align-items-center area-setting-row';
+  div.innerHTML = `
+    <input class="form-control form-control-sm" placeholder="Area ID e.g. Turb-1A">
+    <button class="btn btn-sm btn-outline-danger px-2" onclick="this.closest('.area-setting-row').remove()">✕</button>`;
+  list.appendChild(div);
+}
+
+// ════════════════════════════════════════════════════════════
+// LOGO UPLOAD / REMOVE
+// ════════════════════════════════════════════════════════════
+function uploadLogo(which, input) {
+  const file = input.files[0]; if (!file) return;
+  const fd = new FormData();
+  fd.append('file', file);
+  fetch('/upload_logo?which=' + which, { method:'POST', body: fd })
+  .then(r => r.json())
+  .then(data => {
+    if (data.ok) {
+      const prev = document.getElementById(which + 'Preview');
+      const status = document.getElementById(which + 'Status');
+      const reader = new FileReader();
+      reader.onload = e => {
+        if (prev) prev.innerHTML = `<img src="${e.target.result}" style="max-height:50px;max-width:100%;">`;
+        if (status) { status.textContent = 'Uploaded'; status.className = 'logo-ok'; }
+      };
+      reader.readAsDataURL(file);
+      APP_CONFIG['logo_' + which] = data.path;
+    }
+  })
+  .catch(err => alert('Upload failed: ' + err.message));
+}
+
+function removeLogo(which) {
+  fetch('/remove_logo?which=' + which, { method:'POST' })
+  .then(r => r.json())
+  .then(() => {
+    const prev = document.getElementById(which + 'Preview');
+    const status = document.getElementById(which + 'Status');
+    if (prev) prev.innerHTML = '';
+    if (status) { status.textContent = 'Not uploaded'; status.className = 'logo-bad'; }
+    APP_CONFIG['logo_' + which] = '';
+  })
+  .catch(err => alert('Remove failed: ' + err.message));
+}
+
+function checkLogoStatus() {
+  fetch('/logo_status')
+  .then(r => r.json())
+  .then(data => {
+    ['gpa','kn'].forEach(which => {
+      const status = document.getElementById(which + 'Status');
+      if (!status) return;
+      if (data[which]) { status.textContent = 'Uploaded'; status.className = 'logo-ok'; }
+      else { status.textContent = 'Not uploaded'; status.className = 'logo-bad'; }
+    });
+  });
+}
+
+// ════════════════════════════════════════════════════════════
+// PHOTO PASTE
+// ════════════════════════════════════════════════════════════
+function pastePhoto(btn) {
+  const box = btn.closest('.photo-box');
+  if (!navigator.clipboard || !navigator.clipboard.read) {
+    alert('Clipboard paste not supported. Please use Browse.');
+    return;
+  }
+  navigator.clipboard.read().then(items => {
+    for (const item of items) {
+      const type = item.types.find(t => t.startsWith('image/'));
+      if (type) {
+        item.getType(type).then(blob => {
+          const reader = new FileReader();
+          reader.onload = e => setPhoto(box, e.target.result);
+          reader.readAsDataURL(blob);
+        });
+        return;
+      }
+    }
+    alert('No image in clipboard.');
+  }).catch(() => alert('Clipboard access denied.'));
+}
+
+// ════════════════════════════════════════════════════════════
+// DEFAULTS ON FRESH FORM
+// ════════════════════════════════════════════════════════════
+function initDefaults() {
+  const cfg = APP_CONFIG;
+  const set = (id, val) => { const el = document.getElementById(id); if (el && val) el.value = val; };
+  set('f_project_title', cfg.project_title);
+  set('f_project_no',    cfg.project_no);
+  set('f_location',      cfg.location);
+  set('f_customer',      cfg.customer);
+  set('f_prepared_by',   cfg.prepared_by);
+  set('f_checked_by',    cfg.checked_by);
+  set('f_approved_by',   cfg.approved_by);
+  // Default date = today
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm   = String(today.getMonth()+1).padStart(2,'0');
+  const dd   = String(today.getDate()).padStart(2,'0');
+  set('f_date', `${yyyy}-${mm}-${dd}`);
+}
+
+function initSignOffDefaults() {
+  const cfg = APP_CONFIG;
+  [
+    { label:'Prepared By',       name: cfg.prepared_by||'', role:'HSE / Administration' },
+    { label:'Checked By',        name: cfg.checked_by ||'', role:'Project Control'       },
+    { label:'Approved By',       name: cfg.approved_by||'', role:'Project Manager'       },
+    { label:'KN Representative', name: '',                   role:'PT. Kertas Nusantara'  },
+  ].forEach(d => addSignOffCol(d));
+}
+
+// ════════════════════════════════════════════════════════════
+// SAVE DRAFT PERIODICALLY + ON UNLOAD
+// ════════════════════════════════════════════════════════════
+function loadDraftFromServer() {
+  fetch('/load_draft')
+  .then(r => r.json())
+  .then(d => { if (d && Object.keys(d).length) { populateForm(d); if (!d.sign_offs||!d.sign_offs.length) initSignOffDefaults(); } else alert('No saved draft found.'); })
+  .catch(err => alert('Load failed: ' + err.message));
+}
+
+function saveDraft(showToast=false) {
+  const ind = document.getElementById('autosave-indicator');
+  if (ind) ind.textContent = '💾 saving…';
+  fetch('/save_draft', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(collectData()),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (ind) ind.textContent = `✓ saved ${data.saved_at||''}`;
+    if (showToast) toast('Draft saved ✓', 'success');
+  })
+  .catch(() => { if (ind) ind.textContent = '⚠ save failed'; });
+}
+
+// ════════════════════════════════════════════════════════════
+// UPDATE 0.5 — New utility functions
+// ════════════════════════════════════════════════════════════
+
+// ── Toast notifications ──────────────────────────────────────────────────────
+function toast(msg, type='success') {
+  const bg = {success:'#198754',danger:'#dc3545',warning:'#e6a817',info:'#0d6efd'};
+  const el = document.createElement('div');
+  el.className = 'app-toast';
+  el.style.background = bg[type] || bg.success;
+  el.textContent = msg;
+  const wrap = document.getElementById('toast-wrap');
+  if (wrap) { wrap.appendChild(el); setTimeout(() => el.remove(), 3000); }
+}
+
+// ── Form validation before PDF ───────────────────────────────────────────────
+function validateForm() {
+  const required = [
+    { id:'f_date',       label:'Date' },
+    { id:'f_day_no',     label:'Working Day No.' },
+    { id:'f_project_no', label:'Project No.' },
+  ];
+  for (const {id, label} of required) {
+    const el = document.getElementById(id);
+    if (!el || !el.value.trim()) {
+      toast(`⚠ Required field missing: ${label}`, 'warning');
+      el && el.focus();
+      return false;
+    }
+  }
+  // Check at least one area has activities
+  const areas = document.querySelectorAll('#areasContainer .area-card');
+  if (areas.length === 0) {
+    toast('⚠ Add at least one work area', 'warning');
+    return false;
+  }
+  return true;
+}
+
+// ── Auto day number from project start date ──────────────────────────────────
+function calcAutoDay(dateStr) {
+  const startStr = APP_CONFIG.project_start_date;
+  if (!startStr || !dateStr) return null;
+  const start = new Date(startStr);
+  const cur   = new Date(dateStr);
+  if (isNaN(start) || isNaN(cur)) return null;
+  const diff = Math.round((cur - start) / 86400000) + 1;
+  return diff > 0 ? diff : null;
+}
+
+function updateAutoDay() {
+  const dateEl  = document.getElementById('f_date');
+  const dayEl   = document.getElementById('f_day_no');
+  const hintEl  = document.getElementById('day-auto-hint');
+  if (!dateEl || !dayEl) return;
+  const auto = calcAutoDay(dateEl.value);
+  if (auto !== null) {
+    if (!dayEl.value) dayEl.value = auto;
+    if (hintEl) hintEl.textContent = `(auto: Day ${auto})`;
+  } else {
+    if (hintEl) hintEl.textContent = '';
+  }
+}
+
+// ── Load yesterday's crew ─────────────────────────────────────────────────────
+async function loadYesterdayCrew() {
+  try {
+    const res = await fetch('/load_yesterday');
+    const data = await res.json();
+    if (!data.ok) { toast('No previous draft found', 'warning'); return; }
+
+    // Confirm if already has entries
+    const hasRows = document.querySelectorAll('.indirect-row').length > 0;
+    if (hasRows && !confirm("Replace current crew with yesterday's crew?")) return;
+
+    // Clear global indirect
+    const ic = document.getElementById('indirectContainer');
+    if (ic) ic.innerHTML = '';
+
+    // Populate global indirect manpower
+    (data.indirect_manpower || []).forEach(p => addIndirectRow(p));
+
+    // Build a lookup map: area ID string → yesterday's area data
+    const yesterdayMap = {};
+    (data.areas || []).forEach(aData => { if (aData.id) yesterdayMap[aData.id] = aData; });
+
+    // Iterate current area blocks, match by selected area ID (same logic as collectData)
+    document.querySelectorAll('#areasContainer .area-card').forEach(block => {
+      const sel    = block.querySelector('.area-sel');
+      const custom = block.querySelector('.area-custom');
+      const areaId = sel && sel.value === '__custom__' ? custom.value : (sel ? sel.value : '');
+      const aData  = yesterdayMap[areaId];
+      if (!aData) return;
+
+      // Clear and repopulate direct manpower
+      const dmContainer = block.querySelector('.dm-container');
+      if (dmContainer) dmContainer.innerHTML = '';
+      (aData.manpower || []).forEach(m => {
+        const addBtn = block.querySelector('.add-dm-btn');
+        if (addBtn) addDM(addBtn, m);
+      });
+
+      // Clear and repopulate area indirect manpower
+      const indContainer = block.querySelector('.area-ind-container');
+      if (indContainer) indContainer.innerHTML = '';
+      (aData.indirect_manpower || []).forEach(m => {
+        const addBtn = block.querySelector('[onclick*="addAreaIndRow"]');
+        if (addBtn) addAreaIndRow(addBtn, m);
+      });
+    });
+
+    toast(`✓ Loaded crew from last draft`, 'success');
+  } catch(e) {
+    toast('Failed to load yesterday crew: ' + e.message, 'danger');
+  }
+}
+
+// ── Photo compression via Canvas ──────────────────────────────────────────────
+function compressImage(file, maxW=600, quality=0.55) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = () => {
+        let {width, height} = img;
+        if (width > maxW) { height = Math.round(height * maxW / width); width = maxW; }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// ════════════════════════════════════════════════════════════
+// VERSIONS MODAL (Draft Snapshot History)
+// ════════════════════════════════════════════════════════════
+function formatSnapshotName(filename) {
+  // filename: "20260520_143200.json" → "20 May 2026  14:32"
+  const m = filename.match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/);
+  if (!m) return filename;
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${parseInt(m[3])} ${months[parseInt(m[2])-1]} ${m[1]}  ${m[4]}:${m[5]}`;
+}
+
+async function loadVersionsList() {
+  const list = document.getElementById('versionsList');
+  if (!list) return;
+  list.innerHTML = '<div class="text-center text-muted py-3" style="font-size:.85rem;">Loading…</div>';
+  try {
+    const r = await fetch('/draft_snapshots');
+    const snapshots = await r.json();
+    if (!Array.isArray(snapshots) || snapshots.length === 0) {
+      list.innerHTML = '<div class="text-center text-muted py-4" style="font-size:.85rem;">No snapshots saved yet.<br><small>Snapshots are auto-saved every 90 s.</small></div>';
+      return;
+    }
+    list.innerHTML = snapshots.map(fname => `
+      <div class="d-flex justify-content-between align-items-center py-2 border-bottom">
+        <div>
+          <div style="font-size:.85rem;font-weight:500;">🕐 ${formatSnapshotName(fname)}</div>
+          <div style="font-size:.7rem;color:#888;">${fname}</div>
+        </div>
+        <button class="btn btn-sm btn-outline-primary" onclick="restoreSnapshot('${fname}')">Restore</button>
+      </div>`).join('');
+  } catch(e) {
+    list.innerHTML = `<div class="text-center text-danger py-3" style="font-size:.85rem;">Failed to load snapshots: ${e.message}</div>`;
+  }
+}
+
+async function restoreSnapshot(filename) {
+  if (!confirm(`Restore snapshot "${formatSnapshotName(filename)}"?\nThis will replace the current form data.`)) return;
+  try {
+    const r = await fetch(`/draft_snapshots/load/${encodeURIComponent(filename)}`);
+    const data = await r.json();
+    populateForm(data);
+    bootstrap.Modal.getInstance(document.getElementById('versionsModal')).hide();
+    toast(`✓ Restored snapshot: ${formatSnapshotName(filename)}`, 'success');
+  } catch(e) {
+    toast('Failed to restore snapshot: ' + e.message, 'danger');
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// AREA TEMPLATES (localStorage)
+// ════════════════════════════════════════════════════════════
+const AREA_TPL_KEY = 'gpa_area_templates';
+
+function getAreaTemplates() {
+  try { return JSON.parse(localStorage.getItem(AREA_TPL_KEY) || '[]'); } catch { return []; }
+}
+
+function saveAreaTemplate(btn) {
+  const block = btn.closest('[data-ai]');
+  const sel    = block.querySelector('.area-sel');
+  const custom = block.querySelector('.area-custom');
+  const areaId = sel.value === '__custom__' ? custom.value : sel.value;
+
+  const name = prompt(`Template name (e.g. "${areaId} Standard"):`);
+  if (!name || !name.trim()) return;
+
+  const activities_today    = [];
+  const activities_tomorrow = [];
+  block.querySelectorAll('.acts-today .act-item input').forEach(i => { if (i.value.trim()) activities_today.push(i.value.trim()); });
+  block.querySelectorAll('.acts-tmr .act-item input').forEach(i => { if (i.value.trim()) activities_tomorrow.push(i.value.trim()); });
+
+  const manpower = [];
+  block.querySelectorAll('.dm-row').forEach(r => {
+    manpower.push({ name: r.querySelector('.mp-name').value, role: r.querySelector('.mp-role').value, task: r.querySelector('.mp-task').value, hours: r.querySelector('.mp-hours').value });
+  });
+
+  const indirect_manpower = [];
+  block.querySelectorAll('.area-ind-row').forEach(r => {
+    indirect_manpower.push({ name: r.querySelector('.mp-name').value, role: r.querySelector('.mp-role').value, hours: r.querySelector('.mp-hours').value });
+  });
+
+  const constraints = (block.querySelector('.area-const') || {}).value || '';
+  const remarks     = (block.querySelector('.area-rem')   || {}).value || '';
+
+  const tpl = { name: name.trim(), data: { activities_today, activities_tomorrow, manpower, indirect_manpower, constraints, remarks } };
+  const templates = getAreaTemplates();
+  templates.unshift(tpl);   // newest first
+  if (templates.length > 30) templates.length = 30;
+  localStorage.setItem(AREA_TPL_KEY, JSON.stringify(templates));
+  toast(`✓ Template "${tpl.name}" saved`, 'success');
+}
+
+function loadAreaTemplate(btn) {
+  const templates = getAreaTemplates();
+  if (templates.length === 0) { toast('No saved templates yet — use 💾 Save Template first', 'warning'); return; }
+
+  // Build a quick modal-less select dialog via prompt with a numbered list
+  const choices = templates.map((t, i) => `${i+1}. ${t.name}`).join('\n');
+  const raw = prompt(`Choose a template (enter number):\n\n${choices}`);
+  if (!raw) return;
+  const idx = parseInt(raw) - 1;
+  if (isNaN(idx) || idx < 0 || idx >= templates.length) { toast('Invalid selection', 'warning'); return; }
+
+  const tpl  = templates[idx];
+  const block = btn.closest('[data-ai]');
+
+  // Fill activities
+  block.querySelector('.acts-today').innerHTML = '';
+  tpl.data.activities_today.forEach(t => addAct(block.querySelector('[onclick*="today"]'), 'today', t));
+  block.querySelector('.acts-tmr').innerHTML = '';
+  tpl.data.activities_tomorrow.forEach(t => addAct(block.querySelector('[onclick*="tomorrow"]'), 'tomorrow', t));
+
+  // Fill manpower
+  block.querySelector('.dm-container').innerHTML = '';
+  tpl.data.manpower.forEach(m => addDM(block.querySelector('.add-dm-btn'), m));
+
+  // Fill area indirect
+  block.querySelector('.area-ind-container').innerHTML = '';
+  (tpl.data.indirect_manpower || []).forEach(m => addAreaIndRow(block.querySelector('[onclick*="addAreaIndRow"]'), m));
+
+  // Fill text fields
+  const constEl = block.querySelector('.area-const'); if (constEl) constEl.value = tpl.data.constraints || '';
+  const remEl   = block.querySelector('.area-rem');   if (remEl)   remEl.value   = tpl.data.remarks     || '';
+
+  updateHeadcount();
+  toast(`✓ Template "${tpl.name}" loaded`, 'success');
+}
+
+// ════════════════════════════════════════════════════════════
+// LIVE HEADCOUNT SUMMARY
+// ════════════════════════════════════════════════════════════
+function updateHeadcount() {
+  const indirect = document.querySelectorAll('.indirect-row').length
+                 + document.querySelectorAll('.area-ind-row').length;
+  const direct   = document.querySelectorAll('.dm-row').length;
+  const total    = indirect + direct;
+  const el = id => document.getElementById(id);
+  if (el('hc-indirect')) el('hc-indirect').textContent = indirect;
+  if (el('hc-direct'))   el('hc-direct').textContent   = direct;
+  if (el('hc-total'))    el('hc-total').textContent     = total;
+}
+
+// ════════════════════════════════════════════════════════════
+// AI CHAT ASSISTANT
+// ════════════════════════════════════════════════════════════
+let _aiHistory = [];
+let _aiSending = false;
+
+function toggleAIChat() {
+  const p = document.getElementById('aiChatPanel');
+  p.classList.toggle('open');
+}
+
+function clearAIChat() {
+  _aiHistory = [];
+  const msgs = document.getElementById('aiChatMessages');
+  msgs.innerHTML = '<div class="chat-msg system">Describe today\'s work naturally — I\'ll fill the form for you.</div>';
+}
+
+function _addChatMsg(role, html) {
+  const msgs = document.getElementById('aiChatMessages');
+  const div = document.createElement('div');
+  div.className = 'chat-msg ' + role;
+  div.innerHTML = html;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+  return div;
+}
+
+async function sendAIMessage() {
+  if (_aiSending) return;
+  const box = document.getElementById('aiMsgBox');
+  const msg = box.value.trim();
+  if (!msg) return;
+
+  box.value = '';
+  _addChatMsg('user', msg.replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'));
+
+  _aiSending = true;
+  const btn = document.getElementById('aiSendBtn');
+  btn.disabled = true;
+  btn.textContent = '...';
+
+  const typing = document.createElement('div');
+  typing.className = 'chat-typing';
+  typing.textContent = 'AI is thinking...';
+  document.getElementById('aiChatMessages').appendChild(typing);
+
+  try {
+    const currentForm = collectData();
+    // Strip photo data to keep payload small
+    (currentForm.areas || []).forEach(a => {
+      (a.photos || []).forEach(p => { p.img_data = ''; });
+    });
+
+    const r = await fetch('/ai/chat', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        message: msg,
+        history: _aiHistory,
+        current_form: currentForm,
+      }),
+    });
+
+    typing.remove();
+    const data = await r.json();
+
+    if (data.error) {
+      _addChatMsg('bot', '❌ ' + data.error);
+      return;
+    }
+
+    _aiHistory.push({role:'user', content: msg});
+    _aiHistory.push({role:'assistant', content: JSON.stringify(data)});
+
+    // Build reply HTML
+    let replyHtml = (data.reply || '').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+
+    if (data.updates && Object.keys(data.updates).length > 0) {
+      const count = Object.keys(data.updates).length;
+      replyHtml += `<br><span class="updates-badge" onclick="applyAIUpdates(this)" data-updates='${JSON.stringify(data.updates).replace(/'/g,"&#39;")}'>📝 Apply ${count} update(s) to form</span>`;
+    }
+
+    if (data.missing && data.missing.length > 0) {
+      replyHtml += `<br><span style="font-size:.7rem;color:#888;margin-top:4px;display:inline-block;">Missing: ${data.missing.join(', ')}</span>`;
+    }
+
+    if (data.ready) {
+      replyHtml += `<br><span style="font-size:.72rem;color:green;font-weight:600;margin-top:4px;display:inline-block;">✅ Report looks ready — review the form and click Generate PDF!</span>`;
+    }
+
+    _addChatMsg('bot', replyHtml);
+
+  } catch(err) {
+    typing.remove();
+    _addChatMsg('bot', '❌ Connection error: ' + err.message);
+  } finally {
+    _aiSending = false;
+    btn.disabled = false;
+    btn.textContent = 'Send';
+  }
+}
+
+function applyAIUpdates(badge) {
+  let updates;
+  try {
+    updates = JSON.parse(badge.dataset.updates);
+  } catch { return; }
+
+  const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined && val !== '') el.value = val; };
+
+  // Simple fields
+  set('f_date', updates.date);
+  set('f_day_no', updates.day_no);
+  set('f_global_remarks', updates.global_remarks);
+
+  // Weather
+  if (updates.weather) {
+    const wxMap = { Morning:'wx_morning', Afternoon:'wx_afternoon', Evening:'wx_evening',
+                    Wind:'wx_wind', Temperature:'wx_temp', Impact:'wx_impact' };
+    Object.entries(wxMap).forEach(([k,id]) => {
+      if (updates.weather[k] !== undefined) set(id, updates.weather[k]);
+    });
+  }
+
+  // Global indirect manpower
+  if (updates.indirect_manpower && updates.indirect_manpower.length > 0) {
+    document.getElementById('indirectContainer').innerHTML = '';
+    updates.indirect_manpower.forEach(m => addIndirectRow(m));
+  }
+
+  // Areas
+  if (updates.areas && updates.areas.length > 0) {
+    document.getElementById('areasContainer').innerHTML = '';
+    _aidx = 0;
+    updates.areas.forEach(a => addAreaBlock(a));
+  }
+
+  updateHeadcount();
+  badge.textContent = '✅ Applied!';
+  badge.style.background = '#198754';
+  badge.onclick = null;
+  toast('🤖 AI updates applied to form', 'success');
+}
+
+// Enter key sends (shift+enter for newline)
+document.addEventListener('DOMContentLoaded', () => {
+  const box = document.getElementById('aiMsgBox');
+  if (box) box.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendAIMessage(); }
+  });
+});
+
+// ════════════════════════════════════════════════════════════
+// INIT
+// ════════════════════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded', () => {
+  // Apply saved theme
+  applyTheme(APP_CONFIG.theme || {});
+
+  // Settings modal nav
+  document.querySelectorAll('#stgNav .nav-link').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#stgNav .nav-link').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.stg-tab').forEach(t => t.classList.add('d-none'));
+      btn.classList.add('active');
+      const tab = document.getElementById('tab-' + btn.dataset.tab);
+      if (tab) tab.classList.remove('d-none');
+    });
+  });
+
+  // Load settings when modal opens
+  document.getElementById('settingsModal').addEventListener('show.bs.modal', loadSettings);
+
+  // Load snapshot list when Versions modal opens
+  document.getElementById('versionsModal').addEventListener('show.bs.modal', loadVersionsList);
+
+  // Populate form from draft or set defaults
+  if (INITIAL_DATA) {
+    populateForm(INITIAL_DATA);
+    if (!INITIAL_DATA.sign_offs || !INITIAL_DATA.sign_offs.length) {
+      initSignOffDefaults();
+    }
+  } else {
+    initDefaults();
+    initSignOffDefaults();
+  }
+
+  // Auto day number: wire date field
+  const dateField = document.getElementById('f_date');
+  if (dateField) dateField.addEventListener('change', updateAutoDay);
+  updateAutoDay();
+
+  // Auto-save draft every 90s
+  setInterval(saveDraft, 90000);
+
+  // Save on page unload
+  window.addEventListener('beforeunload', saveDraft);
+
+  // Hint update
+  updateHint();
+
+  // Initial headcount
+  updateHeadcount();
+
+  // MutationObserver keeps headcount in sync even on bulk changes (populateForm, clear, etc.)
+  const _hcObserver = new MutationObserver(updateHeadcount);
+  const _hcOpts = { childList: true, subtree: true };
+  const indCont  = document.getElementById('indirectContainer');
+  const areaCont = document.getElementById('areasContainer');
+  if (indCont)  _hcObserver.observe(indCont,  _hcOpts);
+  if (areaCont) _hcObserver.observe(areaCont, _hcOpts);
+
+  // Load review badge count (admin only)
+  loadReviewBadge();
+
+  // Wire review modal date to today
+  const rd = document.getElementById('reviewDate');
+  if (rd) rd.value = new Date().toISOString().split('T')[0];
+});
+
+// ════════════════════════════════════════════════════════════
+// REVIEW SUBMISSIONS (admin)
+// ════════════════════════════════════════════════════════════
+let _reviewModal = null;
+let _reviewData  = [];
+
+async function loadReviewBadge() {
+  const btn = document.getElementById('reviewNavBtn');
+  if (!btn) return;
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const r = await fetch(`/admin/all_submissions?date=${today}`);
+    if (!r.ok) return;
+    const j = await r.json();
+    const count = (j.submissions || []).length;
+    btn.style.display = '';
+    document.getElementById('reviewBadge').textContent = count;
+    document.getElementById('reviewBadge').style.display = count > 0 ? '' : 'none';
+  } catch (e) { /* non-admin or server down — just hide */ }
+}
+
+function openReview() {
+  if (!_reviewModal) _reviewModal = new bootstrap.Modal(document.getElementById('reviewModal'));
+  _reviewModal.show();
+  loadReview();
+}
+
+async function loadReview() {
+  const dateEl = document.getElementById('reviewDate');
+  const date = dateEl ? dateEl.value : new Date().toISOString().split('T')[0];
+  const list = document.getElementById('reviewList');
+  list.innerHTML = '<div class="text-center text-muted py-4">Loading…</div>';
+  document.getElementById('mergeAllBtn').disabled = true;
+  document.getElementById('mergeSelectedBtn').disabled = true;
+
+  try {
+    const r = await fetch(`/admin/all_submissions?date=${encodeURIComponent(date)}`);
+    const j = await r.json();
+    _reviewData = j.submissions || [];
+
+    if (!_reviewData.length) {
+      list.innerHTML = '<div class="text-center text-muted py-4" style="font-size:.85rem;">No submissions for this date.</div>';
+      return;
+    }
+
+    let html = '<div class="list-group list-group-flush">';
+    _reviewData.forEach((s, i) => {
+      const mpCount  = (s.manpower || []).length;
+      const phCount  = (s.photos   || []).length;
+      const actToday = (s.activities_today || []).join('; ').slice(0, 80) || '—';
+      html += `
+      <div class="list-group-item px-0 py-2">
+        <div class="d-flex align-items-start gap-2">
+          <input type="checkbox" class="review-cb form-check-input mt-1 flex-shrink-0" data-idx="${i}" id="rcb${i}"
+                 onchange="updateMergeBtn()" checked>
+          <label for="rcb${i}" style="cursor:pointer;flex:1">
+            <div class="d-flex justify-content-between align-items-center">
+              <span class="fw-bold" style="font-size:.9rem">${esc(s.area_id)}</span>
+              <span class="badge bg-secondary" style="font-size:.65rem">${esc(s.username)} · ${esc((s.submitted_at||'').slice(11,16))}</span>
+            </div>
+            <div style="font-size:.78rem;color:#444;margin-top:2px">${esc(actToday)}</div>
+            <div style="font-size:.72rem;color:#888;margin-top:2px">👷 ${mpCount} personil · 📷 ${phCount} foto</div>
+          </label>
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+    list.innerHTML = html;
+    document.getElementById('mergeAllBtn').disabled = false;
+    updateMergeBtn();
+  } catch (e) {
+    list.innerHTML = `<div class="text-danger py-3" style="font-size:.85rem;">Error: ${e.message}</div>`;
+  }
+}
+
+function updateMergeBtn() {
+  const any = document.querySelectorAll('.review-cb:checked').length > 0;
+  document.getElementById('mergeSelectedBtn').disabled = !any;
+}
+
+async function mergeSelected() {
+  const checked = Array.from(document.querySelectorAll('.review-cb:checked')).map(cb => parseInt(cb.dataset.idx));
+  const subs = checked.map(i => _reviewData[i]);
+  await doMerge(subs);
+}
+
+async function mergeAll() {
+  await doMerge(_reviewData);
+}
+
+async function doMerge(subs) {
+  if (!subs.length) return;
+  const btn = document.getElementById('mergeAllBtn');
+  btn.disabled = true; btn.textContent = 'Merging…';
+  try {
+    const r = await fetch('/admin/merge_submissions', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({submissions: subs}),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      toast(`✅ ${j.merged} area(s) merged into draft. Load the draft to see changes.`, 'success');
+      if (_reviewModal) _reviewModal.hide();
+      // Reload draft into form
+      const dr = await fetch('/load_draft');
+      const draftData = await dr.json();
+      if (draftData && Object.keys(draftData).length) populateForm(draftData);
+    } else {
+      toast('❌ Merge failed: ' + (j.error || 'unknown error'), 'danger');
+    }
+  } catch (e) {
+    toast('❌ ' + e.message, 'danger');
+  } finally {
+    btn.disabled = false; btn.textContent = '✅ Merge All into Draft';
+    loadReviewBadge();
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// WHATSAPP SHARE (after PDF generate)
+// ════════════════════════════════════════════════════════════
+let _lastPdfBlob = null;
+let _lastPdfName = '';
+let _waShareTimer = null;
+
+function _storeLastPdf(blob, filename, date, dayNo) {
+  _lastPdfBlob = blob;
+  _lastPdfName = filename;
+  const btn = document.getElementById('waShareBtn');
+  if (!btn) return;
+  btn.style.display = '';
+  // Auto-hide after 5 minutes
+  if (_waShareTimer) clearTimeout(_waShareTimer);
+  _waShareTimer = setTimeout(() => { btn.style.display = 'none'; }, 300000);
+}
+
+async function shareReportWA() {
+  if (!_lastPdfBlob) { toast('Generate the PDF first', 'warning'); return; }
+  const d = collectData();
+  const text = `📋 *Daily Report - PT GPA*\n📅 ${d.date||''} (Day ${d.day_no||''})\n📍 ${d.location||''}\n\nDihasilkan oleh: Daily Report App GPA`;
+
+  const dummyFile = new File([''], 'test.pdf', {type:'application/pdf'});
+  const canShareFiles = navigator.canShare && navigator.canShare({files:[dummyFile]});
+
+  if (canShareFiles) {
+    try {
+      const file = new File([_lastPdfBlob], _lastPdfName, {type:'application/pdf'});
+      await navigator.share({files:[file], title:'Daily Report GPA', text});
+      return;
+    } catch(e) { if (e.name === 'AbortError') return; /* fallback */ }
+  }
+  // Desktop fallback: open WhatsApp Web with pre-filled text
+  window.open('https://web.whatsapp.com/send?text=' + encodeURIComponent(text), '_blank');
+}
+</script>
+</body>
+</html>

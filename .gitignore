@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Mutable application data (store these in a Railway Volume)
+users/
+users.json
+app_config.json
+activity_log.json
+logos/
+
+# Generated documents and local artifacts
+*.pdf
+*.docx
+*.log
+.DS_Store
+Thumbs.db

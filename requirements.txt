@@ -1,0 +1,6 @@
+Flask>=3.1,<4
+gunicorn>=23,<24
+reportlab>=4.4,<5
+Pillow>=11,<13
+python-docx>=1.2,<2
+anthropic>=0.64,<1

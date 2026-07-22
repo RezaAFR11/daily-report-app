@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="theme-color" content="#003366">
+<title>GPA Field Report</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
+<style>
+:root {
+  --primary: {{ config.theme.primary if config and config.theme else '#003366' }};
+  --accent:  {{ config.theme.accent  if config and config.theme else '#C89010' }};
+}
+* { box-sizing: border-box; }
+body { background: #f4f6fa; font-family: system-ui, -apple-system, sans-serif; padding-bottom: 80px; }
+
+/* Header */
+.field-header {
+  background: var(--primary); color: #fff;
+  padding: 12px 16px; position: sticky; top: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.field-header h6 { margin: 0; font-size: 1rem; font-weight: 700; }
+.field-header small { opacity: .75; font-size: .72rem; }
+
+/* Step indicator */
+.step-bar {
+  display: flex; background: #e9ecef;
+  border-bottom: 2px solid #dee2e6;
+}
+.step-bar .step {
+  flex: 1; text-align: center; padding: 8px 4px;
+  font-size: .72rem; color: #888; font-weight: 600;
+  border-bottom: 3px solid transparent;
+  transition: all .2s;
+}
+.step-bar .step.active { color: var(--primary); border-bottom-color: var(--primary); }
+.step-bar .step.done   { color: #198754; border-bottom-color: #198754; }
+
+/* Cards */
+.step-panel { display: none; padding: 16px; }
+.step-panel.active { display: block; }
+.field-card {
+  background: #fff; border-radius: 12px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.08);
+  padding: 16px; margin-bottom: 12px;
+}
+.field-card label { font-weight: 600; font-size: .82rem; color: #444; margin-bottom: 4px; display: block; }
+
+/* Manpower list */
+.mp-search { margin-bottom: 8px; }
+.mp-group-label { font-size: .68rem; font-weight: 700; color: #888; text-transform: uppercase;
+                  letter-spacing: .05em; margin: 10px 0 4px; padding-left: 4px; }
+.mp-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 8px; border-radius: 8px; cursor: pointer;
+  border: 1.5px solid transparent; transition: all .15s;
+  margin-bottom: 4px; background: #f8f9fa;
+}
+.mp-item.selected { background: #e8f4fd; border-color: var(--primary); }
+.mp-item input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--primary); flex-shrink: 0; }
+.mp-name { font-weight: 600; font-size: .85rem; line-height: 1.2; }
+.mp-role { font-size: .72rem; color: #888; }
+.mp-hidden { display: none !important; }
+
+/* Photos */
+.photo-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
+.photo-thumb {
+  aspect-ratio: 1; border-radius: 8px; overflow: hidden;
+  background: #eee; position: relative;
+}
+.photo-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.photo-thumb .rm-btn {
+  position: absolute; top: 3px; right: 3px;
+  background: rgba(0,0,0,.55); color: #fff; border: none;
+  border-radius: 50%; width: 22px; height: 22px; font-size: .7rem;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.photo-add-btn {
+  aspect-ratio: 1; border-radius: 8px; border: 2px dashed #ccc;
+  background: #f8f9fa; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 4px;
+  cursor: pointer; font-size: .72rem; color: #888;
+}
+.photo-add-btn span { font-size: 1.4rem; }
+
+/* Bottom nav */
+.bottom-nav {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  background: #fff; border-top: 1px solid #dee2e6;
+  padding: 10px 16px; display: flex; gap: 10px; z-index: 200;
+}
+.bottom-nav .btn { flex: 1; font-size: .9rem; padding: 10px; border-radius: 10px; font-weight: 600; }
+
+/* Toast */
+#fieldToast {
+  position: fixed; top: 70px; left: 50%; transform: translateX(-50%);
+  background: #333; color: #fff; padding: 8px 20px; border-radius: 20px;
+  font-size: .82rem; z-index: 9999; display: none; white-space: nowrap;
+}
+
+/* Success screen */
+#successPanel {
+  display: none; padding: 32px 16px; text-align: center;
+}
+#successPanel .check { font-size: 4rem; margin-bottom: 16px; }
+#successPanel h5 { font-weight: 700; color: #198754; }
+
+/* Hours row per person */
+.mp-hours-row {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 4px; padding-top: 6px; border-top: 1px solid #eee;
+}
+.mp-hours-row label { font-size: .72rem; color: #666; margin: 0; }
+.mp-hours-row select { font-size: .75rem; padding: 2px 6px; border-radius: 6px;
+                        border: 1px solid #ccc; background: #fff; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="field-header">
+  <div>
+    <h6>🏗 GPA Field Report</h6>
+    <small id="headerUser">Loading...</small>
+  </div>
+  <a href="/" style="color:#fff;font-size:.8rem;text-decoration:none;">⬅ Main App</a>
+</div>
+
+<!-- Step bar -->
+<div class="step-bar" id="stepBar">
+  <div class="step active" id="sb1">1. Area</div>
+  <div class="step" id="sb2">2. Kegiatan</div>
+  <div class="step" id="sb3">3. Personil</div>
+  <div class="step" id="sb4">4. Foto</div>
+</div>
+
+<!-- Success screen -->
+<div id="successPanel">
+  <div class="check">✅</div>
+  <h5>Laporan Terkirim!</h5>
+  <p class="text-muted" id="successMsg"></p>
+  <button class="btn btn-outline-primary w-100 mb-2" onclick="addAnotherArea()">+ Tambah Area Lain</button>
+  <button class="btn btn-success w-100" onclick="shareToWhatsApp()">📤 Bagikan ke WhatsApp</button>
+  <a href="/" class="btn btn-outline-secondary w-100 mt-2">⬅ Kembali ke Main App</a>
+</div>
+
+<!-- Step 1: Area & Date -->
+<div class="step-panel active" id="step1">
+  <div class="field-card">
+    <label>📅 Tanggal / Date</label>
+    <input type="date" class="form-control" id="f_date">
+  </div>
+  <div class="field-card">
+    <label>📍 Area Kerja / Work Area</label>
+    <select class="form-select" id="f_area">
+      <option value="">-- Pilih Area --</option>
+      {% for a in config.areas %}
+      <option value="{{ a }}">{{ a }}</option>
+      {% endfor %}
+    </select>
+  </div>
+</div>
+
+<!-- Step 2: Activities -->
+<div class="step-panel" id="step2">
+  <div class="field-card">
+    <label>🔨 Kegiatan Hari Ini <span class="text-muted" style="font-weight:400">(Activities Today)</span></label>
+    <textarea class="form-control" id="f_today" rows="4"
+      placeholder="Contoh: Instalasi cable tray lt.2&#10;Setting level busbar MA-42"></textarea>
+    <div class="mt-1" style="font-size:.7rem;color:#888">Satu kegiatan per baris / One activity per line</div>
+  </div>
+  <div class="field-card">
+    <label>📋 Rencana Besok <span class="text-muted" style="font-weight:400">(Activities Tomorrow)</span></label>
+    <textarea class="form-control" id="f_tomorrow" rows="3"
+      placeholder="Contoh: Terminasi kabel&#10;Lanjut instalasi"></textarea>
+  </div>
+  <div class="field-card">
+    <label>⚠️ Kendala <span class="text-muted" style="font-weight:400">(Constraints)</span></label>
+    <textarea class="form-control" id="f_constraints" rows="2"
+      placeholder="Tidak ada / None"></textarea>
+  </div>
+</div>
+
+<!-- Step 3: Crew / Manpower -->
+<div class="step-panel" id="step3">
+  <div class="field-card">
+    <label>⏰ Jam Kerja Default <span class="text-muted" style="font-weight:400">(Default Hours)</span></label>
+    <select class="form-select" id="f_default_hours" onchange="applyDefaultHours()">
+      {% for h in config.hours_options %}
+      <option value="{{ h }}"{% if loop.first %} selected{% endif %}>{{ h }}</option>
+      {% endfor %}
+    </select>
+    <div class="mt-1" style="font-size:.7rem;color:#888">Pilih jam kerja untuk semua yang dipilih</div>
+  </div>
+  <div class="field-card">
+    <label>👷 Pilih Personil <span class="text-muted" style="font-weight:400">(Select Crew)</span></label>
+    <input type="text" class="form-control mp-search" id="mpSearch"
+           placeholder="🔍 Cari nama..." oninput="filterManpower(this.value)">
+    <div id="mpList">
+      <!-- Populated by JS from config -->
+    </div>
+    <div class="mt-3 pt-3" style="border-top:1px solid #eee">
+      <div style="font-size:.76rem;font-weight:600;color:#666;margin-bottom:6px">Nama tidak ada di daftar? / Not in list?</div>
+      <div class="d-flex gap-2 mb-1">
+        <input type="text" id="customMpName" class="form-control form-control-sm" placeholder="Nama">
+        <input type="text" id="customMpRole" class="form-control form-control-sm" placeholder="Jabatan">
+        <button class="btn btn-sm btn-outline-primary flex-shrink-0" onclick="addCustomMp()">+ Add</button>
+      </div>
+      <div id="customMpList"></div>
+    </div>
+  </div>
+  <div class="field-card" id="selectedCount" style="display:none">
+    <div style="font-size:.82rem;color:#198754;font-weight:600" id="selectedCountText"></div>
+  </div>
+</div>
+
+<!-- Step 4: Photos -->
+<div class="step-panel" id="step4">
+  <div class="field-card">
+    <label>📷 Foto Dokumentasi <span class="text-muted" style="font-weight:400">(Photos)</span></label>
+    <div class="photo-grid" id="photoGrid">
+      <label class="photo-add-btn" for="cameraInput">
+        <span>📷</span>Kamera
+      </label>
+      <label class="photo-add-btn" for="galleryInput">
+        <span>🖼</span>Galeri
+      </label>
+    </div>
+    <input type="file" id="cameraInput"  accept="image/*" capture="environment" multiple style="display:none" onchange="handlePhotos(this)">
+    <input type="file" id="galleryInput" accept="image/*" multiple style="display:none" onchange="handlePhotos(this)">
+    <div style="font-size:.72rem;color:#888;margin-top:8px">Opsional — lewati jika tidak ada foto</div>
+  </div>
+</div>
+
+<!-- Bottom navigation -->
+<div class="bottom-nav" id="bottomNav">
+  <button class="btn btn-outline-secondary" id="btnBack" onclick="prevStep()" style="display:none">← Kembali</button>
+  <button class="btn btn-primary" id="btnNext" onclick="nextStep()">Lanjut →</button>
+  <button class="btn btn-success" id="btnSubmit" onclick="submitReport()" style="display:none">✅ Kirim Laporan</button>
+</div>
+
+<div id="fieldToast"></div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────
+const HOURS_OPTIONS = {{ config.hours_options | tojson }};
+const MANPOWER_DB   = {{ config.manpower_db | tojson }};
+const AREA_LIST     = {{ config.areas | tojson }};
+const APP_HOST      = window.location.origin;
+
+let currentStep = 1;
+let _photos = []; // {base64, filename, desc}
+let _pendingUploads = 0;
+
+// ── Init ───────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('f_date').value = new Date().toISOString().split('T')[0];
+
+  // Render manpower list grouped by role
+  renderManpowerList();
+
+  // Restore from localStorage
+  restoreState();
+
+  // Show username in header
+  fetch('/get_config').then(r => r.json()).then(cfg => {
+    // Header shows nothing from config but session username isn't accessible; leave blank
+  }).catch(() => {});
+});
+
+// ── Step navigation ─────────────────────────────────────────────
+function showStep(n) {
+  currentStep = n;
+  document.querySelectorAll('.step-panel').forEach((p, i) => {
+    p.classList.toggle('active', i + 1 === n);
+  });
+  // Update step bar
+  for (let i = 1; i <= 4; i++) {
+    const sb = document.getElementById('sb' + i);
+    sb.className = 'step' + (i < n ? ' done' : i === n ? ' active' : '');
+  }
+  // Update buttons
+  document.getElementById('btnBack').style.display   = n > 1 ? '' : 'none';
+  document.getElementById('btnNext').style.display   = n < 4 ? '' : 'none';
+  document.getElementById('btnSubmit').style.display = n === 4 ? '' : 'none';
+
+  saveState();
+  window.scrollTo(0, 0);
+}
+
+function nextStep() {
+  if (!validateStep(currentStep)) return;
+  showStep(currentStep + 1);
+}
+
+function prevStep() {
+  if (currentStep > 1) showStep(currentStep - 1);
+}
+
+function validateStep(n) {
+  if (n === 1) {
+    if (!document.getElementById('f_area').value) {
+      toast('⚠️ Pilih area terlebih dahulu'); return false;
+    }
+  }
+  if (n === 2) {
+    if (!document.getElementById('f_today').value.trim()) {
+      toast('⚠️ Isi kegiatan hari ini'); return false;
+    }
+  }
+  return true;
+}
+
+// ── Manpower list ───────────────────────────────────────────────
+const _EXCLUDED_ROLES = new Set(['Project Manager', 'Site Manager', 'HSE']);
+
+function renderManpowerList() {
+  const container = document.getElementById('mpList');
+  const groups = {};
+  MANPOWER_DB
+    .filter(m => m.type !== 'indirect' && !_EXCLUDED_ROLES.has(m.role))
+    .forEach(m => {
+      const g = m.role || 'Lainnya';
+      if (!groups[g]) groups[g] = [];
+      groups[g].push(m);
+    });
+
+  let html = '';
+  for (const [group, members] of Object.entries(groups)) {
+    html += `<div class="mp-group-label">${group}</div>`;
+    members.forEach(m => {
+      html += `
+        <div class="mp-item" id="mp_${esc(m.name)}" onclick="toggleMp(this,'${esc(m.name)}','${esc(m.role)}')">
+          <input type="checkbox" onclick="e => e.stopPropagation()" tabindex="-1">
+          <div>
+            <div class="mp-name">${esc(m.name)}</div>
+            <div class="mp-role">${esc(m.role)}</div>
+          </div>
+        </div>`;
+    });
+  }
+  container.innerHTML = html;
+}
+
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
+const _selected = {}; // name → {role, hours}
+
+function toggleMp(el, name, role) {
+  const cb = el.querySelector('input[type=checkbox]');
+  if (_selected[name]) {
+    delete _selected[name];
+    cb.checked = false;
+    el.classList.remove('selected');
+  } else {
+    const hours = document.getElementById('f_default_hours').value || HOURS_OPTIONS[0];
+    _selected[name] = { role, hours };
+    cb.checked = true;
+    el.classList.add('selected');
+  }
+  updateSelectedCount();
+}
+
+function applyDefaultHours() {
+  const h = document.getElementById('f_default_hours').value;
+  for (const name in _selected) _selected[name].hours = h;
+}
+
+function addCustomMp() {
+  const nameEl = document.getElementById('customMpName');
+  const roleEl = document.getElementById('customMpRole');
+  const name = nameEl.value.trim();
+  const role = roleEl.value.trim() || 'Teknisi';
+  if (!name) { nameEl.focus(); return; }
+  if (_selected[name]) { toast('⚠️ ' + name + ' sudah dipilih'); return; }
+
+  const hours = document.getElementById('f_default_hours').value || HOURS_OPTIONS[0];
+  _selected[name] = { role, hours };
+
+  const div = document.createElement('div');
+  div.className = 'mp-item selected';
+  div.dataset.customName = name;
+  div.innerHTML = `<input type="checkbox" checked tabindex="-1" onclick="event.stopPropagation()">
+    <div style="flex:1"><div class="mp-name">${esc(name)}</div><div class="mp-role">${esc(role)}</div></div>
+    <button class="btn btn-sm btn-link text-danger p-0 ms-2" style="font-size:.8rem" onclick="removeCustomMp('${esc(name)}',this.closest('[data-custom-name]'))">✕</button>`;
+  document.getElementById('customMpList').appendChild(div);
+
+  nameEl.value = '';
+  roleEl.value = '';
+  nameEl.focus();
+  updateSelectedCount();
+}
+
+function removeCustomMp(name, el) {
+  delete _selected[name];
+  if (el) el.remove();
+  updateSelectedCount();
+}
+
+function updateSelectedCount() {
+  const n = Object.keys(_selected).length;
+  const el = document.getElementById('selectedCount');
+  if (n > 0) {
+    el.style.display = '';
+    document.getElementById('selectedCountText').textContent = `✓ ${n} personil dipilih`;
+  } else {
+    el.style.display = 'none';
+  }
+  saveState();
+}
+
+function filterManpower(q) {
+  q = q.toLowerCase();
+  document.querySelectorAll('.mp-item').forEach(el => {
+    const txt = el.querySelector('.mp-name').textContent.toLowerCase() +
+                el.querySelector('.mp-role').textContent.toLowerCase();
+    el.classList.toggle('mp-hidden', q.length > 0 && !txt.includes(q));
+  });
+  // Hide group labels if all members hidden
+  document.querySelectorAll('.mp-group-label').forEach(lbl => {
+    let next = lbl.nextElementSibling;
+    let allHidden = true;
+    while (next && next.classList.contains('mp-item')) {
+      if (!next.classList.contains('mp-hidden')) { allHidden = false; break; }
+      next = next.nextElementSibling;
+    }
+    lbl.style.display = allHidden ? 'none' : '';
+  });
+}
+
+// ── Photo handling ──────────────────────────────────────────────
+async function handlePhotos(input) {
+  const files = Array.from(input.files);
+  for (const file of files) {
+    const b64 = await compressImage(file);
+    addPhotoThumb(b64);
+  }
+  input.value = '';
+}
+
+function addPhotoThumb(b64) {
+  const idx = _photos.length;
+  _photos.push({ base64: b64, filename: '', desc: '' });
+
+  const grid = document.getElementById('photoGrid');
+  const div = document.createElement('div');
+  div.className = 'photo-thumb';
+  div.dataset.idx = idx;
+  div.innerHTML = `<img src="${b64}"><button class="rm-btn" onclick="removePhoto(${idx})">✕</button>`;
+  grid.insertBefore(div, grid.querySelector('.photo-add-btn'));
+
+  // Upload to server
+  uploadPhoto(b64, idx);
+}
+
+function removePhoto(idx) {
+  _photos[idx] = null;
+  const thumb = document.querySelector(`.photo-thumb[data-idx="${idx}"]`);
+  if (thumb) thumb.remove();
+}
+
+async function uploadPhoto(b64, idx) {
+  try {
+    const blob = b64ToBlob(b64);
+    const fd = new FormData();
+    fd.append('photo', blob, 'photo.jpg');
+    _pendingUploads++;
+    const r = await fetch('/upload_temp_photo', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (j.ok && j.photo_filename && _photos[idx]) {
+      _photos[idx].filename = j.photo_filename;
+      _photos[idx].base64 = ''; // free memory
+    }
+  } catch (e) { /* keep base64 as fallback */ }
+  finally { _pendingUploads--; }
+}
+
+function b64ToBlob(dataUrl) {
+  const [header, b64] = dataUrl.split(',', 2);
+  const bytes = atob(b64);
+  const arr = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+  const mime = (header.match(/:(.+?);/) || [,'image/jpeg'])[1];
+  return new Blob([arr], { type: mime });
+}
+
+async function compressImage(file, maxPx=1280, quality=0.78) {
+  return new Promise(resolve => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = () => {
+        let w = img.width, h = img.height;
+        if (w > maxPx || h > maxPx) {
+          if (w > h) { h = Math.round(h * maxPx / w); w = maxPx; }
+          else       { w = Math.round(w * maxPx / h); h = maxPx; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// ── Submit ──────────────────────────────────────────────────────
+async function submitReport() {
+  if (!validateStep(currentStep)) return;
+
+  const btn = document.getElementById('btnSubmit');
+  btn.disabled = true;
+  btn.textContent = 'Mengirim...';
+
+  // Wait for photo uploads
+  let waited = 0;
+  while (_pendingUploads > 0 && waited < 15000) {
+    await new Promise(r => setTimeout(r, 200));
+    waited += 200;
+  }
+
+  const today = document.getElementById('f_today').value.trim();
+  const tomorrow = document.getElementById('f_tomorrow').value.trim();
+  const constraints = document.getElementById('f_constraints').value.trim();
+
+  const manpower = Object.entries(_selected).map(([name, info]) => ({
+    name, role: info.role, hours: info.hours
+  }));
+
+  const photos = _photos
+    .filter(Boolean)
+    .map(p => ({ photo_filename: p.filename, img_data: p.base64 || '', desc: p.desc }))
+    .filter(p => p.photo_filename || p.img_data);
+
+  const payload = {
+    date:               document.getElementById('f_date').value,
+    area_id:            document.getElementById('f_area').value,
+    activities_today:   today.split('\n').map(s => s.trim()).filter(Boolean),
+    activities_tomorrow:tomorrow.split('\n').map(s => s.trim()).filter(Boolean),
+    constraints,
+    manpower,
+    photos,
+  };
+
+  try {
+    const r = await fetch('/field/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      clearState();
+      showSuccess(payload);
+    } else {
+      toast('❌ ' + (j.error || 'Gagal mengirim'));
+      btn.disabled = false;
+      btn.textContent = '✅ Kirim Laporan';
+    }
+  } catch (e) {
+    toast('❌ Koneksi error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = '✅ Kirim Laporan';
+  }
+}
+
+function showSuccess(payload) {
+  document.getElementById('stepBar').style.display = 'none';
+  document.getElementById('bottomNav').style.display = 'none';
+  document.querySelectorAll('.step-panel').forEach(p => p.style.display = 'none');
+
+  const msg = `Area ${payload.area_id} — ${payload.date}\n${payload.manpower.length} personil, ${payload.photos.length} foto`;
+  document.getElementById('successMsg').textContent = msg;
+  document.getElementById('successPanel').style.display = 'block';
+  window.scrollTo(0, 0);
+
+  // Store for WhatsApp share
+  window._lastSubmit = payload;
+}
+
+function addAnotherArea() {
+  document.getElementById('stepBar').style.display = '';
+  document.getElementById('bottomNav').style.display = '';
+  document.getElementById('successPanel').style.display = 'none';
+  document.querySelectorAll('.step-panel').forEach(p => p.style.display = '');
+
+  // Reset fields but keep date
+  const dateVal = document.getElementById('f_date').value;
+  document.getElementById('f_area').value = '';
+  document.getElementById('f_today').value = '';
+  document.getElementById('f_tomorrow').value = '';
+  document.getElementById('f_constraints').value = '';
+  Object.keys(_selected).forEach(k => delete _selected[k]);
+  document.querySelectorAll('.mp-item.selected').forEach(el => {
+    el.classList.remove('selected');
+    el.querySelector('input').checked = false;
+  });
+  document.getElementById('customMpList').innerHTML = '';
+  _photos = [];
+  document.getElementById('photoGrid').querySelectorAll('.photo-thumb').forEach(t => t.remove());
+  document.getElementById('f_date').value = dateVal;
+
+  showStep(1);
+}
+
+// ── WhatsApp share ──────────────────────────────────────────────
+async function shareToWhatsApp() {
+  const p = window._lastSubmit;
+  if (!p) return;
+
+  const text = `📋 *Daily Report GPA*\n📅 ${p.date}\n📍 Area: ${p.area_id}\n\n🔨 Kegiatan:\n${(p.activities_today||[]).map(a=>'• '+a).join('\n')}\n\n👷 Personil: ${p.manpower.length} org`;
+
+  const dummyFile = new File([''], 'test.txt', { type: 'text/plain' });
+  const canShareFiles = navigator.canShare && navigator.canShare({ files: [dummyFile] });
+
+  if (canShareFiles) {
+    try {
+      await navigator.share({ title: 'Daily Report GPA', text });
+      return;
+    } catch (e) { /* fallback */ }
+  }
+
+  // Fallback: open WhatsApp with text
+  window.open('https://wa.me/?text=' + encodeURIComponent(text), '_blank');
+}
+
+// ── LocalStorage persistence ────────────────────────────────────
+function saveState() {
+  try {
+    localStorage.setItem('gpa_field_state', JSON.stringify({
+      step: currentStep,
+      date: document.getElementById('f_date').value,
+      area: document.getElementById('f_area').value,
+      today: document.getElementById('f_today').value,
+      tomorrow: document.getElementById('f_tomorrow').value,
+      constraints: document.getElementById('f_constraints').value,
+      selected: _selected,
+    }));
+  } catch (e) {}
+}
+
+function restoreState() {
+  try {
+    const raw = localStorage.getItem('gpa_field_state');
+    if (!raw) return;
+    const s = JSON.parse(raw);
+    if (s.date)        document.getElementById('f_date').value        = s.date;
+    if (s.area)        document.getElementById('f_area').value        = s.area;
+    if (s.today)       document.getElementById('f_today').value       = s.today;
+    if (s.tomorrow)    document.getElementById('f_tomorrow').value    = s.tomorrow;
+    if (s.constraints) document.getElementById('f_constraints').value = s.constraints;
+    if (s.selected) {
+      Object.entries(s.selected).forEach(([name, info]) => {
+        _selected[name] = info;
+        // tick checkbox
+        const el = document.getElementById('mp_' + CSS.escape(name));
+        if (el) { el.classList.add('selected'); el.querySelector('input').checked = true; }
+      });
+      updateSelectedCount();
+    }
+    if (s.step && s.step > 1) showStep(s.step);
+  } catch (e) {}
+}
+
+function clearState() {
+  try { localStorage.removeItem('gpa_field_state'); } catch (e) {}
+}
+
+// ── Inputs trigger state save ───────────────────────────────────
+['f_date','f_area','f_today','f_tomorrow','f_constraints'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('input', saveState);
+});
+
+// ── Toast ───────────────────────────────────────────────────────
+function toast(msg, dur=2800) {
+  const t = document.getElementById('fieldToast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  setTimeout(() => { t.style.display = 'none'; }, dur);
+}
+</script>
+</body>
+</html>

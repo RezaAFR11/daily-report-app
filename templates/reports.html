@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>My Reports — GPA</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+  :root { --primary:#003366; --accent:#C89010; }
+  body  { background:#f4f6fb; }
+  .topbar { background:var(--primary); color:#fff; padding:.75rem 1.5rem;
+            display:flex; align-items:center; justify-content:space-between; }
+  .topbar h6 { margin:0; font-size:1rem; }
+  .report-card { background:#fff; border-radius:8px; box-shadow:0 1px 6px rgba(0,0,0,.08);
+                 padding:1rem 1.25rem; margin-bottom:.75rem;
+                 display:flex; align-items:center; gap:1rem; flex-wrap:wrap; }
+  .report-meta { flex:1; min-width:180px; }
+  .report-meta .fname { font-weight:600; font-size:.88rem; word-break:break-all; }
+  .report-meta .info  { font-size:.78rem; color:#666; margin-top:.2rem; }
+  .empty { text-align:center; color:#999; padding:4rem 0; }
+  .badge-day { background:var(--accent); color:#fff; border-radius:4px;
+               font-size:.72rem; padding:.15rem .5rem; font-weight:700; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <h6>📄 My Reports &nbsp;<span style="font-size:.78rem;opacity:.7;">{{ username }}</span></h6>
+  <div class="d-flex gap-2">
+    {% if is_admin %}
+    <a href="/admin" class="btn btn-sm btn-outline-light">🛡 Admin</a>
+    {% endif %}
+    <a href="/letters" class="btn btn-sm btn-outline-light">📝 Letters</a>
+    <a href="/" class="btn btn-sm btn-outline-light">← Back to App</a>
+    <a href="/logout" class="btn btn-sm btn-outline-warning">Logout</a>
+  </div>
+</div>
+
+<div class="container-fluid py-4" style="max-width:860px;">
+  <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h5 class="mb-0" style="color:var(--primary);">Report History</h5>
+    <div class="d-flex align-items-center gap-2">
+      <span class="text-muted" style="font-size:.82rem;" id="report-count">{{ reports|length }} report(s)</span>
+      <input type="text" class="form-control form-control-sm" id="report-search"
+        placeholder="🔍 Search..." oninput="filterReports()"
+        style="width:200px;" {% if not reports %}disabled{% endif %}/>
+    </div>
+  </div>
+
+  {% if reports %}
+    {% for r in reports %}
+    <div class="report-card" id="row-{{ loop.index }}">
+      <div style="font-size:1.6rem;">📑</div>
+      <div class="report-meta">
+        <div class="fname">{{ r.filename }}</div>
+        <div class="info">
+          <span class="badge-day">Day {{ r.day_no }}</span>
+          &nbsp;{{ r.date }}
+          {% if r.project_no %}&nbsp;·&nbsp;{{ r.project_no }}{% endif %}
+          &nbsp;·&nbsp;Generated {{ r.generated_at }}
+          &nbsp;·&nbsp;{{ r.size_kb }} KB
+        </div>
+      </div>
+      <div class="d-flex gap-2 flex-shrink-0">
+        <a href="/reports/download/{{ r.filename }}"
+           class="btn btn-sm btn-outline-primary">⬇ Download</a>
+        <button class="btn btn-sm btn-outline-danger"
+                onclick="deleteReport('{{ r.filename }}', this)">🗑</button>
+      </div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="empty">
+      <div style="font-size:3rem;">📭</div>
+      <p class="mt-2">No reports yet. Generate your first PDF from the main app.</p>
+    </div>
+  {% endif %}
+</div>
+
+<script>
+function deleteReport(filename, btn) {
+  if (!confirm('Delete "' + filename + '"? This cannot be undone.')) return;
+  fetch('/reports/delete', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({filename}),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      btn.closest('.report-card').remove();
+      updateCount();
+    }
+  })
+  .catch(err => alert('Delete failed: ' + err.message));
+}
+
+function filterReports() {
+  const q = document.getElementById('report-search').value.toLowerCase();
+  const cards = document.querySelectorAll('.report-card');
+  let visible = 0;
+  cards.forEach(card => {
+    const match = card.textContent.toLowerCase().includes(q);
+    card.style.display = match ? '' : 'none';
+    if (match) visible++;
+  });
+  const cnt = document.getElementById('report-count');
+  if (cnt) cnt.textContent = `${visible} report(s)`;
+}
+
+function updateCount() {
+  const cards = document.querySelectorAll('.report-card');
+  const cnt = document.getElementById('report-count');
+  if (cnt) cnt.textContent = `${cards.length} report(s)`;
+}
+</script>
+</body>
+</html>

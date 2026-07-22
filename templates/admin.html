@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin — GPA Daily Report</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+  :root { --primary:#003366; --accent:#C89010; }
+  body  { background:#f4f6fb; }
+  .topbar { background:var(--primary); color:#fff; padding:.75rem 1.5rem;
+            display:flex; align-items:center; justify-content:space-between; }
+  .topbar h6 { margin:0; font-size:1rem; }
+  .section-card { background:#fff; border-radius:8px; box-shadow:0 1px 6px rgba(0,0,0,.08);
+                  padding:1.25rem; margin-bottom:1.5rem; }
+  .user-row { border-bottom:1px solid #eee; padding:.6rem 0; display:flex;
+              align-items:center; gap:.75rem; flex-wrap:wrap; }
+  .user-row:last-child { border:none; }
+  .badge-admin { background:var(--accent); color:#fff; font-size:.68rem;
+                 padding:.1rem .5rem; border-radius:4px; font-weight:700; }
+  .report-row { font-size:.82rem; display:flex; align-items:center; gap:.75rem;
+                padding:.4rem 0; border-bottom:1px solid #f0f0f0; flex-wrap:wrap; }
+  .report-row:last-child { border:none; }
+  .user-panel { border:1px solid #e0e8f0; border-radius:8px; margin-bottom:1rem; overflow:hidden; }
+  .user-panel-header { background:#eaf2fb; padding:.6rem 1rem;
+                       display:flex; align-items:center; justify-content:space-between;
+                       cursor:pointer; font-weight:600; font-size:.88rem; }
+  .user-panel-body { padding:.75rem 1rem; display:none; }
+  .user-panel-body.open { display:block; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <h6>🛡 Admin Panel &nbsp;<span style="font-size:.75rem;opacity:.7;">{{ current_user }}</span></h6>
+  <div class="d-flex gap-2">
+    <a href="/letters" class="btn btn-sm btn-outline-light">📝 Letters</a>
+    <a href="/admin/activity_log" class="btn btn-sm btn-outline-light">📋 Activity Log</a>
+    <a href="/" class="btn btn-sm btn-outline-light">← Back to App</a>
+    <a href="/logout" class="btn btn-sm btn-outline-warning">Logout</a>
+  </div>
+</div>
+
+<div class="container-fluid py-4" style="max-width:900px;">
+
+  <!-- ── User Management ── -->
+  <div class="section-card">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h5 class="mb-0" style="color:var(--primary);">User Management</h5>
+      <button class="btn btn-sm btn-primary" onclick="showAddUser()">+ Add User</button>
+    </div>
+
+    <!-- Add user form (hidden by default) -->
+    <div id="addUserForm" class="border rounded p-3 mb-3 bg-light d-none">
+      <div class="row g-2 align-items-end">
+        <div class="col-md-4">
+          <label class="form-label fw-semibold" style="font-size:.82rem;">Username</label>
+          <input type="text" id="newUsername" class="form-control form-control-sm" placeholder="e.g. satria">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label fw-semibold" style="font-size:.82rem;">PIN (4 digits)</label>
+          <input type="text" id="newPin" class="form-control form-control-sm" placeholder="0000" maxlength="4" inputmode="numeric">
+        </div>
+        <div class="col-md-3 d-flex align-items-center gap-2">
+          <input type="checkbox" id="newIsAdmin" class="form-check-input">
+          <label for="newIsAdmin" class="form-check-label" style="font-size:.82rem;">Admin?</label>
+        </div>
+        <div class="col-md-2 d-flex gap-2">
+          <button class="btn btn-sm btn-primary" onclick="addUser()">Add</button>
+          <button class="btn btn-sm btn-secondary" onclick="hideAddUser()">Cancel</button>
+        </div>
+      </div>
+      <div id="addUserError" class="text-danger mt-2" style="font-size:.8rem;display:none;"></div>
+    </div>
+
+    <div id="userList">
+      {% for u in users %}
+      <div class="user-row" id="urow-{{ u.username }}">
+        <span class="fw-semibold" style="min-width:120px;">{{ u.username }}</span>
+        {% if u.is_admin %}<span class="badge-admin">ADMIN</span>{% endif %}
+        <span class="text-muted" style="font-size:.78rem;flex:1;">
+          Joined {{ u.created_at }} &nbsp;·&nbsp; {{ u.report_count }} report(s)
+        </span>
+        <div class="d-flex gap-2">
+          <button class="btn btn-sm btn-outline-secondary"
+                  onclick="showResetPin('{{ u.username }}')">Reset PIN</button>
+          <button class="btn btn-sm btn-outline-primary"
+                  onclick="viewReports('{{ u.username }}')">Reports</button>
+          {% if u.username != current_user %}
+          <button class="btn btn-sm btn-outline-danger"
+                  onclick="removeUser('{{ u.username }}')">Remove</button>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- ── Reset PIN modal ── -->
+  <div class="modal fade" id="resetPinModal" tabindex="-1">
+    <div class="modal-dialog modal-sm">
+      <div class="modal-content">
+        <div class="modal-header py-2" style="background:var(--primary);">
+          <h6 class="modal-title text-white mb-0">Reset PIN</h6>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p style="font-size:.85rem;">User: <strong id="resetPinUser"></strong></p>
+          <input type="text" id="resetPinVal" class="form-control" placeholder="New PIN (4 digits)"
+                 maxlength="4" inputmode="numeric">
+          <div id="resetPinError" class="text-danger mt-1" style="font-size:.8rem;display:none;"></div>
+        </div>
+        <div class="modal-footer py-2">
+          <button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-sm btn-primary" onclick="doResetPin()">Reset</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── User Reports Panel ── -->
+  <div class="section-card" id="reportsPanel" style="display:none;">
+    <h5 class="mb-3" style="color:var(--primary);">Reports — <span id="reportsPanelUser"></span></h5>
+    <div id="reportsList">
+      <p class="text-muted" style="font-size:.85rem;">Loading...</p>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+function showAddUser()  { document.getElementById('addUserForm').classList.remove('d-none'); }
+function hideAddUser()  { document.getElementById('addUserForm').classList.add('d-none'); }
+
+function addUser() {
+  const username = document.getElementById('newUsername').value.trim().toLowerCase();
+  const pin      = document.getElementById('newPin').value.trim();
+  const is_admin = document.getElementById('newIsAdmin').checked;
+  const errEl    = document.getElementById('addUserError');
+  errEl.style.display = 'none';
+  if (!username) { errEl.textContent='Username required.'; errEl.style.display=''; return; }
+  if (!/^[0-9]{4}$/.test(pin)) { errEl.textContent='PIN must be exactly 4 digits.'; errEl.style.display=''; return; }
+  fetch('/admin/add_user', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({username, pin, is_admin}),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.error) { errEl.textContent=d.error; errEl.style.display=''; return; }
+    location.reload();
+  })
+  .catch(err => { errEl.textContent=err.message; errEl.style.display=''; });
+}
+
+function removeUser(username) {
+  if (!confirm('Remove user "' + username + '"? Their reports will remain on disk.')) return;
+  fetch('/admin/remove_user', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({username}),
+  })
+  .then(r => r.json())
+  .then(d => { if (d.ok) document.getElementById('urow-' + username).remove(); else alert(d.error); })
+  .catch(err => alert(err.message));
+}
+
+let _resetUser = '';
+function showResetPin(username) {
+  _resetUser = username;
+  document.getElementById('resetPinUser').textContent = username;
+  document.getElementById('resetPinVal').value = '';
+  document.getElementById('resetPinError').style.display = 'none';
+  new bootstrap.Modal(document.getElementById('resetPinModal')).show();
+}
+function doResetPin() {
+  const pin = document.getElementById('resetPinVal').value.trim();
+  const errEl = document.getElementById('resetPinError');
+  if (!/^[0-9]{4}$/.test(pin)) { errEl.textContent='PIN must be 4 digits.'; errEl.style.display=''; return; }
+  fetch('/admin/reset_pin', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({username: _resetUser, pin}),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) { bootstrap.Modal.getInstance(document.getElementById('resetPinModal')).hide(); alert('PIN reset successfully.'); }
+    else { errEl.textContent = d.error; errEl.style.display = ''; }
+  });
+}
+
+function viewReports(username) {
+  const panel = document.getElementById('reportsPanel');
+  const list  = document.getElementById('reportsList');
+  document.getElementById('reportsPanelUser').textContent = username;
+  panel.style.display = '';
+  list.innerHTML = '<p class="text-muted" style="font-size:.85rem;">Loading...</p>';
+  panel.scrollIntoView({behavior:'smooth'});
+
+  fetch('/admin/user_reports/' + username)
+  .then(r => r.json())
+  .then(data => {
+    if (!data.reports.length) {
+      list.innerHTML = '<p class="text-muted" style="font-size:.85rem;">No reports yet.</p>';
+      return;
+    }
+    list.innerHTML = data.reports.map(r => `
+      <div class="report-row" id="ar-${username}-${r.filename.replace(/[^a-z0-9]/gi,'_')}">
+        <div style="flex:1;">
+          <span class="fw-semibold" style="font-size:.83rem;">${r.filename}</span><br>
+          <span class="text-muted" style="font-size:.75rem;">
+            Day ${r.day_no} &nbsp;·&nbsp; ${r.date}
+            &nbsp;·&nbsp; Generated ${r.generated_at}
+            &nbsp;·&nbsp; ${r.size_kb} KB
+          </span>
+        </div>
+        <a href="/admin/download/${username}/${r.filename}"
+           class="btn btn-sm btn-outline-primary">⬇</a>
+        <button class="btn btn-sm btn-outline-danger"
+                onclick="adminDelete('${username}','${r.filename}',this)">🗑</button>
+      </div>`).join('');
+  })
+  .catch(() => { list.innerHTML = '<p class="text-danger">Failed to load.</p>'; });
+}
+
+function adminDelete(username, filename, btn) {
+  if (!confirm('Delete "' + filename + '"?')) return;
+  fetch('/admin/delete_report', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({username, filename}),
+  })
+  .then(r => r.json())
+  .then(d => { if (d.ok) btn.closest('.report-row').remove(); else alert(d.error); });
+}
+</script>
+</body>
+</html>
