@@ -2014,11 +2014,19 @@ function compressImage(file, maxPx=1280, quality=0.74) {
 // VERSIONS MODAL (Draft Snapshot History)
 // ════════════════════════════════════════════════════════════
 function formatSnapshotName(filename) {
+  if (typeof filename !== 'string') return '';
   // filename: "20260520_143200.json" → "20 May 2026  14:32"
   const m = filename.match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/);
   if (!m) return filename;
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   return `${parseInt(m[3])} ${months[parseInt(m[2])-1]} ${m[1]}  ${m[4]}:${m[5]}`;
+}
+
+function normalizeSnapshot(snapshot) {
+  // Support both legacy filename strings and current metadata objects.
+  if (typeof snapshot === 'string') return { filename: snapshot };
+  if (snapshot && typeof snapshot.filename === 'string') return snapshot;
+  return null;
 }
 
 async function loadVersionsList() {
@@ -2027,19 +2035,40 @@ async function loadVersionsList() {
   list.innerHTML = '<div class="text-center text-muted py-3" style="font-size:.85rem;">Loading…</div>';
   try {
     const r = await fetch('/draft_snapshots');
+    if (!r.ok) throw new Error(`Server returned ${r.status}`);
     const snapshots = await r.json();
-    if (!Array.isArray(snapshots) || snapshots.length === 0) {
+    const validSnapshots = Array.isArray(snapshots)
+      ? snapshots.map(normalizeSnapshot).filter(Boolean)
+      : [];
+    if (validSnapshots.length === 0) {
       list.innerHTML = '<div class="text-center text-muted py-4" style="font-size:.85rem;">No snapshots saved yet.<br><small>Snapshots are auto-saved every 90 s.</small></div>';
       return;
     }
-    list.innerHTML = snapshots.map(fname => `
-      <div class="d-flex justify-content-between align-items-center py-2 border-bottom">
-        <div>
-          <div style="font-size:.85rem;font-weight:500;">🕐 ${formatSnapshotName(fname)}</div>
-          <div style="font-size:.7rem;color:#888;">${fname}</div>
-        </div>
-        <button class="btn btn-sm btn-outline-primary" onclick="restoreSnapshot('${fname}')">Restore</button>
-      </div>`).join('');
+    list.replaceChildren();
+    validSnapshots.forEach(snapshot => {
+      const row = document.createElement('div');
+      row.className = 'd-flex justify-content-between align-items-center py-2 border-bottom';
+
+      const details = document.createElement('div');
+      const title = document.createElement('div');
+      title.style.cssText = 'font-size:.85rem;font-weight:500;';
+      title.textContent = `🕐 ${snapshot.ts || formatSnapshotName(snapshot.filename)}`;
+      const meta = document.createElement('div');
+      meta.style.cssText = 'font-size:.7rem;color:#888;';
+      meta.textContent = snapshot.size_kb == null
+        ? snapshot.filename
+        : `${snapshot.filename} · ${snapshot.size_kb} KB`;
+      details.append(title, meta);
+
+      const button = document.createElement('button');
+      button.className = 'btn btn-sm btn-outline-primary';
+      button.type = 'button';
+      button.textContent = 'Restore';
+      button.addEventListener('click', () => restoreSnapshot(snapshot.filename));
+
+      row.append(details, button);
+      list.appendChild(row);
+    });
   } catch(e) {
     list.innerHTML = `<div class="text-center text-danger py-3" style="font-size:.85rem;">Failed to load snapshots: ${e.message}</div>`;
   }
@@ -2050,6 +2079,7 @@ async function restoreSnapshot(filename) {
   try {
     const r = await fetch(`/draft_snapshots/load/${encodeURIComponent(filename)}`);
     const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `Server returned ${r.status}`);
     populateForm(data);
     bootstrap.Modal.getInstance(document.getElementById('versionsModal')).hide();
     toast(`✓ Restored snapshot: ${formatSnapshotName(filename)}`, 'success');

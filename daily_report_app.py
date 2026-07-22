@@ -1236,6 +1236,8 @@ def log_activity(username, action, details=''):
     with open(log_file,'w') as f: json.dump(log, f, indent=2)
 
 # ── Versioned draft snapshot ──────────────────────────────────────────────────
+_SNAPSHOT_FILENAME = re.compile(r'^\d{8}_\d{6}\.json$')
+
 def save_draft_snapshot(username, data):
     snap_dir = os.path.join(get_user_dir(username), 'drafts')
     os.makedirs(snap_dir, exist_ok=True)
@@ -1243,7 +1245,10 @@ def save_draft_snapshot(username, data):
     snap_file = os.path.join(snap_dir, f'{ts}.json')
     with open(snap_file,'w') as f: json.dump(data, f)
     # Keep only last 20 snapshots
-    snaps = sorted(os.listdir(snap_dir))
+    snaps = sorted(
+        name for name in os.listdir(snap_dir)
+        if _SNAPSHOT_FILENAME.fullmatch(name)
+    )
     for old in snaps[:-20]:
         try: os.remove(os.path.join(snap_dir, old))
         except: pass
@@ -1255,7 +1260,7 @@ def get_draft_snapshots(username):
     snaps = sorted(os.listdir(snap_dir), reverse=True)
     result = []
     for s in snaps:
-        if s.endswith('.json'):
+        if _SNAPSHOT_FILENAME.fullmatch(s):
             ts_raw = s.replace('.json','')
             try:
                 ts_fmt = datetime.strptime(ts_raw, '%Y%m%d_%H%M%S').strftime('%d %b %Y %H:%M:%S')
@@ -1612,6 +1617,8 @@ def draft_snapshots():
 @app.route('/draft_snapshots/load/<filename>')
 @login_required
 def load_draft_snapshot(filename):
+    if not _SNAPSHOT_FILENAME.fullmatch(filename):
+        return jsonify({'error':'Not found'}), 404
     username = session['username']
     snap_dir = os.path.join(get_user_dir(username),'drafts')
     fpath    = os.path.join(snap_dir, filename)
