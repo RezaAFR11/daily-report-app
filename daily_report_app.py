@@ -78,6 +78,7 @@ _check_and_install()
 import os, json, io, base64, uuid, re, string
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 # ── PDF engine ────────────────────────────────────────────────────────────────
 from reportlab.lib.pagesizes import A4
@@ -925,6 +926,56 @@ def index():
 
 # ── Photo server helpers ──────────────────────────────────────────────────────
 _SAFE_PHOTO = re.compile(r'^[\w\-]{1,64}\.(jpg|jpeg|png|webp)$', re.IGNORECASE)
+PHOTO_MAX_INPUT_BYTES = 20 * 1024 * 1024
+PHOTO_MAX_DIMENSION = 1280
+PHOTO_JPEG_QUALITY = 74
+
+def compress_photo_bytes(raw):
+    """Normalize an uploaded photo to an oriented, storage-efficient JPEG."""
+    if not raw:
+        raise ValueError('Image is empty')
+
+    try:
+        with Image.open(io.BytesIO(raw)) as source:
+            source_format = (source.format or '').upper()
+            source_orientation = source.getexif().get(274, 1)
+            source.load()
+            image = ImageOps.exif_transpose(source)
+
+            # JPEG has no alpha channel. Composite transparent images over white.
+            if image.mode in ('RGBA', 'LA') or 'transparency' in image.info:
+                rgba = image.convert('RGBA')
+                flattened = Image.new('RGB', rgba.size, 'white')
+                flattened.paste(rgba, mask=rgba.getchannel('A'))
+                image = flattened
+            elif image.mode != 'RGB':
+                image = image.convert('RGB')
+
+            original_size = image.size
+            image.thumbnail(
+                (PHOTO_MAX_DIMENSION, PHOTO_MAX_DIMENSION),
+                Image.Resampling.LANCZOS,
+            )
+
+            output = io.BytesIO()
+            image.save(
+                output,
+                format='JPEG',
+                quality=PHOTO_JPEG_QUALITY,
+                optimize=True,
+                progressive=True,
+            )
+            compressed = output.getvalue()
+
+        # A browser-compressed JPEG may already be smaller than a second encode.
+        # Keep it only when it is already compliant and needs no orientation fix.
+        already_within_limit = max(original_size) <= PHOTO_MAX_DIMENSION
+        if (source_format in ('JPEG', 'JPG') and source_orientation in (None, 1)
+                and already_within_limit and len(raw) <= len(compressed)):
+            return raw
+        return compressed
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise ValueError('Invalid or unsupported image file') from exc
 
 def resolve_photos(d, username):
     """Replace photo_filename references with actual base64 img_data for PDF generation."""
@@ -954,17 +1005,21 @@ def upload_temp_photo():
     if 'photo' in request.files:
         try:
             f = request.files['photo']
-            raw = f.read()
-            if len(raw) > 3 * 1024 * 1024:
-                return jsonify({'error': 'Image too large (max 3 MB)'}), 413
-            orig = f.filename or 'photo.jpg'
-            ext = orig.rsplit('.', 1)[-1].lower() if '.' in orig else 'jpg'
-            if ext not in ('jpg', 'jpeg', 'png', 'webp'):
-                ext = 'jpg'
-            fname = f'{uuid.uuid4().hex}.{ext}'
+            raw = f.read(PHOTO_MAX_INPUT_BYTES + 1)
+            if len(raw) > PHOTO_MAX_INPUT_BYTES:
+                return jsonify({'error': 'Image too large (max 20 MB)'}), 413
+            compressed = compress_photo_bytes(raw)
+            fname = f'{uuid.uuid4().hex}.jpg'
             fpath = os.path.join(temp_dir, fname)
-            with open(fpath, 'wb') as fh: fh.write(raw)
-            return jsonify({'ok': True, 'photo_filename': fname})
+            with open(fpath, 'wb') as fh: fh.write(compressed)
+            return jsonify({
+                'ok': True,
+                'photo_filename': fname,
+                'original_size': len(raw),
+                'stored_size': len(compressed),
+            })
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
         except Exception as e:
             return jsonify({'error': str(e)}), 500
 
@@ -976,15 +1031,20 @@ def upload_temp_photo():
     try:
         header, b64 = img_data.split(',', 1)
         raw = base64.b64decode(b64)
-        if len(raw) > 3 * 1024 * 1024:
-            return jsonify({'error': 'Image too large (max 3 MB)'}), 413
-        ext = 'jpg'
-        if 'png' in header: ext = 'png'
-        elif 'webp' in header: ext = 'webp'
-        fname = f'{uuid.uuid4().hex}.{ext}'
+        if len(raw) > PHOTO_MAX_INPUT_BYTES:
+            return jsonify({'error': 'Image too large (max 20 MB)'}), 413
+        compressed = compress_photo_bytes(raw)
+        fname = f'{uuid.uuid4().hex}.jpg'
         fpath = os.path.join(temp_dir, fname)
-        with open(fpath, 'wb') as fh: fh.write(raw)
-        return jsonify({'ok': True, 'photo_filename': fname})
+        with open(fpath, 'wb') as fh: fh.write(compressed)
+        return jsonify({
+            'ok': True,
+            'photo_filename': fname,
+            'original_size': len(raw),
+            'stored_size': len(compressed),
+        })
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

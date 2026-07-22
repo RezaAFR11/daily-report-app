@@ -485,7 +485,7 @@ function b64ToBlob(dataUrl) {
   return new Blob([arr], { type: mime });
 }
 
-async function compressImage(file, maxPx=1280, quality=0.78) {
+async function compressImage(file, maxPx=1280, quality=0.74) {
   return new Promise(resolve => {
     const reader = new FileReader();
     reader.onload = e => {
