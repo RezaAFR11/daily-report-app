@@ -674,15 +674,51 @@ def get_reports_index(username):
     idx = os.path.join(get_reports_dir(username), 'index.json')
     if os.path.exists(idx):
         try:
-            with open(idx) as f: return json.load(f)
+            with open(idx, encoding='utf-8') as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
         except: pass
     return []
 
 def append_report_index(username, entry):
     idx = get_reports_index(username)
     idx.insert(0, entry)
-    with open(os.path.join(get_reports_dir(username), 'index.json'), 'w') as f:
-        json.dump(idx, f, indent=2)
+    reports_dir = get_reports_dir(username)
+    os.makedirs(reports_dir, exist_ok=True)
+    index_path = os.path.join(reports_dir, 'index.json')
+    temp_path = f'{index_path}.{uuid.uuid4().hex}.tmp'
+    try:
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            json.dump(idx, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, index_path)
+    finally:
+        if os.path.exists(temp_path):
+            try: os.remove(temp_path)
+            except OSError: pass
+
+def _safe_report_filename_part(value, fallback):
+    value = str(value or fallback)
+    value = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', '-', value)
+    return value.strip(' ._-') or fallback
+
+def archive_generated_report(username, filename, pdf_bytes, entry):
+    """Atomically save a PDF copy, then add it to the My Reports index."""
+    reports_dir = get_reports_dir(username)
+    os.makedirs(reports_dir, exist_ok=True)
+    report_path = os.path.join(reports_dir, filename)
+    temp_path = f'{report_path}.{uuid.uuid4().hex}.tmp'
+    try:
+        with open(temp_path, 'wb') as f:
+            f.write(pdf_bytes)
+        os.replace(temp_path, report_path)
+    finally:
+        if os.path.exists(temp_path):
+            try: os.remove(temp_path)
+            except OSError: pass
+
+    entry = dict(entry)
+    entry['size_kb'] = round(len(pdf_bytes) / 1024, 1)
+    append_report_index(username, entry)
 
 def login_required(f):
     @functools.wraps(f)
@@ -1064,30 +1100,45 @@ def serve_temp_photo(filename):
 @login_required
 def generate():
     username = session['username']
-    d = resolve_photos(request.json, username)
-    cfg = load_config()
-    date_str = d.get('date','Report').replace(' ','_')
-    day_str  = d.get('day_no','')
-    fname    = f"Daily Report - PT GPA - KN - {date_str} (Day {day_str}).pdf"
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({'error': 'Invalid report data'}), 400
+
     try:
+        d = resolve_photos(payload, username)
+        cfg = load_config()
+        date_str = _safe_report_filename_part(d.get('date'), 'Report').replace(' ', '_')
+        day_str = _safe_report_filename_part(d.get('day_no'), 'Unnumbered')
+        fname = f"Daily Report - PT GPA - KN - {date_str} (Day {day_str}).pdf"
         buf = generate_pdf(d, None, cfg)
     except Exception as e:
+        app.logger.exception('PDF generation failed for user %s', username)
         return jsonify({'error': f'PDF generation failed: {e}'}), 500
-    # Save a copy to user's reports folder
-    rdir  = get_reports_dir(username)
-    fpath = os.path.join(rdir, fname)
-    with open(fpath, 'wb') as f:
-        f.write(buf.getvalue())
-    append_report_index(username, {
-        'filename':     fname,
-        'date':         d.get('date',''),
-        'day_no':       d.get('day_no',''),
-        'project_no':   d.get('project_no',''),
-        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
-        'size_kb':      round(os.path.getsize(fpath) / 1024, 1),
-    })
+
+    pdf_bytes = buf.getvalue()
+    archive_failed = False
+    try:
+        archive_generated_report(username, fname, pdf_bytes, {
+            'filename':     fname,
+            'date':         d.get('date',''),
+            'day_no':       d.get('day_no',''),
+            'project_no':   d.get('project_no',''),
+            'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
+        })
+    except Exception:
+        # A temporary My Reports problem must not block a valid PDF download.
+        archive_failed = True
+        app.logger.exception('Could not archive generated PDF for user %s', username)
+
     buf.seek(0)
-    return send_file(buf, as_attachment=True, download_name=fname, mimetype='application/pdf')
+    response = send_file(
+        buf,
+        as_attachment=True,
+        download_name=fname,
+        mimetype='application/pdf',
+    )
+    response.headers['X-Report-Archive-Status'] = 'failed' if archive_failed else 'saved'
+    return response
 
 @app.route('/save_draft', methods=['POST'])
 @login_required

@@ -1418,6 +1418,7 @@ async function generatePDF() {
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(collectData()),
     });
+    const archiveStatus = r.headers.get('X-Report-Archive-Status');
 
     if (_genTimer) { clearInterval(_genTimer); _genTimer = null; }
 
@@ -1444,7 +1445,11 @@ async function generatePDF() {
 
     _setProgress('✅ PDF ready!', 100);
     setTimeout(_hideProgress, 1500);
-    toast('✅ PDF generated and downloaded!', 'success');
+    if (archiveStatus === 'failed') {
+      toast('PDF downloaded, but could not be saved to My Reports.', 'warning');
+    } else {
+      toast('✅ PDF generated and downloaded!', 'success');
+    }
 
   } catch(err) {
     _hideProgress();
