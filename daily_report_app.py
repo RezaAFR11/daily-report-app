@@ -75,7 +75,7 @@ _check_and_install()
 # ============================================================
 #  Now safe to import everything
 # ============================================================
-import os, json, io, base64, uuid, re, string
+import os, json, io, base64, uuid, re, string, copy
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -197,6 +197,44 @@ class _NC(rl_canvas.Canvas):
 def _esc(s):
     """Escape HTML entities so ReportLab Paragraph never sees raw & < > from user input."""
     return str(s).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+PDF_PHOTO_CAPTION_MAX_CHARS = 300
+PDF_PHOTO_AREA_MAX_CHARS = 120
+
+def _bounded_pdf_text(value, max_chars):
+    """Keep user text inside non-splittable PDF photo-card rows."""
+    text = str(value or '').strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars - 3].rstrip() + '...'
+
+def _prepare_pdf_photo(raw, target_width, target_height):
+    """Center-crop a photo so it fills its PDF frame without distortion."""
+    render_width = 720
+    render_height = max(1, round(render_width * target_height / target_width))
+
+    with Image.open(io.BytesIO(raw)) as source:
+        source.load()
+        oriented = ImageOps.exif_transpose(source)
+        fitted = ImageOps.fit(
+            oriented,
+            (render_width, render_height),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5),
+        )
+
+        if fitted.mode in ('RGBA', 'LA') or 'transparency' in fitted.info:
+            rgba = fitted.convert('RGBA')
+            flattened = Image.new('RGB', rgba.size, 'white')
+            flattened.paste(rgba, mask=rgba.getchannel('A'))
+            fitted = flattened
+        elif fitted.mode != 'RGB':
+            fitted = fitted.convert('RGB')
+
+        output = io.BytesIO()
+        fitted.save(output, format='JPEG', quality=88, optimize=True)
+        output.seek(0)
+        return output
 
 def generate_pdf(d, output_path, cfg):
     st = make_styles(cfg)
@@ -407,45 +445,84 @@ def generate_pdf(d, output_path, cfg):
         'Each box = one photo reference for weekly / monthly reports.',st['ital_s']))
     story.append(Spacer(1,3*mm))
     PER_ROW=3; BOX_W=(CW-4*mm)/PER_ROW; BOX_H=52*mm
+    PHOTO_INSET = 0
     for area in d.get('areas',[]):
         photos = area.get('photos',[])
         if not photos: continue
-        story.append(Paragraph(_esc(area.get('id','')),st['sub_s']))
+        aid = _bounded_pdf_text(area.get('id', ''), PDF_PHOTO_AREA_MAX_CHARS)
+        story.append(Paragraph(_esc(aid),st['sub_s']))
         story.append(Spacer(1,1*mm))
-        cells = []
+        photo_entries = []
         for p in photos:
             img_data = p.get('img_data','')
-            desc = p.get('desc','')
-            aid  = area.get('id','')
-            # build inner table
+            desc = _bounded_pdf_text(p.get('desc', ''), PDF_PHOTO_CAPTION_MAX_CHARS)
             if img_data and ',' in img_data:
                 try:
                     b64 = img_data.split(',')[1]
-                    img_bytes = io.BytesIO(base64.b64decode(b64))
-                    rl_img = RLImage(img_bytes, width=BOX_W-8*mm, height=BOX_H-2*mm)
+                    raw_photo = base64.b64decode(b64)
+                    photo_w = BOX_W - 4*mm - 2*PHOTO_INSET
+                    photo_h = BOX_H - 2*PHOTO_INSET
+                    img_bytes = _prepare_pdf_photo(raw_photo, photo_w, photo_h)
+                    rl_img = RLImage(img_bytes, width=photo_w, height=photo_h)
                     photo_cell = rl_img
                 except:
                     photo_cell = ''
             else:
                 photo_cell = ''
-            inner = Table(
-                [[Paragraph(f'<b>{_esc(aid)}</b>',st['sm_s'])],
-                 [Paragraph(_esc(desc),st['ital_s'])],
-                 [photo_cell]],
-                colWidths=[BOX_W-4*mm], rowHeights=[5*mm,5*mm,BOX_H])
-            inner.setStyle(TableStyle([
-                ('BOX',(0,0),(-1,-1),0.8,st['PRI']),
-                ('LINEBELOW',(0,0),(0,0),0.5,GREY_LINE),
-                ('LINEBELOW',(0,1),(0,1),0.5,GREY_LINE),
-                ('BACKGROUND',(0,0),(0,0),st['LB']),
-                ('BACKGROUND',(0,1),(0,1),GREY_BG),
-                ('BACKGROUND',(0,2),(0,2),WHITE),
-                ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),2),
-                ('LEFTPADDING',(0,0),(-1,-1),3)]))
-            cells.append(inner)
-        while len(cells)%PER_ROW!=0: cells.append('')
-        rows=[cells[i:i+PER_ROW] for i in range(0,len(cells),PER_ROW)]
-        pg=Table(rows,colWidths=[BOX_W]*PER_ROW,rowHeights=[(BOX_H+12*mm)]*len(rows))
+            title_para = Paragraph(f'<b>{_esc(aid)}</b>', st['sm_s'])
+            caption_para = Paragraph(_esc(desc), st['ital_s'])
+            photo_entries.append((title_para, caption_para, photo_cell))
+
+        rows = []
+        text_width = BOX_W - 10*mm
+        for start in range(0, len(photo_entries), PER_ROW):
+            group = photo_entries[start:start+PER_ROW]
+
+            # Let long area names and captions wrap. The previous fixed 5 mm
+            # rows caused a second line to spill over the divider and photo.
+            title_h = max(
+                5*mm,
+                max(title.wrap(text_width, 100*mm)[1] for title, _, _ in group) + 2*mm,
+            )
+            caption_h = max(
+                6*mm,
+                max(caption.wrap(text_width, 100*mm)[1] for _, caption, _ in group) + 2*mm,
+            )
+
+            row = []
+            for title_para, caption_para, photo_cell in group:
+                inner = Table(
+                    [[title_para], [caption_para], [photo_cell]],
+                    colWidths=[BOX_W-4*mm],
+                    rowHeights=[title_h, caption_h, BOX_H],
+                )
+                inner.setStyle(TableStyle([
+                    ('BOX',(0,0),(-1,-1),0.8,st['PRI']),
+                    ('LINEBELOW',(0,0),(0,0),0.5,GREY_LINE),
+                    ('LINEBELOW',(0,1),(0,1),0.5,GREY_LINE),
+                    ('BACKGROUND',(0,0),(0,0),st['LB']),
+                    ('BACKGROUND',(0,1),(0,1),GREY_BG),
+                    # The image reaches the inside edge of the blue frame. A
+                    # matching background prevents white hairlines from PDF
+                    # sub-pixel rounding, while the vector border stays crisp.
+                    ('BACKGROUND',(0,2),(0,2),st['PRI'] if photo_cell else WHITE),
+                    ('TOPPADDING',(0,0),(-1,1),2),('BOTTOMPADDING',(0,0),(-1,1),2),
+                    ('LEFTPADDING',(0,0),(-1,1),3),('RIGHTPADDING',(0,0),(-1,1),3),
+                    ('TOPPADDING',(0,2),(-1,2),PHOTO_INSET),
+                    ('BOTTOMPADDING',(0,2),(-1,2),PHOTO_INSET),
+                    ('LEFTPADDING',(0,2),(-1,2),PHOTO_INSET),
+                    ('RIGHTPADDING',(0,2),(-1,2),PHOTO_INSET),
+                    ('VALIGN',(0,0),(-1,1),'MIDDLE'),
+                ]))
+                row.append(inner)
+
+            while len(row) < PER_ROW:
+                row.append('')
+            rows.append(row)
+
+        # Automatic outer row heights follow the tallest wrapped caption in
+        # each group, keeping every line inside its photo card.
+        pg=Table(rows,colWidths=[BOX_W]*PER_ROW)
         pg.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'TOP'),
             ('LEFTPADDING',(0,0),(-1,-1),2),('RIGHTPADDING',(0,0),(-1,-1),2),
             ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),4)]))
@@ -578,6 +655,21 @@ MANPOWER_DB = [
 AREA_LIST = ["MA-14","MA-23","MA-24","MA-26","MA-39","MA-40","MA-41","MA-42",
              "MA-59","MA-73","MA-77","MA-81","MA-85"]
 
+DEFAULT_PROJECTS = [
+    {
+        "title": "Electrical Construction and Installation - Manpower Supply",
+        "project_no": "002/KN-GPA/EPC-2K-P2/XI/2025",
+    },
+    {
+        "title": "Repair & Services Control Valve & ON OFF Valve",
+        "project_no": "P01.0825.J075",
+    },
+    {
+        "title": "PROJECT REVAMPING PT KERTAS NUSANTARA - REACTIVATION FOR TURBINES AND GENERATORS",
+        "project_no": "001/KN-GPA/EPC-2F-P2/IV/2025",
+    },
+]
+
 DEFAULT_CONFIG = {
     "company_name": "PT. GARUDA PRIMA AKSARA",
     "customer": "PT. KERTAS NUSANTARA",
@@ -590,6 +682,7 @@ DEFAULT_CONFIG = {
     "logo_gpa": "",
     "logo_kn":  "",
     "project_title": "Electrical Installation & Construction",
+    "projects": DEFAULT_PROJECTS,
     "show_logo_gpa":   True, "show_logo_kn":   True,
     "logo_gpa_w": 28,  "logo_gpa_h": 12,  "logo_gpa_y_off": 0,
     "logo_kn_w":  28,  "logo_kn_h":  12,  "logo_kn_y_off":  0,
@@ -739,23 +832,81 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated
 
+def normalize_projects(value, strict=False):
+    """Return safe title/number pairs while allowing a title to have many numbers."""
+    if not isinstance(value, list):
+        if strict:
+            raise ValueError('Projects must be a list.')
+        return copy.deepcopy(DEFAULT_PROJECTS)
+    if len(value) > 100:
+        if strict:
+            raise ValueError('A maximum of 100 projects is allowed.')
+        value = value[:100]
+
+    normalized = []
+    seen = set()
+    for entry in value:
+        if not isinstance(entry, dict):
+            if strict:
+                raise ValueError('Each project must contain a title and project number.')
+            continue
+        title = entry.get('title', '')
+        project_no = entry.get('project_no', entry.get('number', ''))
+        if not isinstance(title, str) or not isinstance(project_no, str):
+            if strict:
+                raise ValueError('Project title and number must be text.')
+            continue
+        title = title.strip()
+        project_no = project_no.strip()
+        if not title or not project_no:
+            if strict:
+                raise ValueError('Project title and number cannot be empty.')
+            continue
+        if len(title) > 300 or len(project_no) > 150:
+            if strict:
+                raise ValueError('Project title or number is too long.')
+            continue
+        pair_key = (title.casefold(), project_no.casefold())
+        if pair_key in seen:
+            if strict:
+                raise ValueError('Duplicate project title and number pair.')
+            continue
+        seen.add(pair_key)
+        normalized.append({'title': title, 'project_no': project_no})
+    return normalized
+
 def load_config():
+    defaults = copy.deepcopy(DEFAULT_CONFIG)
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE) as f:
+            with open(CONFIG_FILE, encoding='utf-8') as f:
                 c = json.load(f)
-            for k,v in DEFAULT_CONFIG.items():
+            if not isinstance(c, dict):
+                raise ValueError('Config root must be an object.')
+            for k,v in defaults.items():
                 if k not in c:
-                    c[k] = v
+                    c[k] = copy.deepcopy(v)
                 elif isinstance(v, dict):
-                    for kk,vv in v.items():
-                        if kk not in c[k]: c[k][kk]=vv
+                    if not isinstance(c[k], dict):
+                        c[k] = copy.deepcopy(v)
+                    else:
+                        for kk,vv in v.items():
+                            if kk not in c[k]: c[k][kk]=copy.deepcopy(vv)
+            c['projects'] = normalize_projects(c.get('projects', defaults['projects']))
             return c
         except: pass
-    return dict(DEFAULT_CONFIG)
+    return defaults
 
 def save_config(c):
-    with open(CONFIG_FILE,'w') as f: json.dump(c,f,indent=2)
+    temp_path = f'{CONFIG_FILE}.{uuid.uuid4().hex}.tmp'
+    try:
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            json.dump(c, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, CONFIG_FILE)
+    finally:
+        if os.path.exists(temp_path):
+            try: os.remove(temp_path)
+            except OSError: pass
 
 # ── Login / logout routes ────────────────────────────────────────────────────
 @app.route('/login', methods=['GET','POST'])
@@ -951,11 +1102,11 @@ def index():
             with open(draft_file) as f: draft = json.load(f)
         except: pass
     return render_template('index.html',
-        manpower_db=json.dumps(cfg.get('manpower_db', MANPOWER_DB)),
-        area_list=json.dumps(cfg.get('areas', AREA_LIST)),
-        hours_options=json.dumps(cfg.get('hours_options', DEFAULT_CONFIG['hours_options'])),
-        app_config=json.dumps(cfg),
-        initial_data=json.dumps(draft) if draft else 'null',
+        manpower_db=cfg.get('manpower_db', MANPOWER_DB),
+        area_list=cfg.get('areas', AREA_LIST),
+        hours_options=cfg.get('hours_options', DEFAULT_CONFIG['hours_options']),
+        app_config=cfg,
+        initial_data=draft or None,
         username=username,
         is_admin=session.get('is_admin', False),
     )
@@ -1180,7 +1331,16 @@ def get_config():
 @login_required
 def save_config_route():
     cfg = load_config()
-    data = request.json
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error':'Invalid settings data.'}), 400
+    if 'projects' in data:
+        if not session.get('is_admin', False):
+            return jsonify({'error':'Only an admin can change Master Projects.'}), 403
+        try:
+            cfg['projects'] = normalize_projects(data['projects'], strict=True)
+        except ValueError as exc:
+            return jsonify({'error':str(exc)}), 400
     for k in ['company_name','customer','project_no','project_title','location','equipment',
               'prepared_by','checked_by','approved_by','areas','hours_options',
               'show_logo_gpa','show_logo_kn',

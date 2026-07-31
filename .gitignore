@@ -16,7 +16,12 @@ app_config.json
 activity_log.json
 logos/
 
+# Local Railway data copies used only by localhost
+local-data/
+.local-data-staging-*/
+
 # Generated documents and local artifacts
+review_samples/
 *.pdf
 *.docx
 *.log

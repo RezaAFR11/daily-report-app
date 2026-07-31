@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from copy import deepcopy
 from unittest.mock import patch
 
 from daily_report_app import app
@@ -73,6 +74,27 @@ class PDFGenerationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()['error'], 'Invalid report data')
+
+    def test_very_long_photo_caption_does_not_break_pdf_layout(self):
+        report = deepcopy(MINIMAL_REPORT)
+        report['areas'] = [{
+            'id': 'Turbine Unit 2',
+            'activities_today': [],
+            'activities_tomorrow': [],
+            'manpower': [],
+            'indirect_manpower': [],
+            'constraints': '',
+            'remarks': '',
+            'photos': [{
+                'desc': 'Long photo caption ' * 2000,
+                'img_data': '',
+            }],
+        }]
+
+        response = self.client.post('/preview', json=report)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data.startswith(b'%PDF'))
 
 
 if __name__ == '__main__':

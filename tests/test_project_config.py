@@ -1,0 +1,133 @@
+import json
+import os
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from daily_report_app import DEFAULT_PROJECTS, app, load_config
+
+
+class ProjectConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.config_path = os.path.join(self.temp_dir.name, 'app_config.json')
+        self.config_patch = patch('daily_report_app.CONFIG_FILE', self.config_path)
+        self.config_patch.start()
+        self.client = app.test_client()
+        self.set_session(is_admin=True)
+
+    def tearDown(self):
+        self.config_patch.stop()
+        self.temp_dir.cleanup()
+
+    def set_session(self, is_admin):
+        with self.client.session_transaction() as flask_session:
+            flask_session['username'] = 'admin' if is_admin else 'worker'
+            flask_session['is_admin'] = is_admin
+
+    def test_default_config_contains_requested_project_pairs(self):
+        self.assertEqual(
+            DEFAULT_PROJECTS,
+            [
+                {
+                    'title': 'Electrical Construction and Installation - Manpower Supply',
+                    'project_no': '002/KN-GPA/EPC-2K-P2/XI/2025',
+                },
+                {
+                    'title': 'Repair & Services Control Valve & ON OFF Valve',
+                    'project_no': 'P01.0825.J075',
+                },
+                {
+                    'title': 'PROJECT REVAMPING PT KERTAS NUSANTARA - REACTIVATION FOR TURBINES AND GENERATORS',
+                    'project_no': '001/KN-GPA/EPC-2F-P2/IV/2025',
+                },
+            ],
+        )
+
+    def test_legacy_config_gains_projects_without_losing_old_defaults(self):
+        with open(self.config_path, 'w', encoding='utf-8') as config_file:
+            json.dump(
+                {'project_title': 'Legacy Project', 'project_no': 'LEGACY-001'},
+                config_file,
+            )
+
+        config = load_config()
+
+        self.assertEqual(config['project_title'], 'Legacy Project')
+        self.assertEqual(config['project_no'], 'LEGACY-001')
+        self.assertEqual(config['projects'], DEFAULT_PROJECTS)
+
+    def test_admin_can_save_same_title_with_different_numbers(self):
+        projects = [
+            {'title': 'Repeated Title', 'project_no': 'NO-001'},
+            {'title': 'Repeated Title', 'project_no': 'NO-002'},
+        ]
+
+        response = self.client.post('/save_config', json={'projects': projects})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(load_config()['projects'], projects)
+
+    def test_duplicate_project_pair_is_rejected(self):
+        response = self.client.post(
+            '/save_config',
+            json={
+                'projects': [
+                    {'title': 'Duplicate', 'project_no': 'NO-001'},
+                    {'title': ' duplicate ', 'project_no': 'no-001'},
+                ]
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Duplicate', response.get_json()['error'])
+
+    def test_incomplete_or_invalid_projects_are_rejected(self):
+        invalid_values = [
+            'not-a-list',
+            [{'title': 'Missing number', 'project_no': ''}],
+            [{'title': 123, 'project_no': 'NO-001'}],
+        ]
+        for projects in invalid_values:
+            with self.subTest(projects=projects):
+                response = self.client.post('/save_config', json={'projects': projects})
+                self.assertEqual(response.status_code, 400)
+
+    def test_non_admin_cannot_change_master_projects(self):
+        self.set_session(is_admin=False)
+
+        response = self.client.post(
+            '/save_config',
+            json={'projects': [{'title': 'Unauthorized', 'project_no': 'NO-403'}]},
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_invalid_settings_payload_is_rejected(self):
+        response = self.client.post(
+            '/save_config',
+            data='not-json',
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_project_titles_are_safely_serialized_into_page(self):
+        malicious = '</script><script>alert("project")</script>'
+        config = load_config()
+        config['projects'] = [{'title': malicious, 'project_no': 'SAFE-001'}]
+
+        with (
+            patch('daily_report_app.load_config', return_value=config),
+            patch('daily_report_app.get_draft_file', return_value=os.path.join(self.temp_dir.name, 'missing.json')),
+        ):
+            response = self.client.get('/')
+
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(malicious, html)
+        self.assertIn(r'\u003c/script\u003e', html)
+
+
+if __name__ == '__main__':
+    unittest.main()

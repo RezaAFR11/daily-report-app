@@ -6,10 +6,31 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from daily_report_app import PHOTO_MAX_DIMENSION, app, compress_photo_bytes
+from daily_report_app import (
+    PHOTO_MAX_DIMENSION,
+    _prepare_pdf_photo,
+    app,
+    compress_photo_bytes,
+)
 
 
 class PhotoCompressionTests(unittest.TestCase):
+    def test_pdf_photo_is_center_cropped_to_fill_frame(self):
+        source = Image.new('RGB', (1200, 400), (255, 0, 0))
+        source.paste((0, 180, 0), (400, 0, 800, 400))
+        source.paste((0, 0, 255), (800, 0, 1200, 400))
+        raw = io.BytesIO()
+        source.save(raw, format='JPEG', quality=95)
+
+        fitted = _prepare_pdf_photo(raw.getvalue(), 200, 200)
+
+        with Image.open(fitted) as result:
+            self.assertEqual(result.size, (720, 720))
+            r, g, b = result.getpixel((360, 360))
+            self.assertLess(r, 20)
+            self.assertGreater(g, 150)
+            self.assertLess(b, 20)
+
     def test_large_png_becomes_bounded_jpeg(self):
         source = Image.new('RGB', (2400, 1600), (40, 120, 200))
         raw = io.BytesIO()

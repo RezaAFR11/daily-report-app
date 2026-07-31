@@ -199,7 +199,7 @@
       </div>
       <div class="col-12 col-md-4">
         <div class="fld-lbl">Project No.</div>
-        <input type="text" id="f_project_no" class="form-control form-control-sm">
+        <input type="text" id="f_project_no" class="form-control form-control-sm" oninput="handleProjectNumberInput()">
       </div>
       <div class="col-12 col-md-3">
         <div class="fld-lbl">Location</div>
@@ -215,7 +215,9 @@
       </div>
       <div class="col-12 col-md-8">
         <div class="fld-lbl">Project Title / Type <span class="text-muted" style="font-size:.68rem;">(PDF header subtitle)</span></div>
-        <input type="text" id="f_project_title" class="form-control form-control-sm" placeholder="e.g. Electrical Installation &amp; Construction  /  Turbine Installation">
+        <select id="f_project_select" class="form-select form-select-sm" onchange="handleProjectSelection()" aria-label="Select project title"></select>
+        <input type="text" id="f_project_title" class="form-control form-control-sm mt-1 d-none"
+               placeholder="Enter a custom project title" oninput="handleCustomProjectTitleInput()">
       </div>
       <div class="col-12 col-md-3">
         <div class="fld-lbl">Prepared By</div>
@@ -453,6 +455,9 @@
         <div class="p-3 border-end bg-light stg-nav" style="min-width:140px;">
           <div class="nav flex-column nav-pills gap-1" id="stgNav">
             <button class="nav-link active" data-tab="general">📋 General</button>
+            {% if is_admin %}
+            <button class="nav-link" data-tab="projects">📁 Projects</button>
+            {% endif %}
             <button class="nav-link" data-tab="appearance">🎨 Appearance</button>
             <button class="nav-link" data-tab="manpower">👥 Manpower</button>
             <button class="nav-link" data-tab="areas">📍 Areas</button>
@@ -498,6 +503,28 @@
                 <input type="text" id="cfg_kn_attn" class="form-control form-control-sm" placeholder=""></div>
             </div>
           </div>
+
+          {% if is_admin %}
+          <!-- Master Projects -->
+          <div class="stg-tab d-none" id="tab-projects">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <div>
+                <h6 class="mb-1 text-primary">Master Projects</h6>
+                <div class="text-muted" style="font-size:.75rem;">Each title is paired with a project number. The same title may use different numbers.</div>
+              </div>
+              <button type="button" class="btn btn-sm btn-primary" onclick="addProjectEntry()">+ Add Project</button>
+            </div>
+            <div class="table-responsive" style="max-height:420px;overflow-y:auto;">
+              <table class="table table-sm table-bordered align-middle mb-0" style="font-size:.8rem;">
+                <thead style="position:sticky;top:0;background:var(--light-bg);z-index:1;">
+                  <tr><th style="min-width:330px;">Project Title / Name</th><th style="min-width:240px;">Project No.</th><th style="width:42px;"></th></tr>
+                </thead>
+                <tbody id="projectTableBody"></tbody>
+              </table>
+            </div>
+            <p class="text-muted mt-2 mb-0" style="font-size:.75rem;">Saved projects appear in the Project Title dropdown on the main form.</p>
+          </div>
+          {% endif %}
 
           <!-- Appearance -->
           <div class="stg-tab d-none" id="tab-appearance">
@@ -630,14 +657,16 @@
 // ════════════════════════════════════════════════════════════
 // DATA FROM FLASK
 // ════════════════════════════════════════════════════════════
-const MANPOWER_DB   = {{ manpower_db|safe }};
-const AREA_LIST_DEF = {{ area_list|safe }};
-const HOURS_OPTS    = {{ hours_options|safe }};
-let   APP_CONFIG    = {{ app_config|safe }};
-const INITIAL_DATA  = {{ initial_data|safe }};
+const MANPOWER_DB   = {{ manpower_db|tojson }};
+const AREA_LIST_DEF = {{ area_list|tojson }};
+const HOURS_OPTS    = {{ hours_options|tojson }};
+let   APP_CONFIG    = {{ app_config|tojson }};
+const INITIAL_DATA  = {{ initial_data|tojson }};
+const IS_ADMIN      = {{ is_admin|tojson }};
 
 let localMpDB  = MANPOWER_DB.map(p => ({...p}));
 let localAreas = [...AREA_LIST_DEF];
+let localProjects = normalizeProjectList(APP_CONFIG.projects || []);
 
 const COLOR_DEFS = [
   { id:'clr_primary',   key:'primary',   label:'Primary (headers, section bars)' },
@@ -677,6 +706,187 @@ function areaOpts(selected) {
 }
 
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+
+function normalizeProjectList(items) {
+  if (!Array.isArray(items)) return [];
+  const result = [];
+  const seen = new Set();
+  items.forEach(item => {
+    if (!item || typeof item !== 'object') return;
+    const title = typeof item.title === 'string' ? item.title.trim() : '';
+    const projectNo = typeof item.project_no === 'string' ? item.project_no.trim() : '';
+    if (!title || !projectNo) return;
+    const key = `${title.toLocaleLowerCase()}\u0000${projectNo.toLocaleLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    result.push({title, project_no: projectNo});
+  });
+  return result;
+}
+
+function projectPairMatches(project, title, projectNo) {
+  return project.title.toLocaleLowerCase() === String(title || '').trim().toLocaleLowerCase()
+      && project.project_no.toLocaleLowerCase() === String(projectNo || '').trim().toLocaleLowerCase();
+}
+
+function renderProjectSelect(title, projectNo) {
+  const select = document.getElementById('f_project_select');
+  const titleInput = document.getElementById('f_project_title');
+  const numberInput = document.getElementById('f_project_no');
+  if (!select || !titleInput || !numberInput) return;
+
+  const currentTitle = title !== undefined ? String(title || '') : titleInput.value;
+  const currentNo = projectNo !== undefined ? String(projectNo || '') : numberInput.value;
+  select.replaceChildren();
+
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = 'Select project...';
+  select.appendChild(placeholder);
+
+  localProjects.forEach((project, index) => {
+    const option = document.createElement('option');
+    option.value = String(index);
+    option.textContent = `${project.title} — ${project.project_no}`;
+    select.appendChild(option);
+  });
+
+  const manualOption = document.createElement('option');
+  manualOption.value = '__manual__';
+  manualOption.textContent = 'Custom / manual project...';
+  select.appendChild(manualOption);
+
+  titleInput.value = currentTitle;
+  numberInput.value = currentNo;
+  const exactIndex = localProjects.findIndex(project => projectPairMatches(project, currentTitle, currentNo));
+  if (exactIndex >= 0) {
+    select.value = String(exactIndex);
+    titleInput.classList.add('d-none');
+  } else if (currentTitle || currentNo) {
+    select.value = '__manual__';
+    titleInput.classList.remove('d-none');
+  } else {
+    select.value = '';
+    titleInput.classList.add('d-none');
+  }
+}
+
+function setProjectFields(title, projectNo) {
+  renderProjectSelect(title || '', projectNo || '');
+}
+
+function handleProjectSelection() {
+  const select = document.getElementById('f_project_select');
+  const titleInput = document.getElementById('f_project_title');
+  const numberInput = document.getElementById('f_project_no');
+  if (!select || !titleInput || !numberInput) return;
+
+  if (/^\d+$/.test(select.value)) {
+    const project = localProjects[Number(select.value)];
+    if (!project) return;
+    titleInput.value = project.title;
+    titleInput.classList.add('d-none');
+    numberInput.value = project.project_no;
+    return;
+  }
+  if (select.value === '__manual__') {
+    titleInput.classList.remove('d-none');
+    titleInput.focus();
+    return;
+  }
+  titleInput.value = '';
+  titleInput.classList.add('d-none');
+  numberInput.value = '';
+}
+
+function handleProjectNumberInput() {
+  const select = document.getElementById('f_project_select');
+  const titleInput = document.getElementById('f_project_title');
+  const numberInput = document.getElementById('f_project_no');
+  if (!select || !titleInput || !numberInput) return;
+  if (/^\d+$/.test(select.value)) {
+    const project = localProjects[Number(select.value)];
+    if (project && project.project_no !== numberInput.value) {
+      select.value = '__manual__';
+      titleInput.classList.remove('d-none');
+    }
+  } else if (select.value === '' && numberInput.value.trim()) {
+    select.value = '__manual__';
+    titleInput.classList.remove('d-none');
+  }
+}
+
+function handleCustomProjectTitleInput() {
+  const select = document.getElementById('f_project_select');
+  if (select && select.value !== '__manual__') select.value = '__manual__';
+}
+
+function renderProjectTable() {
+  const body = document.getElementById('projectTableBody');
+  if (!body) return;
+  body.replaceChildren();
+  localProjects.forEach(project => addProjectEntry(project));
+}
+
+function addProjectEntry(project={}) {
+  const body = document.getElementById('projectTableBody');
+  if (!body) return;
+  const row = document.createElement('tr');
+
+  const titleCell = document.createElement('td');
+  const titleInput = document.createElement('input');
+  titleInput.type = 'text';
+  titleInput.className = 'form-control form-control-sm project-title-entry';
+  titleInput.maxLength = 300;
+  titleInput.placeholder = 'Project title / name';
+  titleInput.value = project.title || '';
+  titleCell.appendChild(titleInput);
+
+  const numberCell = document.createElement('td');
+  const numberInput = document.createElement('input');
+  numberInput.type = 'text';
+  numberInput.className = 'form-control form-control-sm project-no-entry';
+  numberInput.maxLength = 150;
+  numberInput.placeholder = 'Project number';
+  numberInput.value = project.project_no || '';
+  numberCell.appendChild(numberInput);
+
+  const actionCell = document.createElement('td');
+  actionCell.className = 'text-center';
+  const removeButton = document.createElement('button');
+  removeButton.type = 'button';
+  removeButton.className = 'btn btn-sm btn-outline-danger px-2';
+  removeButton.textContent = '×';
+  removeButton.title = 'Remove project';
+  removeButton.addEventListener('click', () => row.remove());
+  actionCell.appendChild(removeButton);
+
+  row.append(titleCell, numberCell, actionCell);
+  body.appendChild(row);
+  if (!project.title && !project.project_no) titleInput.focus();
+}
+
+function collectProjectRows() {
+  const body = document.getElementById('projectTableBody');
+  if (!body) return {projects: localProjects.map(project => ({...project})), error: ''};
+  const projects = [];
+  const seen = new Set();
+  for (const [index, row] of [...body.querySelectorAll('tr')].entries()) {
+    const title = (row.querySelector('.project-title-entry') || {}).value?.trim() || '';
+    const projectNo = (row.querySelector('.project-no-entry') || {}).value?.trim() || '';
+    if (!title && !projectNo) continue;
+    if (!title || !projectNo) {
+      return {projects: [], error: `Project row ${index + 1} must contain both title and project number.`};
+    }
+    const key = `${title.toLocaleLowerCase()}\u0000${projectNo.toLocaleLowerCase()}`;
+    if (seen.has(key)) {
+      return {projects: [], error: `Duplicate project pair on row ${index + 1}.`};
+    }
+    seen.add(key);
+    projects.push({title, project_no: projectNo});
+  }
+  return {projects, error: ''};
+}
 
 function lookupMp(name) {
   return localMpDB.find(p => p.name.trim().toLowerCase() === name.trim().toLowerCase());
@@ -968,7 +1178,8 @@ function addPhoto(btn, d={}) {
     <div class="photo-box${isFilled?' filled':''}">
       <div class="photo-ph"${isFilled?' style="display:none"':''}>📷 No photo<br><span style="font-size:.72rem">Browse or paste below</span></div>
       <img class="photo-prev${isFilled?' show':''}" src="${previewSrc}" alt="photo">
-      <input type="text" class="form-control form-control-sm photo-desc" placeholder="Description / caption…" value="${esc(d.desc||'')}">
+      <input type="text" class="form-control form-control-sm photo-desc" maxlength="300"
+             placeholder="Description / caption…" value="${esc(d.desc||'')}">
       <div class="photo-btns">
         <label class="btn btn-sm btn-outline-secondary" style="font-size:.75rem;flex:1;">
           📁 Browse / Multi<input type="file" accept="image/*" multiple style="display:none" onchange="handlePhotoFile(this)">
@@ -1342,11 +1553,10 @@ function populateForm(d) {
   const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
   set('f_date',          d.date);
   set('f_day_no',        d.day_no);
-  set('f_project_no',    d.project_no);
   set('f_location',      d.location);
   set('f_customer',      d.customer);
   set('f_equipment',     d.equipment);
-  set('f_project_title', d.project_title);
+  setProjectFields(d.project_title, d.project_no);
   set('f_prepared_by',   d.prepared_by);
   set('f_checked_by',    d.checked_by);
   set('f_approved_by',   d.approved_by);
@@ -1556,9 +1766,10 @@ function clearFormConfirm() {
   document.getElementById('areasContainer').innerHTML = '';
   document.getElementById('indirectContainer').innerHTML = '';
   _aidx = 0; _soidx = 0;
-  ['f_date','f_day_no','f_project_no','f_location','f_customer','f_equipment',
-   'f_project_title','f_prepared_by','f_checked_by','f_approved_by','f_global_remarks']
+  ['f_date','f_day_no','f_location','f_customer','f_equipment',
+   'f_prepared_by','f_checked_by','f_approved_by','f_global_remarks']
     .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  setProjectFields('', '');
   document.getElementById('signOffContainer').innerHTML = '';
   initSignOffDefaults();
   updateHint();
@@ -1605,6 +1816,10 @@ function loadSettings() {
   localAreas = [...(APP_CONFIG.areas || AREA_LIST_DEF)];
   renderAreaSettings();
 
+  // Master projects (admin can edit; all users can use the dropdown)
+  localProjects = normalizeProjectList(APP_CONFIG.projects || []);
+  renderProjectTable();
+
   // AI key
   const aiKeyEl = document.getElementById('cfg_ai_key');
   if (aiKeyEl) aiKeyEl.value = c.ai_api_key || '';
@@ -1612,6 +1827,8 @@ function loadSettings() {
 
 function saveSettings() {
   const v = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+  const activeProjectTitle = v('f_project_title');
+  const activeProjectNo = v('f_project_no');
   const theme = {};
   COLOR_DEFS.forEach(cd => {
     const el = document.getElementById(cd.id);
@@ -1645,6 +1862,15 @@ function saveSettings() {
     theme,
   };
 
+  if (IS_ADMIN) {
+    const projectRows = collectProjectRows();
+    if (projectRows.error) {
+      alert(projectRows.error);
+      return;
+    }
+    payload.projects = projectRows.projects;
+  }
+
   // Collect manpower from settings table and include in payload
   const mpRows = [];
   document.querySelectorAll('#mpTableBody tr').forEach(tr => {
@@ -1665,11 +1891,18 @@ function saveSettings() {
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify(payload),
   })
-  .then(r => r.json())
+  .then(async r => {
+    const result = await r.json();
+    if (!r.ok) throw new Error(result.error || `Server error ${r.status}`);
+    return result;
+  })
   .then(() => {
     APP_CONFIG = Object.assign(APP_CONFIG, payload);
+    if (IS_ADMIN) localProjects = normalizeProjectList(payload.projects || []);
+    renderProjectSelect(activeProjectTitle, activeProjectNo);
     applyTheme(theme);
     bootstrap.Modal.getInstance(document.getElementById('settingsModal')).hide();
+    toast('✓ Settings saved', 'success');
   })
   .catch(err => alert('Save failed: ' + err.message));
 }
@@ -1824,8 +2057,7 @@ function pastePhoto(btn) {
 function initDefaults() {
   const cfg = APP_CONFIG;
   const set = (id, val) => { const el = document.getElementById(id); if (el && val) el.value = val; };
-  set('f_project_title', cfg.project_title);
-  set('f_project_no',    cfg.project_no);
+  setProjectFields(cfg.project_title, cfg.project_no);
   set('f_location',      cfg.location);
   set('f_customer',      cfg.customer);
   set('f_prepared_by',   cfg.prepared_by);
@@ -2362,6 +2594,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Load snapshot list when Versions modal opens
   document.getElementById('versionsModal').addEventListener('show.bs.modal', loadVersionsList);
+
+  // Build the project selector before applying a draft or fresh defaults.
+  renderProjectSelect('', '');
 
   // Populate form from draft or set defaults
   if (INITIAL_DATA) {
