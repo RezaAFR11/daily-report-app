@@ -17,6 +17,13 @@
     body { background: #f0f4f8; font-size: 0.9rem; }
     .app-navbar { background: var(--navbar-bg) !important; padding: 8px 16px; position: sticky; top:0; z-index:900; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
     .section-hdr { background: var(--primary); color: white; font-weight: 600; font-size: 0.85rem; padding: 8px 14px; }
+    .overall-progress-table { min-width: 1420px; table-layout: fixed; font-size: .69rem; }
+    .overall-progress-table th { background: var(--secondary); color: white; text-align: center;
+                                 vertical-align: middle; padding: 5px 4px; line-height: 1.15; }
+    .overall-progress-table td { vertical-align: middle; padding: 3px; }
+    .overall-progress-table input { min-width: 0; font-size: .72rem; padding: 3px 5px; }
+    .overall-progress-table .op-number { text-align: center; font-weight: 600; }
+    .overall-progress-table tfoot td { background: var(--light-bg); font-weight: 600; text-align: center; }
     .area-card { border-left: 4px solid var(--area-hdr); }
     .area-top  { background: var(--area-hdr); color: white; padding: 6px 12px; border-radius: 3px 3px 0 0; }
     .fld-lbl   { font-size: 0.72rem; color: #555; margin-bottom: 2px; font-weight: 500; }
@@ -302,13 +309,78 @@
   </div>
 </div>
 
-<!-- ── S4: Areas ── -->
+<!-- S4: Overall Progress -->
 <div class="card mb-3 border-0 shadow-sm">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center">
-    <span>📍 4 · Daily Activities &amp; Manpower by Area</span>
+    <span>📈 4 · Overall Progress</span>
+    <button type="button" class="btn btn-sm btn-outline-light" onclick="addOverallProgressRow()">+ Add Progress Item</button>
+  </div>
+  <div class="card-body p-2">
+    <div class="table-responsive">
+      <table class="table table-sm table-bordered overall-progress-table mb-1">
+        <colgroup>
+          <col style="width:42px"><col style="width:260px"><col style="width:80px">
+          <col style="width:90px"><col style="width:100px"><col style="width:100px">
+          <col style="width:95px"><col style="width:95px"><col style="width:95px">
+          <col style="width:95px"><col style="width:95px"><col style="width:95px">
+          <col style="width:95px"><col style="width:45px">
+        </colgroup>
+        <thead>
+          <tr>
+            <th rowspan="2">No.</th>
+            <th rowspan="2">Description</th>
+            <th rowspan="2">Duration</th>
+            <th rowspan="2">Weight Factor</th>
+            <th rowspan="2">Start</th>
+            <th rowspan="2">Finish</th>
+            <th colspan="2">Cumulative Previous</th>
+            <th colspan="2">This Period</th>
+            <th colspan="3">Cumulative Up to This Month</th>
+            <th rowspan="2"></th>
+          </tr>
+          <tr>
+            <th>Plan</th><th>Actual</th>
+            <th>Plan</th><th>Actual</th>
+            <th>Plan</th><th>Actual</th><th>Deviation</th>
+          </tr>
+        </thead>
+        <tbody id="overallProgressContainer"></tbody>
+        <tfoot id="overallProgressTotals" class="d-none">
+          <tr>
+            <td colspan="6" class="text-end pe-2">OVERALL PROGRESS</td>
+            <td id="op_total_prev_plan"></td>
+            <td id="op_total_prev_actual"></td>
+            <td id="op_total_period_plan"></td>
+            <td id="op_total_period_actual"></td>
+            <td id="op_total_cum_plan"></td>
+            <td id="op_total_cum_actual"></td>
+            <td id="op_total_deviation"></td>
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+    <div id="noOverallProgressHint" class="text-center py-3 text-muted" style="font-size:.8rem;">
+      Click <strong>+ Add Progress Item</strong> to add project progress.
+    </div>
+    <div class="text-muted px-1" style="font-size:.7rem;">
+      Overall totals and deviation are calculated automatically from the weight factor.
+    </div>
+  </div>
+</div>
+
+<!-- ── S5: Areas ── -->
+<div class="card mb-3 border-0 shadow-sm">
+  <div class="card-header section-hdr d-flex justify-content-between align-items-center">
+    <span>📍 5 · Daily Activities &amp; Manpower by Area</span>
     <button class="btn btn-sm btn-outline-light" onclick="addAreaBlock()">+ Add Area</button>
   </div>
   <div class="card-body p-2">
+    <div class="mb-2 px-1">
+      <div class="fld-lbl">Photo Documentation Title <span class="text-muted" style="font-size:.68rem;">(PDF section and photo-card header)</span></div>
+      <input type="text" id="f_photo_documentation_title" class="form-control form-control-sm"
+             placeholder="e.g. Cold Commissioning Activities - DAY 4 - Turbine &amp; Generator Unit 2">
+    </div>
     <div id="areasContainer"></div>
     <div id="noAreaHint" class="text-center py-4 text-muted" style="font-size:.88rem;">
       Click <strong>+ Add Area</strong> above to begin
@@ -316,16 +388,13 @@
   </div>
 </div>
 
-<!-- ── S5: Sign-Off Builder ── -->
+<!-- ── S6: Sign-Off Builder ── -->
 <div class="card mb-3 border-0 shadow-sm">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center">
-    <span>✍️ 5 · Sign-Off Columns</span>
+    <span>✍️ 6 · Sign-Off Columns</span>
     <button class="btn btn-sm btn-outline-light" onclick="addSignOffCol()">+ Add Column</button>
   </div>
   <div class="card-body p-2">
-    <p class="text-muted mb-2" style="font-size:.76rem;">
-      Each column = one sign-off block in the PDF. Paste or browse signatures. Default 4 columns are pre-filled — edit as needed.
-    </p>
     <div class="row g-2" id="signOffContainer">
       <!-- columns injected by JS -->
     </div>
@@ -967,6 +1036,128 @@ function addIndirectRow(d={}) {
 }
 
 // ════════════════════════════════════════════════════════════
+// OVERALL PROGRESS
+// ════════════════════════════════════════════════════════════
+const OVERALL_PROGRESS_INPUTS = [
+  ['description', '.op-description'],
+  ['duration', '.op-duration'],
+  ['weight_factor', '.op-weight'],
+  ['start', '.op-start'],
+  ['finish', '.op-finish'],
+  ['cumulative_previous_plan', '.op-prev-plan'],
+  ['cumulative_previous_actual', '.op-prev-actual'],
+  ['this_period_plan', '.op-period-plan'],
+  ['this_period_actual', '.op-period-actual'],
+  ['cumulative_to_date_plan', '.op-cum-plan'],
+  ['cumulative_to_date_actual', '.op-cum-actual'],
+  ['deviation', '.op-deviation'],
+];
+
+function parseProgressNumber(value) {
+  let text = String(value ?? '').trim().replace(/%/g, '').replace(/\s/g, '');
+  if (!text) return null;
+  if (text.includes(',') && !text.includes('.')) text = text.replace(',', '.');
+  else text = text.replace(/,/g, '');
+  const valueNumber = Number(text);
+  return Number.isFinite(valueNumber) ? valueNumber : null;
+}
+
+function formatProgressPercent(value) {
+  return Number.isFinite(value) ? `${value.toFixed(2)}%` : '';
+}
+
+function addOverallProgressRow(d={}) {
+  const container = document.getElementById('overallProgressContainer');
+  if (!container) return;
+  const row = document.createElement('tr');
+  row.className = 'overall-progress-row';
+  row.innerHTML = `
+    <td class="op-number"></td>
+    <td><input type="text" class="form-control form-control-sm op-description" placeholder="Work description" value="${esc(d.description??'')}"></td>
+    <td><input type="text" class="form-control form-control-sm op-duration text-center" placeholder="Days" value="${esc(d.duration??'')}"></td>
+    <td><input type="text" inputmode="decimal" class="form-control form-control-sm op-weight text-center" placeholder="%" value="${esc(d.weight_factor??'')}"></td>
+    <td><input type="text" class="form-control form-control-sm op-start text-center" placeholder="23-Jun-25" value="${esc(d.start??'')}"></td>
+    <td><input type="text" class="form-control form-control-sm op-finish text-center" placeholder="23-Mar-26" value="${esc(d.finish??'')}"></td>
+    <td><input type="text" inputmode="decimal" class="form-control form-control-sm op-prev-plan text-center" placeholder="%" value="${esc(d.cumulative_previous_plan??'')}"></td>
+    <td><input type="text" inputmode="decimal" class="form-control form-control-sm op-prev-actual text-center" placeholder="%" value="${esc(d.cumulative_previous_actual??'')}"></td>
+    <td><input type="text" inputmode="decimal" class="form-control form-control-sm op-period-plan text-center" placeholder="%" value="${esc(d.this_period_plan??'')}"></td>
+    <td><input type="text" inputmode="decimal" class="form-control form-control-sm op-period-actual text-center" placeholder="%" value="${esc(d.this_period_actual??'')}"></td>
+    <td><input type="text" inputmode="decimal" class="form-control form-control-sm op-cum-plan text-center" placeholder="%" value="${esc(d.cumulative_to_date_plan??'')}"></td>
+    <td><input type="text" inputmode="decimal" class="form-control form-control-sm op-cum-actual text-center" placeholder="%" value="${esc(d.cumulative_to_date_actual??'')}"></td>
+    <td><input type="text" class="form-control form-control-sm op-deviation text-center" value="${esc(d.deviation??'')}" readonly tabindex="-1" title="Calculated from cumulative actual minus plan"></td>
+    <td class="text-center"><button type="button" class="btn btn-sm btn-outline-danger px-1 py-0" onclick="removeOverallProgressRow(this)" title="Remove">✕</button></td>`;
+  container.appendChild(row);
+  row.querySelectorAll('input:not(.op-deviation)').forEach(input => {
+    input.addEventListener('input', updateOverallProgressTotals);
+  });
+  renumberOverallProgressRows();
+  updateOverallProgressTotals();
+}
+
+function removeOverallProgressRow(button) {
+  button.closest('.overall-progress-row').remove();
+  renumberOverallProgressRows();
+  updateOverallProgressTotals();
+}
+
+function renumberOverallProgressRows() {
+  document.querySelectorAll('#overallProgressContainer .overall-progress-row').forEach((row, index) => {
+    row.querySelector('.op-number').textContent = String(index + 1);
+  });
+}
+
+function updateOverallProgressTotals() {
+  const rows = [...document.querySelectorAll('#overallProgressContainer .overall-progress-row')];
+  const hint = document.getElementById('noOverallProgressHint');
+  const footer = document.getElementById('overallProgressTotals');
+  if (hint) hint.style.display = rows.length ? 'none' : '';
+  if (footer) footer.classList.toggle('d-none', !rows.length);
+
+  const metrics = [
+    ['.op-prev-plan', 'op_total_prev_plan'],
+    ['.op-prev-actual', 'op_total_prev_actual'],
+    ['.op-period-plan', 'op_total_period_plan'],
+    ['.op-period-actual', 'op_total_period_actual'],
+    ['.op-cum-plan', 'op_total_cum_plan'],
+    ['.op-cum-actual', 'op_total_cum_actual'],
+  ];
+  const totals = {};
+  metrics.forEach(([selector, outputId]) => {
+    let total = 0;
+    let found = false;
+    rows.forEach(row => {
+      const weight = parseProgressNumber(row.querySelector('.op-weight').value);
+      const value = parseProgressNumber(row.querySelector(selector).value);
+      if (weight === null || value === null) return;
+      total += weight * value / 100;
+      found = true;
+    });
+    totals[selector] = found ? total : null;
+    const output = document.getElementById(outputId);
+    if (output) output.textContent = found ? formatProgressPercent(total) : '';
+  });
+
+  rows.forEach(row => {
+    const plan = parseProgressNumber(row.querySelector('.op-cum-plan').value);
+    const actual = parseProgressNumber(row.querySelector('.op-cum-actual').value);
+    if (plan !== null && actual !== null) {
+      row.querySelector('.op-deviation').value = formatProgressPercent(actual - plan);
+    } else {
+      row.querySelector('.op-deviation').value = '';
+    }
+  });
+
+  const planTotal = totals['.op-cum-plan'];
+  const actualTotal = totals['.op-cum-actual'];
+  const deviationOutput = document.getElementById('op_total_deviation');
+  if (deviationOutput) {
+    deviationOutput.textContent = planTotal !== null && actualTotal !== null
+      ? formatProgressPercent(actualTotal - planTotal)
+      : '';
+  }
+}
+
+// ════════════════════════════════════════════════════════════
 // AREA BLOCKS
 // ════════════════════════════════════════════════════════════
 function addAreaBlock(data={}) {
@@ -1472,6 +1663,16 @@ function collectData() {
     });
   });
 
+  // Overall progress
+  const overall_progress = [];
+  document.querySelectorAll('#overallProgressContainer .overall-progress-row').forEach(row => {
+    const item = {};
+    OVERALL_PROGRESS_INPUTS.forEach(([field, selector]) => {
+      item[field] = row.querySelector(selector).value.trim();
+    });
+    if (Object.values(item).some(value => value)) overall_progress.push(item);
+  });
+
   // Areas
   const areas = [];
   document.querySelectorAll('#areasContainer .area-card').forEach(block => {
@@ -1535,12 +1736,14 @@ function collectData() {
     customer:       v('f_customer'),
     equipment:      v('f_equipment'),
     project_title:  v('f_project_title'),
+    photo_documentation_title: v('f_photo_documentation_title'),
     prepared_by:    v('f_prepared_by'),
     checked_by:     v('f_checked_by'),
     approved_by:    v('f_approved_by'),
     global_remarks: v('f_global_remarks'),
     weather,
     indirect_manpower,
+    overall_progress,
     areas,
     sign_offs: collectSignOffs(),
   };
@@ -1561,6 +1764,7 @@ function populateForm(d) {
   set('f_checked_by',    d.checked_by);
   set('f_approved_by',   d.approved_by);
   set('f_global_remarks',d.global_remarks);
+  set('f_photo_documentation_title', d.photo_documentation_title);
 
   const wx = d.weather || {};
   const wxMap = { Morning:'wx_morning', Afternoon:'wx_afternoon', Evening:'wx_evening',
@@ -1570,6 +1774,12 @@ function populateForm(d) {
   // Global indirect manpower
   document.getElementById('indirectContainer').innerHTML = '';
   (d.indirect_manpower || []).forEach(p => addIndirectRow(p));
+
+  // Overall progress (missing in older drafts is treated as an empty table)
+  document.getElementById('overallProgressContainer').innerHTML = '';
+  (Array.isArray(d.overall_progress) ? d.overall_progress : []).forEach(row => addOverallProgressRow(row));
+  renumberOverallProgressRows();
+  updateOverallProgressTotals();
 
   // Areas
   document.getElementById('areasContainer').innerHTML = '';
@@ -1765,14 +1975,17 @@ function clearFormConfirm() {
   if (!confirm('Clear the entire form? This cannot be undone.')) return;
   document.getElementById('areasContainer').innerHTML = '';
   document.getElementById('indirectContainer').innerHTML = '';
+  document.getElementById('overallProgressContainer').innerHTML = '';
   _aidx = 0; _soidx = 0;
   ['f_date','f_day_no','f_location','f_customer','f_equipment',
-   'f_prepared_by','f_checked_by','f_approved_by','f_global_remarks']
+   'f_prepared_by','f_checked_by','f_approved_by','f_global_remarks',
+   'f_photo_documentation_title']
     .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
   setProjectFields('', '');
   document.getElementById('signOffContainer').innerHTML = '';
   initSignOffDefaults();
   updateHint();
+  updateOverallProgressTotals();
 }
 
 // ════════════════════════════════════════════════════════════
@@ -2005,10 +2218,9 @@ function removeLogo(which) {
   .then(r => r.json())
   .then(() => {
     const prev = document.getElementById(which + 'Preview');
-    const status = document.getElementById(which + 'Status');
     if (prev) prev.innerHTML = '';
-    if (status) { status.textContent = 'Not uploaded'; status.className = 'logo-bad'; }
     APP_CONFIG['logo_' + which] = '';
+    checkLogoStatus();
   })
   .catch(err => alert('Remove failed: ' + err.message));
 }
@@ -2020,7 +2232,10 @@ function checkLogoStatus() {
     ['gpa','kn'].forEach(which => {
       const status = document.getElementById(which + 'Status');
       if (!status) return;
-      if (data[which]) { status.textContent = 'Uploaded'; status.className = 'logo-ok'; }
+      if (data[which]) {
+        status.textContent = data[which + '_source'] === 'bundled' ? 'Default logo' : 'Uploaded';
+        status.className = 'logo-ok';
+      }
       else { status.textContent = 'Not uploaded'; status.className = 'logo-bad'; }
     });
   });
@@ -2533,6 +2748,7 @@ function applyAIUpdates(badge) {
   set('f_date', updates.date);
   set('f_day_no', updates.day_no);
   set('f_global_remarks', updates.global_remarks);
+  set('f_photo_documentation_title', updates.photo_documentation_title);
 
   // Weather
   if (updates.weather) {
@@ -2547,6 +2763,13 @@ function applyAIUpdates(badge) {
   if (updates.indirect_manpower && updates.indirect_manpower.length > 0) {
     document.getElementById('indirectContainer').innerHTML = '';
     updates.indirect_manpower.forEach(m => addIndirectRow(m));
+  }
+
+  // Overall progress
+  if (Array.isArray(updates.overall_progress) && updates.overall_progress.length > 0) {
+    document.getElementById('overallProgressContainer').innerHTML = '';
+    updates.overall_progress.forEach(row => addOverallProgressRow(row));
+    updateOverallProgressTotals();
   }
 
   // Areas

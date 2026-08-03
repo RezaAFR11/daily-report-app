@@ -67,6 +67,34 @@ class DraftSnapshotTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
 
+    def test_overall_progress_round_trips_through_draft_storage(self):
+        payload = {
+            'date': '2026-08-02',
+            'photo_documentation_title': (
+                'Cold Commissioning Activities - DAY 4 - Turbine & Generator Unit 2'
+            ),
+            'overall_progress': [{
+                'description': 'Commissioning & Hand Over',
+                'weight_factor': '5.00%',
+                'cumulative_to_date_plan': '5%',
+                'cumulative_to_date_actual': '5%',
+                'deviation': '0.00%',
+            }],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            draft_path = os.path.join(temp_dir, 'draft.json')
+            with (
+                patch('daily_report_app.get_draft_file', return_value=draft_path),
+                patch('daily_report_app.save_draft_snapshot'),
+                patch('daily_report_app.log_activity'),
+            ):
+                save_response = self.client.post('/save_draft', json=payload)
+                load_response = self.client.get('/load_draft')
+
+        self.assertEqual(save_response.status_code, 200)
+        self.assertEqual(load_response.status_code, 200)
+        self.assertEqual(load_response.get_json(), payload)
+
 
 if __name__ == '__main__':
     unittest.main()
