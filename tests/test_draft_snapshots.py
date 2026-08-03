@@ -70,6 +70,7 @@ class DraftSnapshotTests(unittest.TestCase):
     def test_overall_progress_round_trips_through_draft_storage(self):
         payload = {
             'date': '2026-08-02',
+            'show_overall_progress': False,
             'photo_documentation_title': (
                 'Cold Commissioning Activities - DAY 4 - Turbine & Generator Unit 2'
             ),

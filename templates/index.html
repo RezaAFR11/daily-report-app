@@ -310,12 +310,21 @@
 </div>
 
 <!-- S4: Overall Progress -->
-<div class="card mb-3 border-0 shadow-sm">
-  <div class="card-header section-hdr d-flex justify-content-between align-items-center">
-    <span>📈 4 · Overall Progress</span>
-    <button type="button" class="btn btn-sm btn-outline-light" onclick="addOverallProgressRow()">+ Add Progress Item</button>
+<div class="card mb-3 border-0 shadow-sm" id="overallProgressCard">
+  <div class="card-header section-hdr d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span>📈 <span id="overallProgressSectionNo">4 · </span>Overall Progress <span id="overallProgressInactiveBadge" class="badge bg-secondary ms-1 d-none">Inactive</span></span>
+    <div class="d-flex align-items-center flex-wrap gap-3">
+      <div class="form-check form-switch mb-0">
+        <input class="form-check-input" type="checkbox" role="switch" id="showOverallProgress"
+               checked onchange="syncOverallProgressSection()" aria-expanded="true">
+        <label class="form-check-label text-white" for="showOverallProgress" id="overallProgressToggleLabel" style="font-size:.75rem;">
+          ON · Show in Report
+        </label>
+      </div>
+      <button type="button" class="btn btn-sm btn-outline-light" id="addOverallProgressBtn" onclick="addOverallProgressRow()">+ Add Progress Item</button>
+    </div>
   </div>
-  <div class="card-body p-2">
+  <div class="card-body p-2" id="overallProgressBody">
     <div class="table-responsive">
       <table class="table table-sm table-bordered overall-progress-table mb-1">
         <colgroup>
@@ -372,7 +381,7 @@
 <!-- ── S5: Areas ── -->
 <div class="card mb-3 border-0 shadow-sm">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center">
-    <span>📍 5 · Daily Activities &amp; Manpower by Area</span>
+    <span>📍 <span id="areasSectionNo">5 · </span>Daily Activities &amp; Manpower by Area</span>
     <button class="btn btn-sm btn-outline-light" onclick="addAreaBlock()">+ Add Area</button>
   </div>
   <div class="card-body p-2">
@@ -391,7 +400,7 @@
 <!-- ── S6: Sign-Off Builder ── -->
 <div class="card mb-3 border-0 shadow-sm">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center">
-    <span>✍️ 6 · Sign-Off Columns</span>
+    <span>✍️ <span id="signOffSectionNo">6 · </span>Sign-Off Columns</span>
     <button class="btn btn-sm btn-outline-light" onclick="addSignOffCol()">+ Add Column</button>
   </div>
   <div class="card-body p-2">
@@ -1052,6 +1061,36 @@ const OVERALL_PROGRESS_INPUTS = [
   ['cumulative_to_date_actual', '.op-cum-actual'],
   ['deviation', '.op-deviation'],
 ];
+
+function coerceReportFlag(value, defaultValue=true) {
+  if (value === undefined || value === null) return defaultValue;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalised = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalised)) return true;
+    if (['false', '0', 'no', 'off'].includes(normalised)) return false;
+  }
+  return defaultValue;
+}
+
+function syncOverallProgressSection() {
+  const toggle = document.getElementById('showOverallProgress');
+  const enabled = toggle ? toggle.checked : true;
+  document.getElementById('overallProgressBody')?.classList.toggle('d-none', !enabled);
+  document.getElementById('addOverallProgressBtn')?.classList.toggle('d-none', !enabled);
+  document.getElementById('overallProgressInactiveBadge')?.classList.toggle('d-none', enabled);
+
+  const overallNo = document.getElementById('overallProgressSectionNo');
+  const areasNo = document.getElementById('areasSectionNo');
+  const signOffNo = document.getElementById('signOffSectionNo');
+  const toggleLabel = document.getElementById('overallProgressToggleLabel');
+  if (overallNo) overallNo.textContent = enabled ? '4 · ' : '';
+  if (areasNo) areasNo.textContent = enabled ? '5 · ' : '4 · ';
+  if (signOffNo) signOffNo.textContent = enabled ? '6 · ' : '5 · ';
+  if (toggleLabel) toggleLabel.textContent = `${enabled ? 'ON' : 'OFF'} · Show in Report`;
+  if (toggle) toggle.setAttribute('aria-expanded', String(enabled));
+}
 
 function parseProgressNumber(value) {
   let text = String(value ?? '').trim().replace(/%/g, '').replace(/\s/g, '');
@@ -1743,6 +1782,7 @@ function collectData() {
     global_remarks: v('f_global_remarks'),
     weather,
     indirect_manpower,
+    show_overall_progress: (document.getElementById('showOverallProgress') || {}).checked !== false,
     overall_progress,
     areas,
     sign_offs: collectSignOffs(),
@@ -1775,7 +1815,13 @@ function populateForm(d) {
   document.getElementById('indirectContainer').innerHTML = '';
   (d.indirect_manpower || []).forEach(p => addIndirectRow(p));
 
-  // Overall progress (missing in older drafts is treated as an empty table)
+  // Overall progress. Older drafts do not contain the toggle flag, so they
+  // remain enabled by default. Rows stay in the DOM while the section is off.
+  const overallProgressToggle = document.getElementById('showOverallProgress');
+  if (overallProgressToggle) {
+    overallProgressToggle.checked = coerceReportFlag(d.show_overall_progress, true);
+  }
+  syncOverallProgressSection();
   document.getElementById('overallProgressContainer').innerHTML = '';
   (Array.isArray(d.overall_progress) ? d.overall_progress : []).forEach(row => addOverallProgressRow(row));
   renumberOverallProgressRows();
@@ -1976,6 +2022,9 @@ function clearFormConfirm() {
   document.getElementById('areasContainer').innerHTML = '';
   document.getElementById('indirectContainer').innerHTML = '';
   document.getElementById('overallProgressContainer').innerHTML = '';
+  const overallProgressToggle = document.getElementById('showOverallProgress');
+  if (overallProgressToggle) overallProgressToggle.checked = true;
+  syncOverallProgressSection();
   _aidx = 0; _soidx = 0;
   ['f_date','f_day_no','f_location','f_customer','f_equipment',
    'f_prepared_by','f_checked_by','f_approved_by','f_global_remarks',
@@ -2766,6 +2815,13 @@ function applyAIUpdates(badge) {
   }
 
   // Overall progress
+  if (updates.show_overall_progress !== undefined) {
+    const overallProgressToggle = document.getElementById('showOverallProgress');
+    if (overallProgressToggle) {
+      overallProgressToggle.checked = coerceReportFlag(updates.show_overall_progress, true);
+      syncOverallProgressSection();
+    }
+  }
   if (Array.isArray(updates.overall_progress) && updates.overall_progress.length > 0) {
     document.getElementById('overallProgressContainer').innerHTML = '';
     updates.overall_progress.forEach(row => addOverallProgressRow(row));
@@ -2831,6 +2887,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initDefaults();
     initSignOffDefaults();
   }
+  syncOverallProgressSection();
 
   // Auto day number: wire date field
   const dateField = document.getElementById('f_date');

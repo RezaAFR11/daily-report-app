@@ -375,6 +375,22 @@ def _bounded_pdf_text(value, max_chars):
         return text
     return text[:max_chars - 3].rstrip() + '...'
 
+def _coerce_bool(value, default=True):
+    """Parse report flags without treating the string ``false`` as enabled."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalised = value.strip().lower()
+        if normalised in {'true', '1', 'yes', 'on'}:
+            return True
+        if normalised in {'false', '0', 'no', 'off'}:
+            return False
+    return default
+
 def _normalise_overall_progress(rows):
     """Return only usable progress rows while keeping old drafts compatible."""
     if not isinstance(rows, list):
@@ -633,114 +649,121 @@ def generate_pdf(d, output_path, cfg):
     story += [itbl2, Spacer(1,SECTION_GAP)]
     story.append(CondPageBreak(32*mm))
 
-    # S4 overall progress
-    story += SH('4.  OVERALL PROGRESS')
-    progress_rows = _normalise_overall_progress(d.get('overall_progress', []))
-    if progress_rows:
-        progress_h = S(
-            'Normal', fontSize=5.1, leading=5.8, fontName='Helvetica-Bold',
-            textColor=WHITE, alignment=1, splitLongWords=1,
-        )
-        progress_c = S(
-            'Normal', fontSize=5.5, leading=6.4, alignment=1,
-            splitLongWords=1,
-        )
-        progress_l = S(
-            'Normal', fontSize=6, leading=7, splitLongWords=1,
-        )
-        progress_total = S(
-            'Normal', fontSize=5.5, leading=6.4, fontName='Helvetica-Bold',
-            alignment=1, splitLongWords=1,
-        )
+    section_number = 4
+    show_overall_progress = _coerce_bool(d.get('show_overall_progress'), True)
 
-        def PH(value):
-            return Paragraph(_esc(value), progress_h)
+    # Optional overall progress section. Missing flags in older drafts default
+    # to enabled, so their generated layout remains unchanged.
+    if show_overall_progress:
+        story += SH(f'{section_number}.  OVERALL PROGRESS')
+        progress_rows = _normalise_overall_progress(d.get('overall_progress', []))
+        if progress_rows:
+            progress_h = S(
+                'Normal', fontSize=5.1, leading=5.8, fontName='Helvetica-Bold',
+                textColor=WHITE, alignment=1, splitLongWords=1,
+            )
+            progress_c = S(
+                'Normal', fontSize=5.5, leading=6.4, alignment=1,
+                splitLongWords=1,
+            )
+            progress_l = S(
+                'Normal', fontSize=6, leading=7, splitLongWords=1,
+            )
+            progress_total = S(
+                'Normal', fontSize=5.5, leading=6.4, fontName='Helvetica-Bold',
+                alignment=1, splitLongWords=1,
+            )
 
-        def PC(value, left=False):
-            return Paragraph(_esc(value), progress_l if left else progress_c)
+            def PH(value):
+                return Paragraph(_esc(value), progress_h)
 
-        progress_data = [
-            [
-                PH('No.'), PH('Description'), PH('Duration'), PH('Weight Factor'),
-                PH('Start'), PH('Finish'), PH('Cumulative Previous'), '',
-                PH('This Period'), '', PH('Cumulative Up to This Month'), '', '',
-            ],
-            ['', '', '', '', '', '', PH('Plan'), PH('Actual'), PH('Plan'),
-             PH('Actual'), PH('Plan'), PH('Actual'), PH('Deviation')],
-        ]
+            def PC(value, left=False):
+                return Paragraph(_esc(value), progress_l if left else progress_c)
 
-        for index, row in enumerate(progress_rows, 1):
-            deviation = row.get('deviation', '')
-            if not deviation:
-                cumulative_plan = _progress_number(row.get('cumulative_to_date_plan'))
-                cumulative_actual = _progress_number(row.get('cumulative_to_date_actual'))
-                if cumulative_plan is not None and cumulative_actual is not None:
-                    deviation = f'{cumulative_actual - cumulative_plan:g}'
+            progress_data = [
+                [
+                    PH('No.'), PH('Description'), PH('Duration'), PH('Weight Factor'),
+                    PH('Start'), PH('Finish'), PH('Cumulative Previous'), '',
+                    PH('This Period'), '', PH('Cumulative Up to This Month'), '', '',
+                ],
+                ['', '', '', '', '', '', PH('Plan'), PH('Actual'), PH('Plan'),
+                 PH('Actual'), PH('Plan'), PH('Actual'), PH('Deviation')],
+            ]
+
+            for index, row in enumerate(progress_rows, 1):
+                deviation = row.get('deviation', '')
+                if not deviation:
+                    cumulative_plan = _progress_number(row.get('cumulative_to_date_plan'))
+                    cumulative_actual = _progress_number(row.get('cumulative_to_date_actual'))
+                    if cumulative_plan is not None and cumulative_actual is not None:
+                        deviation = f'{cumulative_actual - cumulative_plan:g}'
+                progress_data.append([
+                    PC(index),
+                    PC(row.get('description', ''), left=True),
+                    PC(row.get('duration', '')),
+                    PC(_progress_percent_text(row.get('weight_factor', ''))),
+                    PC(row.get('start', '')),
+                    PC(row.get('finish', '')),
+                    *[
+                        PC(_progress_percent_text(row.get(field, '')))
+                        for field in OVERALL_PROGRESS_PERCENT_FIELDS
+                    ],
+                    PC(_progress_percent_text(deviation)),
+                ])
+
+            totals = _overall_progress_totals(progress_rows)
             progress_data.append([
-                PC(index),
-                PC(row.get('description', ''), left=True),
-                PC(row.get('duration', '')),
-                PC(_progress_percent_text(row.get('weight_factor', ''))),
-                PC(row.get('start', '')),
-                PC(row.get('finish', '')),
+                Paragraph('OVERALL PROGRESS', progress_total), '', '', '', '', '',
                 *[
-                    PC(_progress_percent_text(row.get(field, '')))
+                    Paragraph(
+                        '' if totals.get(field) is None else f"{totals[field]:.2f}%",
+                        progress_total,
+                    )
                     for field in OVERALL_PROGRESS_PERCENT_FIELDS
                 ],
-                PC(_progress_percent_text(deviation)),
+                Paragraph(
+                    '' if totals.get('deviation') is None else f"{totals['deviation']:.2f}%",
+                    progress_total,
+                ),
             ])
 
-        totals = _overall_progress_totals(progress_rows)
-        progress_data.append([
-            Paragraph('OVERALL PROGRESS', progress_total), '', '', '', '', '',
-            *[
-                Paragraph(
-                    '' if totals.get(field) is None else f"{totals[field]:.2f}%",
-                    progress_total,
-                )
-                for field in OVERALL_PROGRESS_PERCENT_FIELDS
-            ],
-            Paragraph(
-                '' if totals.get('deviation') is None else f"{totals['deviation']:.2f}%",
-                progress_total,
-            ),
-        ])
+            progress_widths = [
+                7*mm, 53*mm, 10*mm, 11*mm, 14*mm, 14*mm,
+                10*mm, 10*mm, 10*mm, 10*mm, 10*mm, 10*mm, 11*mm,
+            ]
+            progress_table = Table(
+                progress_data,
+                colWidths=progress_widths,
+                repeatRows=2,
+                splitByRow=1,
+            )
+            progress_table.setStyle(TableStyle([
+                ('SPAN',(0,0),(0,1)),('SPAN',(1,0),(1,1)),('SPAN',(2,0),(2,1)),
+                ('SPAN',(3,0),(3,1)),('SPAN',(4,0),(4,1)),('SPAN',(5,0),(5,1)),
+                ('SPAN',(6,0),(7,0)),('SPAN',(8,0),(9,0)),('SPAN',(10,0),(12,0)),
+                ('BACKGROUND',(0,0),(-1,1),st['PRI']),
+                ('TEXTCOLOR',(0,0),(-1,1),WHITE),
+                ('GRID',(0,0),(-1,-1),0.35,GREY_LINE),
+                ('ROWBACKGROUNDS',(0,2),(-1,-2),[WHITE,GREY_BG]),
+                ('BACKGROUND',(0,-1),(-1,-1),st['LB']),
+                ('SPAN',(0,-1),(5,-1)),
+                ('ALIGN',(0,0),(-1,-1),'CENTER'),
+                ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+                ('TOPPADDING',(0,0),(-1,-1),1.2),
+                ('BOTTOMPADDING',(0,0),(-1,-1),1.2),
+                ('LEFTPADDING',(0,0),(-1,-1),1.2),
+                ('RIGHTPADDING',(0,0),(-1,-1),1.2),
+            ]))
+            story.append(progress_table)
+        else:
+            story.append(Paragraph('No overall progress reported.', st['ital_s']))
+        story.append(Spacer(1, SECTION_GAP))
+        story.append(CondPageBreak(32*mm))
+        section_number += 1
 
-        progress_widths = [
-            7*mm, 53*mm, 10*mm, 11*mm, 14*mm, 14*mm,
-            10*mm, 10*mm, 10*mm, 10*mm, 10*mm, 10*mm, 11*mm,
-        ]
-        progress_table = Table(
-            progress_data,
-            colWidths=progress_widths,
-            repeatRows=2,
-            splitByRow=1,
-        )
-        progress_table.setStyle(TableStyle([
-            ('SPAN',(0,0),(0,1)),('SPAN',(1,0),(1,1)),('SPAN',(2,0),(2,1)),
-            ('SPAN',(3,0),(3,1)),('SPAN',(4,0),(4,1)),('SPAN',(5,0),(5,1)),
-            ('SPAN',(6,0),(7,0)),('SPAN',(8,0),(9,0)),('SPAN',(10,0),(12,0)),
-            ('BACKGROUND',(0,0),(-1,1),st['PRI']),
-            ('TEXTCOLOR',(0,0),(-1,1),WHITE),
-            ('GRID',(0,0),(-1,-1),0.35,GREY_LINE),
-            ('ROWBACKGROUNDS',(0,2),(-1,-2),[WHITE,GREY_BG]),
-            ('BACKGROUND',(0,-1),(-1,-1),st['LB']),
-            ('SPAN',(0,-1),(5,-1)),
-            ('ALIGN',(0,0),(-1,-1),'CENTER'),
-            ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
-            ('TOPPADDING',(0,0),(-1,-1),1.2),
-            ('BOTTOMPADDING',(0,0),(-1,-1),1.2),
-            ('LEFTPADDING',(0,0),(-1,-1),1.2),
-            ('RIGHTPADDING',(0,0),(-1,-1),1.2),
-        ]))
-        story.append(progress_table)
-    else:
-        story.append(Paragraph('No overall progress reported.', st['ital_s']))
-    story.append(Spacer(1, SECTION_GAP))
-    story.append(CondPageBreak(32*mm))
-
-    # S5 areas
-    story += SH('5.  DAILY ACTIVITIES & MANPOWER BY AREA')
+    # Daily activities and manpower by area
+    story += SH(f'{section_number}.  DAILY ACTIVITIES & MANPOWER BY AREA')
+    section_number += 1
     areas = d.get('areas', [])
     for area_index, area in enumerate(areas):
         aid = area.get('id','')
@@ -825,8 +848,9 @@ def generate_pdf(d, output_path, cfg):
     # of page one and pushing the final photo row onto a third page.
     story.append(CondPageBreak(25*mm))
 
-    # S6 constraints
-    story += SH('6.  CONSTRAINTS & ISSUES')
+    # Constraints and issues
+    story += SH(f'{section_number}.  CONSTRAINTS & ISSUES')
+    section_number += 1
     any_c = any(a.get('constraints','').strip() for a in d.get('areas',[]))
     if any_c:
         gcr = [['Area','Constraint / Issue']]
@@ -840,14 +864,16 @@ def generate_pdf(d, output_path, cfg):
         story.append(Paragraph('No constraints reported.',st['ital_s']))
     story.append(Spacer(1,SECTION_GAP))
 
-    # S7 remarks
-    story += SH('7.  REMARKS')
+    # Remarks
+    story += SH(f'{section_number}.  REMARKS')
+    section_number += 1
     gr = d.get('global_remarks','').strip()
     story += [Paragraph(_esc(gr) if gr else '—',st['body_s']),Spacer(1,SECTION_GAP)]
     story.append(CondPageBreak(42*mm))
 
-    # S8 sign-off (dynamic columns)
-    story += SH('8.  SIGN-OFF')
+    # Sign-off (dynamic columns)
+    story += SH(f'{section_number}.  SIGN-OFF')
+    section_number += 1
     sign_offs = d.get('sign_offs', [])
     if not sign_offs:
         sign_offs = [
@@ -887,9 +913,9 @@ def generate_pdf(d, output_path, cfg):
     photo_sections = _group_report_photos(areas, PER_ROW)
     story.append(CondPageBreak(65*mm if photo_sections else 10*mm))
 
-    # S9 photos. Each area has its own heading and grid so photos from different
+    # Photo documentation. Each area has its own heading and grid so photos from different
     # work areas are never presented as one continuous group.
-    story += SH('9.  PHOTO DOCUMENTATION')
+    story += SH(f'{section_number}.  PHOTO DOCUMENTATION')
     photo_documentation_title = _bounded_pdf_text(
         d.get('photo_documentation_title', ''),
         PDF_PHOTO_AREA_MAX_CHARS,

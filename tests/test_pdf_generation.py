@@ -16,6 +16,7 @@ from daily_report_app import (
     BUNDLED_LOGOS,
     DEFAULT_CONFIG,
     _NC,
+    _coerce_bool,
     _group_report_photos,
     _normalise_overall_progress,
     _overall_progress_totals,
@@ -250,6 +251,64 @@ class PDFGenerationTests(unittest.TestCase):
             '0',
         )
 
+    def test_report_toggle_boolean_parser_is_strict_and_legacy_safe(self):
+        for value in (True, 1, 'true', 'TRUE', '1', 'yes', 'on'):
+            self.assertTrue(_coerce_bool(value, True))
+        for value in (False, 0, 'false', 'FALSE', '0', 'no', 'off'):
+            self.assertFalse(_coerce_bool(value, True))
+        for value in (None, '', 'unexpected', [], {}):
+            self.assertTrue(_coerce_bool(value, True))
+
+    def test_disabled_overall_progress_is_omitted_and_sections_are_renumbered(self):
+        report = deepcopy(MINIMAL_REPORT)
+        report['show_overall_progress'] = False
+        report['overall_progress'] = [{'description': 'PROGRESS-SENTINEL'}]
+        paragraph_texts = []
+        original_paragraph = daily_report_app.Paragraph
+
+        def paragraph_spy(text, *args, **kwargs):
+            paragraph_texts.append(str(text))
+            return original_paragraph(text, *args, **kwargs)
+
+        with patch('daily_report_app.Paragraph', side_effect=paragraph_spy):
+            generate_pdf(report, None, deepcopy(DEFAULT_CONFIG))
+
+        headings = [
+            re.sub(r'^\d+\.&#160;&#160;', '', text)
+            for text in paragraph_texts
+            if re.match(r'^\d+\.&#160;&#160;', text)
+        ]
+        heading_numbers = [
+            int(re.match(r'^(\d+)\.', text).group(1))
+            for text in paragraph_texts
+            if re.match(r'^\d+\.&#160;&#160;', text)
+        ]
+        self.assertEqual(heading_numbers, list(range(1, 9)))
+        self.assertEqual(headings[3], 'DAILY ACTIVITIES &amp; MANPOWER BY AREA')
+        self.assertEqual(headings[-1], 'PHOTO DOCUMENTATION')
+        self.assertNotIn('OVERALL PROGRESS', headings)
+        self.assertFalse(any('PROGRESS-SENTINEL' in text for text in paragraph_texts))
+
+    def test_missing_progress_toggle_keeps_legacy_section_numbering(self):
+        paragraph_texts = []
+        original_paragraph = daily_report_app.Paragraph
+
+        def paragraph_spy(text, *args, **kwargs):
+            paragraph_texts.append(str(text))
+            return original_paragraph(text, *args, **kwargs)
+
+        with patch('daily_report_app.Paragraph', side_effect=paragraph_spy):
+            generate_pdf(deepcopy(MINIMAL_REPORT), None, deepcopy(DEFAULT_CONFIG))
+
+        headings = [
+            text for text in paragraph_texts if re.match(r'^\d+\.&#160;&#160;', text)
+        ]
+        self.assertEqual(
+            [int(re.match(r'^(\d+)\.', text).group(1)) for text in headings],
+            list(range(1, 10)),
+        )
+        self.assertTrue(any('OVERALL PROGRESS' in text for text in headings))
+
     def test_many_overall_progress_rows_generate_without_layout_error(self):
         report = deepcopy(MINIMAL_REPORT)
         report['overall_progress'] = [{
@@ -283,7 +342,11 @@ class PDFGenerationTests(unittest.TestCase):
 
         page = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
-        self.assertIn('4 · Overall Progress', page)
+        self.assertIn('id="overallProgressSectionNo">4 · </span>Overall Progress', page)
+        self.assertIn('id="showOverallProgress"', page)
+        self.assertIn('id="overallProgressBody"', page)
+        self.assertIn('function syncOverallProgressSection', page)
+        self.assertIn('show_overall_progress:', page)
         self.assertIn('id="overallProgressContainer"', page)
         self.assertIn('function addOverallProgressRow', page)
         self.assertIn('id="f_photo_documentation_title"', page)
