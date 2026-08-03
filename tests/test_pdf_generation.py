@@ -258,6 +258,7 @@ class PDFGenerationTests(unittest.TestCase):
             self.assertFalse(_coerce_bool(value, True))
         for value in (None, '', 'unexpected', [], {}):
             self.assertTrue(_coerce_bool(value, True))
+            self.assertFalse(_coerce_bool(value, False))
 
     def test_disabled_overall_progress_is_omitted_and_sections_are_renumbered(self):
         report = deepcopy(MINIMAL_REPORT)
@@ -289,7 +290,7 @@ class PDFGenerationTests(unittest.TestCase):
         self.assertNotIn('OVERALL PROGRESS', headings)
         self.assertFalse(any('PROGRESS-SENTINEL' in text for text in paragraph_texts))
 
-    def test_missing_progress_toggle_keeps_legacy_section_numbering(self):
+    def test_missing_progress_toggle_defaults_off_and_uses_eight_sections(self):
         paragraph_texts = []
         original_paragraph = daily_report_app.Paragraph
 
@@ -305,12 +306,36 @@ class PDFGenerationTests(unittest.TestCase):
         ]
         self.assertEqual(
             [int(re.match(r'^(\d+)\.', text).group(1)) for text in headings],
+            list(range(1, 9)),
+        )
+        self.assertFalse(any('OVERALL PROGRESS' in text for text in headings))
+
+    def test_explicitly_enabled_progress_uses_nine_sections(self):
+        report = deepcopy(MINIMAL_REPORT)
+        report['show_overall_progress'] = True
+        report['overall_progress'] = [{'description': 'Enabled progress'}]
+        paragraph_texts = []
+        original_paragraph = daily_report_app.Paragraph
+
+        def paragraph_spy(text, *args, **kwargs):
+            paragraph_texts.append(str(text))
+            return original_paragraph(text, *args, **kwargs)
+
+        with patch('daily_report_app.Paragraph', side_effect=paragraph_spy):
+            generate_pdf(report, None, deepcopy(DEFAULT_CONFIG))
+
+        headings = [
+            text for text in paragraph_texts if re.match(r'^\d+\.&#160;&#160;', text)
+        ]
+        self.assertEqual(
+            [int(re.match(r'^(\d+)\.', text).group(1)) for text in headings],
             list(range(1, 10)),
         )
         self.assertTrue(any('OVERALL PROGRESS' in text for text in headings))
 
     def test_many_overall_progress_rows_generate_without_layout_error(self):
         report = deepcopy(MINIMAL_REPORT)
+        report['show_overall_progress'] = True
         report['overall_progress'] = [{
             'description': f'Long progress description {index} ' * 8,
             'duration': '273',
@@ -342,11 +367,15 @@ class PDFGenerationTests(unittest.TestCase):
 
         page = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
-        self.assertIn('id="overallProgressSectionNo">4 · </span>Overall Progress', page)
+        self.assertIn('id="overallProgressSectionNo"></span>Overall Progress', page)
         self.assertIn('id="showOverallProgress"', page)
-        self.assertIn('id="overallProgressBody"', page)
+        self.assertIn('aria-expanded="false"', page)
+        self.assertIn('class="card-body p-2 d-none" id="overallProgressBody"', page)
+        self.assertIn('id="areasSectionNo">4 · </span>', page)
+        self.assertIn('id="signOffSectionNo">5 · </span>', page)
         self.assertIn('function syncOverallProgressSection', page)
         self.assertIn('show_overall_progress:', page)
+        self.assertIn('overallProgressToggle.checked = false;', page)
         self.assertIn('id="overallProgressContainer"', page)
         self.assertIn('function addOverallProgressRow', page)
         self.assertIn('id="f_photo_documentation_title"', page)

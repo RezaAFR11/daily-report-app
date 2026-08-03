@@ -650,10 +650,10 @@ def generate_pdf(d, output_path, cfg):
     story.append(CondPageBreak(32*mm))
 
     section_number = 4
-    show_overall_progress = _coerce_bool(d.get('show_overall_progress'), True)
+    show_overall_progress = _coerce_bool(d.get('show_overall_progress'), False)
 
-    # Optional overall progress section. Missing flags in older drafts default
-    # to enabled, so their generated layout remains unchanged.
+    # Optional overall progress section. Missing flags default to disabled;
+    # explicit true values from the current form still enable the section.
     if show_overall_progress:
         story += SH(f'{section_number}.  OVERALL PROGRESS')
         progress_rows = _normalise_overall_progress(d.get('overall_progress', []))

@@ -312,19 +312,19 @@
 <!-- S4: Overall Progress -->
 <div class="card mb-3 border-0 shadow-sm" id="overallProgressCard">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center flex-wrap gap-2">
-    <span>📈 <span id="overallProgressSectionNo">4 · </span>Overall Progress <span id="overallProgressInactiveBadge" class="badge bg-secondary ms-1 d-none">Inactive</span></span>
+    <span>📈 <span id="overallProgressSectionNo"></span>Overall Progress <span id="overallProgressInactiveBadge" class="badge bg-secondary ms-1">Inactive</span></span>
     <div class="d-flex align-items-center flex-wrap gap-3">
       <div class="form-check form-switch mb-0">
         <input class="form-check-input" type="checkbox" role="switch" id="showOverallProgress"
-               checked onchange="syncOverallProgressSection()" aria-expanded="true">
+               onchange="syncOverallProgressSection()" aria-expanded="false">
         <label class="form-check-label text-white" for="showOverallProgress" id="overallProgressToggleLabel" style="font-size:.75rem;">
-          ON · Show in Report
+          OFF · Show in Report
         </label>
       </div>
-      <button type="button" class="btn btn-sm btn-outline-light" id="addOverallProgressBtn" onclick="addOverallProgressRow()">+ Add Progress Item</button>
+      <button type="button" class="btn btn-sm btn-outline-light d-none" id="addOverallProgressBtn" onclick="addOverallProgressRow()">+ Add Progress Item</button>
     </div>
   </div>
-  <div class="card-body p-2" id="overallProgressBody">
+  <div class="card-body p-2 d-none" id="overallProgressBody">
     <div class="table-responsive">
       <table class="table table-sm table-bordered overall-progress-table mb-1">
         <colgroup>
@@ -381,7 +381,7 @@
 <!-- ── S5: Areas ── -->
 <div class="card mb-3 border-0 shadow-sm">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center">
-    <span>📍 <span id="areasSectionNo">5 · </span>Daily Activities &amp; Manpower by Area</span>
+    <span>📍 <span id="areasSectionNo">4 · </span>Daily Activities &amp; Manpower by Area</span>
     <button class="btn btn-sm btn-outline-light" onclick="addAreaBlock()">+ Add Area</button>
   </div>
   <div class="card-body p-2">
@@ -400,7 +400,7 @@
 <!-- ── S6: Sign-Off Builder ── -->
 <div class="card mb-3 border-0 shadow-sm">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center">
-    <span>✍️ <span id="signOffSectionNo">6 · </span>Sign-Off Columns</span>
+    <span>✍️ <span id="signOffSectionNo">5 · </span>Sign-Off Columns</span>
     <button class="btn btn-sm btn-outline-light" onclick="addSignOffCol()">+ Add Column</button>
   </div>
   <div class="card-body p-2">
@@ -1782,7 +1782,7 @@ function collectData() {
     global_remarks: v('f_global_remarks'),
     weather,
     indirect_manpower,
-    show_overall_progress: (document.getElementById('showOverallProgress') || {}).checked !== false,
+    show_overall_progress: document.getElementById('showOverallProgress')?.checked === true,
     overall_progress,
     areas,
     sign_offs: collectSignOffs(),
@@ -1815,12 +1815,10 @@ function populateForm(d) {
   document.getElementById('indirectContainer').innerHTML = '';
   (d.indirect_manpower || []).forEach(p => addIndirectRow(p));
 
-  // Overall progress. Older drafts do not contain the toggle flag, so they
-  // remain enabled by default. Rows stay in the DOM while the section is off.
+  // Overall progress always starts collapsed when a form is opened or loaded.
+  // Existing rows are still restored into the hidden table and remain intact.
   const overallProgressToggle = document.getElementById('showOverallProgress');
-  if (overallProgressToggle) {
-    overallProgressToggle.checked = coerceReportFlag(d.show_overall_progress, true);
-  }
+  if (overallProgressToggle) overallProgressToggle.checked = false;
   syncOverallProgressSection();
   document.getElementById('overallProgressContainer').innerHTML = '';
   (Array.isArray(d.overall_progress) ? d.overall_progress : []).forEach(row => addOverallProgressRow(row));
@@ -2023,7 +2021,7 @@ function clearFormConfirm() {
   document.getElementById('indirectContainer').innerHTML = '';
   document.getElementById('overallProgressContainer').innerHTML = '';
   const overallProgressToggle = document.getElementById('showOverallProgress');
-  if (overallProgressToggle) overallProgressToggle.checked = true;
+  if (overallProgressToggle) overallProgressToggle.checked = false;
   syncOverallProgressSection();
   _aidx = 0; _soidx = 0;
   ['f_date','f_day_no','f_location','f_customer','f_equipment',
@@ -2818,7 +2816,7 @@ function applyAIUpdates(badge) {
   if (updates.show_overall_progress !== undefined) {
     const overallProgressToggle = document.getElementById('showOverallProgress');
     if (overallProgressToggle) {
-      overallProgressToggle.checked = coerceReportFlag(updates.show_overall_progress, true);
+      overallProgressToggle.checked = coerceReportFlag(updates.show_overall_progress, false);
       syncOverallProgressSection();
     }
   }
