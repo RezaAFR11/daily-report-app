@@ -75,7 +75,7 @@ _check_and_install()
 # ============================================================
 #  Now safe to import everything
 # ============================================================
-import os, json, io, base64, uuid, re, string, copy
+import os, json, io, base64, uuid, re, string, copy, math
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -86,13 +86,38 @@ from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
-    TableStyle, PageBreak, KeepTogether, Image as RLImage)
+    TableStyle, CondPageBreak, KeepTogether, Image as RLImage)
 from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.lib.utils import ImageReader
 
 W, H = A4
 M = 15 * mm
 CW = W - 2 * M
+PDF_ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'pdf_assets')
+BUNDLED_LOGOS = {
+    'gpa': os.path.join(PDF_ASSET_DIR, 'gpa_logo.png'),
+    'kn': os.path.join(PDF_ASSET_DIR, 'kn_logo.png'),
+}
+BUNDLED_HEADER_LOGOS = {
+    'gpa': os.path.join(PDF_ASSET_DIR, 'gpa_logo_header_text_plus_1pt.png'),
+    'kn': os.path.join(PDF_ASSET_DIR, 'kn_logo_header.png'),
+}
+
+def _is_drawable_logo(path):
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        ImageReader(path).getSize()
+        return True
+    except Exception:
+        return False
+
+def resolve_logo_path(configured_path, which):
+    """Prefer a valid uploaded raster logo, otherwise use the bundled logo."""
+    if _is_drawable_logo(configured_path):
+        return configured_path
+    fallback = BUNDLED_LOGOS.get(which, '')
+    return fallback if _is_drawable_logo(fallback) else ''
 
 _SS = getSampleStyleSheet()
 def S(nm, **kw): return ParagraphStyle('_', parent=_SS.get(nm, _SS['Normal']), **kw)
@@ -106,15 +131,22 @@ def make_styles(cfg):
     LB    = colors.HexColor(t.get('light_bg',  '#D6E8F7'))
     return dict(
         PRI=PRI, SEC=SEC, ACC=ACC, AREA=AREA, LB=LB,
-        sec_s  = S('Normal', fontSize=9.5, textColor=colors.white, fontName='Helvetica-Bold',
-                    backColor=PRI, leftIndent=4, leading=16, spaceBefore=6, spaceAfter=2),
-        area_s = S('Normal', fontSize=9,   textColor=colors.white, fontName='Helvetica-Bold',
-                    backColor=AREA, leftIndent=6, leading=15, spaceBefore=4, spaceAfter=2),
-        sub_s  = S('Normal', fontSize=8.5, textColor=PRI, fontName='Helvetica-Bold', spaceBefore=4, spaceAfter=1),
-        body_s = S('Normal', fontSize=8,   leading=11, spaceAfter=1),
-        sm_s   = S('Normal', fontSize=7.5, leading=10, spaceAfter=1),
-        bold_s = S('Normal', fontSize=8,   fontName='Helvetica-Bold', leading=11),
-        ital_s = S('Normal', fontSize=7.5, fontName='Helvetica-Oblique', leading=10,
+        sec_s  = S('Normal', fontSize=10.5, textColor=colors.white, fontName='Helvetica-Bold',
+                    leading=12.5, spaceBefore=0, spaceAfter=0),
+        area_s = S('Normal', fontSize=9, textColor=colors.white, fontName='Helvetica-Bold',
+                    leading=10.5, spaceBefore=0, spaceAfter=0),
+        sub_s  = S('Normal', fontSize=8.3, textColor=PRI, fontName='Helvetica-Bold', spaceBefore=2, spaceAfter=1),
+        body_s = S('Normal', fontSize=8,   leading=10, spaceAfter=1),
+        sm_s   = S('Normal', fontSize=7.5, leading=9, spaceAfter=1),
+        tbl_s  = S('Normal', fontSize=7.5, leading=9, spaceBefore=0, spaceAfter=0,
+                    splitLongWords=1),
+        tbl_c_s= S('Normal', fontSize=7.5, leading=9, spaceBefore=0, spaceAfter=0,
+                    splitLongWords=1, alignment=1),
+        wx_h_s = S('Normal', fontSize=7, leading=8, textColor=colors.white,
+                    fontName='Helvetica-Bold', spaceBefore=0, spaceAfter=0,
+                    splitLongWords=1, alignment=1),
+        bold_s = S('Normal', fontSize=8,   fontName='Helvetica-Bold', leading=10),
+        ital_s = S('Normal', fontSize=7.5, fontName='Helvetica-Oblique', leading=9,
                     textColor=colors.HexColor('#555555')),
     )
 
@@ -125,8 +157,8 @@ def base_ts(extra=None):
          ('FONTNAME',(0,1),(-1,-1),'Helvetica'),('GRID',(0,0),(-1,-1),0.4,colors.HexColor('#CCCCCC')),
          ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#F2F2F2')]),
          ('VALIGN',(0,0),(-1,-1),'TOP'),('ALIGN',(0,0),(-1,0),'CENTER'),
-         ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),2),
-         ('LEFTPADDING',(0,0),(-1,-1),4),('RIGHTPADDING',(0,0),(-1,-1),4)]
+         ('TOPPADDING',(0,0),(-1,-1),1.5),('BOTTOMPADDING',(0,0),(-1,-1),1.5),
+         ('LEFTPADDING',(0,0),(-1,-1),3),('RIGHTPADDING',(0,0),(-1,-1),3)]
     if extra: b.extend(extra)
     return TableStyle(b)
 
@@ -141,6 +173,94 @@ class _NC(rl_canvas.Canvas):
         for s in self._saved_page_states:
             self.__dict__.update(s); self._hf(n); super().showPage()
         super().save()
+
+    def _draw_logo_badge(self, path, x, y, box_w, box_h, show_card=True):
+        """Draw a supplied logo without distortion, optionally on a white card."""
+        try:
+            reader = ImageReader(path)
+            image_w, image_h = reader.getSize()
+            # Keep the artwork at the exact same size it had inside the former
+            # white card; hiding the card must not enlarge either logo.
+            pad = 0.55 * mm
+            scale = min((box_w - 2*pad) / image_w, (box_h - 2*pad) / image_h)
+            draw_w = image_w * scale
+            draw_h = image_h * scale
+            if show_card:
+                self.setFillColor(colors.white)
+                self.setStrokeColor(colors.HexColor('#D5DCE4'))
+                self.setLineWidth(0.25)
+                self.roundRect(x, y, box_w, box_h, 0.45*mm, fill=1, stroke=1)
+            self.drawImage(
+                reader,
+                x + (box_w - draw_w) / 2,
+                y + (box_h - draw_h) / 2,
+                width=draw_w,
+                height=draw_h,
+                preserveAspectRatio=True,
+                mask='auto',
+            )
+            return True
+        except Exception:
+            return False
+
+    def _draw_fitted_center(self, text, x_min, x_max, y, font, max_size, min_size):
+        """Fit one metadata line between both logo cards without overlap."""
+        rendered = ' '.join(str(text or '').split())
+        available = max(1, x_max - x_min)
+        size = max_size
+        while size > min_size and self.stringWidth(rendered, font, size) > available:
+            size = max(min_size, size - 0.25)
+        if self.stringWidth(rendered, font, size) > available:
+            suffix = '...'
+            while rendered and self.stringWidth(rendered + suffix, font, size) > available:
+                rendered = rendered[:-1]
+            rendered = rendered.rstrip() + suffix
+        self.setFont(font, size)
+        self.drawCentredString((x_min + x_max) / 2, y, rendered)
+
+    def _draw_wrapped_center(self, text, x_min, x_max, center_y, font,
+                             max_size, min_size, leading, max_lines=2):
+        """Wrap a long header value while keeping it clear of both logo cards."""
+        rendered = ' '.join(str(text or '').split())
+        available = max(1, x_max - x_min)
+
+        def wrap_words(font_size):
+            lines = []
+            current = ''
+            for word in rendered.split():
+                candidate = f'{current} {word}'.strip()
+                if not current or self.stringWidth(candidate, font, font_size) <= available:
+                    current = candidate
+                else:
+                    lines.append(current)
+                    current = word
+            if current:
+                lines.append(current)
+            return lines or ['']
+
+        size = max_size
+        lines = wrap_words(size)
+        while len(lines) > max_lines and size > min_size:
+            size = max(min_size, size - 0.25)
+            lines = wrap_words(size)
+
+        if len(lines) > max_lines:
+            lines = lines[:max_lines - 1] + [' '.join(lines[max_lines - 1:])]
+            suffix = '...'
+            last = lines[-1]
+            while last and self.stringWidth(last + suffix, font, size) > available:
+                last = last[:-1]
+            lines[-1] = last.rstrip() + suffix
+
+        self.setFont(font, size)
+        first_y = center_y + ((len(lines) - 1) * leading / 2)
+        for index, line in enumerate(lines):
+            self.drawCentredString(
+                (x_min + x_max) / 2,
+                first_y - index * leading,
+                line,
+            )
+
     def _hf(self, n):
         m = self.__class__._meta
         date=m.get('date',''); day=m.get('day',''); proj=m.get('proj','')
@@ -149,12 +269,17 @@ class _NC(rl_canvas.Canvas):
         PRI = colors.HexColor(t.get('primary','#003366'))
         ACC = colors.HexColor(t.get('accent','#C89010'))
         self.saveState()
-        self.setFillColor(PRI); self.rect(0, H-36*mm, W, 36*mm, fill=1, stroke=0)
+        header_h = 36 * mm
+        accent_h = 2 * mm
+        logo_side_margin = 11 * mm
+        self.setFillColor(PRI); self.rect(0, H-header_h, W, header_h, fill=1, stroke=0)
         # Logos + configurable header text
         logo_gpa    = m.get('logo_gpa','')
         logo_kn     = m.get('logo_kn','')
         show_gpa    = m.get('show_logo_gpa', True)
         show_kn     = m.get('show_logo_kn',  True)
+        gpa_card    = m.get('logo_gpa_card', True)
+        kn_card     = m.get('logo_kn_card', True)
         gpa_w       = m.get('logo_gpa_w', 28) * mm
         gpa_h       = m.get('logo_gpa_h', 12) * mm
         gpa_yo      = m.get('logo_gpa_y_off', 0) * mm
@@ -163,35 +288,53 @@ class _NC(rl_canvas.Canvas):
         kn_yo       = m.get('logo_kn_y_off',  0) * mm
         co_name     = m.get('company_name',  'PT. GARUDA PRIMA AKSARA')
         proj_title  = m.get('project_title', 'Electrical Installation & Construction')
-        gpa_vis = show_gpa and logo_gpa and os.path.isfile(logo_gpa)
-        kn_vis  = show_kn  and logo_kn  and os.path.isfile(logo_kn)
+        gpa_vis = show_gpa and _is_drawable_logo(logo_gpa)
+        kn_vis  = show_kn  and _is_drawable_logo(logo_kn)
+        # Lower both marks slightly so their visual centre sits more naturally
+        # within the full header composition without changing their size.
+        badge_center_y = H - 15*mm
         if gpa_vis:
-            try: self.drawImage(logo_gpa, M, H-34*mm + gpa_yo, width=gpa_w, height=gpa_h,
-                                preserveAspectRatio=True, mask='auto')
-            except: pass
-        txt_x = M + (gpa_w + 4*mm if gpa_vis else 0)
-        self.setFillColor(colors.white)
-        self.setFont('Helvetica-Bold', 11)
-        self.drawString(txt_x, H-12*mm, co_name)
-        self.setFont('Helvetica', 7.5)
-        self.drawString(txt_x, H-18*mm, f'Daily Activity Report  |  {proj_title}  |  {cust}')
-        self.drawString(txt_x, H-23*mm, f'Date: {date}   |   Day: {day}   |   Project: {proj}')
+            gpa_vis = self._draw_logo_badge(
+                logo_gpa, logo_side_margin, badge_center_y - gpa_h/2 + gpa_yo, gpa_w, gpa_h,
+                show_card=gpa_card)
         if kn_vis:
-            try: self.drawImage(logo_kn, W-M-kn_w, H-34*mm + kn_yo, width=kn_w, height=kn_h,
-                                preserveAspectRatio=True, mask='auto')
-            except:
-                self.setFont('Helvetica',7); self.drawRightString(W-M, H-12*mm, f'LOCATION: {loc}')
-        else:
-            self.setFont('Helvetica',7)
-            self.drawRightString(W-M, H-12*mm, f'LOCATION: {loc}')
-            self.drawRightString(W-M, H-17*mm, f'CUSTOMER: {cust}')
-            self.drawRightString(W-M, H-22*mm, f'DAY {day}')
-        self.setFillColor(ACC); self.rect(0, H-38*mm, W, 2*mm, fill=1, stroke=0)
-        self.setFillColor(PRI); self.rect(0, 0, W, 9*mm, fill=1, stroke=0)
-        self.setFillColor(colors.white); self.setFont('Helvetica',7)
-        self.drawString(M, 3*mm, 'PT. Garuda Prima Aksara  |  Confidential')
-        self.drawCentredString(W/2, 3*mm, f'Daily Activity Report  |  {date}  |  PT. KN')
-        self.drawRightString(W-M, 3*mm, f'Page {self._pageNumber} of {n}')
+            kn_vis = self._draw_logo_badge(
+                logo_kn, W-logo_side_margin-kn_w, badge_center_y - kn_h/2 + kn_yo, kn_w, kn_h,
+                show_card=kn_card)
+
+        text_left = logo_side_margin + (gpa_w + 3*mm if gpa_vis else 0)
+        text_right = W - logo_side_margin - (kn_w + 3*mm if kn_vis else 0)
+        # Keep every centre-column line on the true page centre. Because the
+        # GPA and KN marks have different widths, use the narrower clearance
+        # on both sides instead of centring inside an asymmetric gap.
+        safe_half_width = min(W/2 - text_left, text_right - W/2)
+        text_left = W/2 - safe_half_width
+        text_right = W/2 + safe_half_width
+        self.setFillColor(colors.white)
+        self._draw_fitted_center(co_name, text_left, text_right, H-7*mm,
+                                 'Helvetica-Bold', 10, 6.5)
+        self._draw_fitted_center(
+            f'Daily Activity Report  |  {cust}',
+            text_left, text_right, H-11.5*mm, 'Helvetica', 7.3, 5.2)
+        self._draw_wrapped_center(
+            proj_title, text_left, text_right, H-17.5*mm,
+            'Helvetica-Bold', 6.7, 5.2, 3.5*mm, max_lines=2)
+        self._draw_fitted_center(
+            f'Date: {date}  |  Day: {day}  |  Project: {proj}',
+            M, W-M, H-24.5*mm, 'Helvetica', 6.7, 5.2)
+
+        # Keep report metadata visible even when the KN logo is present.
+        self.setFont('Helvetica', 6.8)
+        self.drawString(logo_side_margin, H-31.5*mm, f'LOCATION: {loc}')
+        self.drawCentredString(W/2, H-31.5*mm, f'CUSTOMER: {cust}')
+        self.drawRightString(W-logo_side_margin, H-31.5*mm, f'DAY {day}')
+
+        self.setFillColor(ACC); self.rect(0, H-header_h-accent_h, W, accent_h, fill=1, stroke=0)
+        self.setFillColor(PRI); self.rect(0, 0, W, 8*mm, fill=1, stroke=0)
+        self.setFillColor(colors.white); self.setFont('Helvetica',6.5)
+        self.drawString(M, 2.7*mm, 'PT. Garuda Prima Aksara  |  Confidential')
+        self.drawCentredString(W/2, 2.7*mm, f'Daily Activity Report  |  {date}  |  PT. KN')
+        self.drawRightString(W-M, 2.7*mm, f'Page {self._pageNumber} of {n}')
         self.restoreState()
 
 def _esc(s):
@@ -201,12 +344,120 @@ def _esc(s):
 PDF_PHOTO_CAPTION_MAX_CHARS = 300
 PDF_PHOTO_AREA_MAX_CHARS = 120
 
+OVERALL_PROGRESS_FIELDS = (
+    'description',
+    'duration',
+    'weight_factor',
+    'start',
+    'finish',
+    'cumulative_previous_plan',
+    'cumulative_previous_actual',
+    'this_period_plan',
+    'this_period_actual',
+    'cumulative_to_date_plan',
+    'cumulative_to_date_actual',
+    'deviation',
+)
+
+OVERALL_PROGRESS_PERCENT_FIELDS = (
+    'cumulative_previous_plan',
+    'cumulative_previous_actual',
+    'this_period_plan',
+    'this_period_actual',
+    'cumulative_to_date_plan',
+    'cumulative_to_date_actual',
+)
+
 def _bounded_pdf_text(value, max_chars):
     """Keep user text inside non-splittable PDF photo-card rows."""
     text = str(value or '').strip()
     if len(text) <= max_chars:
         return text
     return text[:max_chars - 3].rstrip() + '...'
+
+def _normalise_overall_progress(rows):
+    """Return only usable progress rows while keeping old drafts compatible."""
+    if not isinstance(rows, list):
+        return []
+    normalised = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        row = {}
+        for field in OVERALL_PROGRESS_FIELDS:
+            value = item.get(field, '')
+            row[field] = str('' if value is None else value).strip()
+        if any(row.values()):
+            normalised.append(row)
+    return normalised
+
+def _progress_number(value):
+    """Parse a flexible percentage value such as 95,25%, 95.25, or 95."""
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip().replace('%', '').replace(' ', '')
+    if not text:
+        return None
+    if ',' in text and '.' not in text:
+        text = text.replace(',', '.')
+    else:
+        text = text.replace(',', '')
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+def _progress_percent_text(value):
+    """Display numeric progress consistently while preserving non-numeric text."""
+    text = str('' if value is None else value).strip()
+    if not text:
+        return ''
+    number = _progress_number(text)
+    if number is None:
+        return text
+    if text.endswith('%'):
+        return text
+    return f'{number:g}%'
+
+def _overall_progress_totals(rows):
+    """Calculate the weighted overall values shown in the summary row."""
+    totals = {}
+    for field in OVERALL_PROGRESS_PERCENT_FIELDS:
+        total = 0.0
+        found = False
+        for row in rows:
+            weight = _progress_number(row.get('weight_factor'))
+            value = _progress_number(row.get(field))
+            if weight is None or value is None:
+                continue
+            total += weight * value / 100.0
+            found = True
+        totals[field] = total if found else None
+
+    plan = totals.get('cumulative_to_date_plan')
+    actual = totals.get('cumulative_to_date_actual')
+    totals['deviation'] = actual - plan if plan is not None and actual is not None else None
+    return totals
+
+def _group_report_photos(areas, per_row=3):
+    """Build independent photo-grid rows for each report area."""
+    if not isinstance(areas, list) or per_row < 1:
+        return []
+    grouped_areas = []
+    for area in areas:
+        if not isinstance(area, dict):
+            continue
+        area_id = area.get('id', '')
+        photos = area.get('photos', [])
+        if not isinstance(photos, list):
+            continue
+        entries = [(area_id, photo) for photo in photos if isinstance(photo, dict)]
+        if not entries:
+            continue
+        rows = [entries[index:index + per_row] for index in range(0, len(entries), per_row)]
+        grouped_areas.append((area_id, rows))
+    return grouped_areas
 
 def _prepare_pdf_photo(raw, target_width, target_height):
     """Center-crop a photo so it fills its PDF frame without distortion."""
@@ -248,26 +499,85 @@ def generate_pdf(d, output_path, cfg):
     prep  = d.get('prepared_by',''); chk = d.get('checked_by','')
     appr  = d.get('approved_by','')
 
+    gpa_logo = resolve_logo_path(cfg.get('logo_gpa', ''), 'gpa')
+    kn_logo = resolve_logo_path(cfg.get('logo_kn', ''), 'kn')
+    gpa_is_bundled = bool(gpa_logo) and os.path.normcase(os.path.abspath(gpa_logo)) == \
+        os.path.normcase(os.path.abspath(BUNDLED_LOGOS['gpa']))
+    kn_is_bundled = bool(kn_logo) and os.path.normcase(os.path.abspath(kn_logo)) == \
+        os.path.normcase(os.path.abspath(BUNDLED_LOGOS['kn']))
+    use_gpa_header_logo = gpa_is_bundled and _is_drawable_logo(BUNDLED_HEADER_LOGOS['gpa'])
+    use_kn_header_logo = kn_is_bundled and _is_drawable_logo(BUNDLED_HEADER_LOGOS['kn'])
+    if use_gpa_header_logo:
+        gpa_logo = BUNDLED_HEADER_LOGOS['gpa']
+    if use_kn_header_logo:
+        kn_logo = BUNDLED_HEADER_LOGOS['kn']
+
     _NC._meta = {
         'date': date, 'day': day, 'proj': proj, 'loc': loc, 'cust': cust,
         'theme':        cfg.get('theme', {}),
-        'logo_gpa':     cfg.get('logo_gpa',''),
-        'logo_kn':      cfg.get('logo_kn',''),
+        'logo_gpa':     gpa_logo,
+        'logo_kn':      kn_logo,
         'company_name': cfg.get('company_name',  'PT. GARUDA PRIMA AKSARA'),
         'project_title':d.get('project_title') or cfg.get('project_title','Electrical Installation & Construction'),
         'show_logo_gpa':cfg.get('show_logo_gpa', True),
         'show_logo_kn': cfg.get('show_logo_kn',  True),
-        'logo_gpa_w':   cfg.get('logo_gpa_w', 28),
-        'logo_gpa_h':   cfg.get('logo_gpa_h', 12),
+        # The two bundled header marks use the same box and exact visual height.
+        # Their widths remain proportional so neither brand mark is stretched.
+        'logo_gpa_w':   43.5 if use_gpa_header_logo else cfg.get('logo_gpa_w', 28),
+        'logo_gpa_h':   9.2 if use_gpa_header_logo else cfg.get('logo_gpa_h', 12),
         'logo_gpa_y_off':cfg.get('logo_gpa_y_off', 0),
-        'logo_kn_w':    cfg.get('logo_kn_w',  28),
-        'logo_kn_h':    cfg.get('logo_kn_h',  12),
+        'logo_kn_w':    32 if use_kn_header_logo else cfg.get('logo_kn_w',  28),
+        'logo_kn_h':    9.2 if use_kn_header_logo else cfg.get('logo_kn_h',  12),
         'logo_kn_y_off':cfg.get('logo_kn_y_off',  0),
+        'logo_gpa_card':not use_gpa_header_logo,
+        'logo_kn_card': not use_kn_header_logo,
     }
 
     story = []
-    def SH(t): return [Paragraph(f'  {t}', st['sec_s']), Spacer(1,2*mm)]
-    def AH(t): return [Paragraph(f'  ▌ {t}', st['area_s']), Spacer(1,1*mm)]
+    SECTION_GAP = 3.5 * mm
+
+    def TC(value, centered=False):
+        """Wrap user-entered table text instead of letting it cross a cell border."""
+        safe_value = '' if value is None else _esc(value)
+        return Paragraph(safe_value, st['tbl_c_s'] if centered else st['tbl_s'])
+
+    def _bar(text, paragraph_style, background, height):
+        """Build a full-width heading bar with vertically centred text."""
+        bar = Table(
+            [[Paragraph(text, paragraph_style)]],
+            colWidths=[CW],
+            rowHeights=[height],
+        )
+        bar.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), background),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 3.5*mm),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 3*mm),
+            ('TOPPADDING', (0, 0), (-1, -1), 0),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+        ]))
+        # Tables below use ReportLab's centred overflow inside the padded page
+        # frame. Match that placement so both outer edges line up exactly.
+        bar.hAlign = 'CENTER'
+        bar.keepWithNext = True
+        return bar
+
+    def SH(t):
+        # A non-breaking gap keeps the section number readable without
+        # changing the requested left alignment.
+        safe = re.sub(r'^(\d+\.)\s*', r'\1&#160;&#160;', _esc(t))
+        return [
+            _bar(safe, st['sec_s'], st['PRI'], 6.5*mm),
+            Spacer(1, 1.2*mm),
+        ]
+
+    def AH(t):
+        safe = f'&#9632;&#160;&#160;{_esc(t)}'
+        return [
+            _bar(safe, st['area_s'], st['AREA'], 5.8*mm),
+            Spacer(1, 1.2*mm),
+        ]
 
     # S1 info
     story += SH('1.  REPORT INFORMATION')
@@ -284,39 +594,155 @@ def generate_pdf(d, output_path, cfg):
                   for k,v in info_rows], colWidths=[35*mm,CW-35*mm])
     itbl.setStyle(TableStyle([
         ('BACKGROUND',(0,0),(0,-1),st['LB']),('GRID',(0,0),(-1,-1),0.4,GREY_LINE),
-        ('FONTSIZE',(0,0),(-1,-1),8),('TOPPADDING',(0,0),(-1,-1),3),
-        ('BOTTOMPADDING',(0,0),(-1,-1),3),('LEFTPADDING',(0,0),(-1,-1),5),
+        ('FONTSIZE',(0,0),(-1,-1),8),('TOPPADDING',(0,0),(-1,-1),2),
+        ('BOTTOMPADDING',(0,0),(-1,-1),2),('LEFTPADDING',(0,0),(-1,-1),4),
         ('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ROWBACKGROUNDS',(0,0),(-1,-1),[WHITE,GREY_BG])]))
-    story += [itbl, Spacer(1,4*mm)]
+    story += [itbl, Spacer(1,SECTION_GAP)]
 
     # S2 weather
     story += SH('2.  WEATHER REPORT')
     wx = d.get('weather',{})
     if wx:
-        keys = list(wx.keys()); vals = [wx[k] for k in keys]
+        keys = list(wx.keys())
+        vals = [TC(wx[k], centered=True) for k in keys]
+        keys = [Paragraph(_esc(k), st['wx_h_s']) for k in keys]
         wt = Table([keys,vals], colWidths=[CW/len(keys)]*len(keys))
         wt.setStyle(TableStyle([
             ('BACKGROUND',(0,0),(-1,0),st['SEC']),('TEXTCOLOR',(0,0),(-1,0),WHITE),
             ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),
             ('GRID',(0,0),(-1,-1),0.4,GREY_LINE),('ALIGN',(0,0),(-1,-1),'CENTER'),
-            ('VALIGN',(0,0),(-1,-1),'MIDDLE'),('TOPPADDING',(0,0),(-1,-1),3),
-            ('BOTTOMPADDING',(0,0),(-1,-1),3)]))
-        story += [wt, Spacer(1,4*mm)]
+            ('VALIGN',(0,0),(-1,-1),'MIDDLE'),('TOPPADDING',(0,0),(-1,-1),2),
+            ('BOTTOMPADDING',(0,0),(-1,-1),2)]))
+        story.append(wt)
+    story.append(Spacer(1,SECTION_GAP))
 
     # S3 indirect
     story += SH('3.  INDIRECT MANPOWER')
     ind = d.get('indirect_manpower',[])
     irows = [['No.','Name','Role / Position','Working Hours']]
     for i,p in enumerate(ind,1):
-        irows.append([str(i),_esc(p.get('name','')),_esc(p.get('role','')),_esc(p.get('hours',''))])
+        irows.append([
+            str(i), TC(p.get('name','')), TC(p.get('role','')),
+            TC(p.get('hours',''), centered=True),
+        ])
     itbl2 = Table(irows, colWidths=[9*mm,70*mm,55*mm,CW-134*mm])
-    itbl2.setStyle(base_ts([('ALIGN',(0,0),(0,-1),'CENTER'),('ALIGN',(3,0),(3,-1),'CENTER')]))
-    story += [itbl2, Spacer(1,4*mm)]
-    story.append(PageBreak())
+    itbl2.setStyle(base_ts([
+        ('ALIGN',(0,0),(0,-1),'CENTER'),('ALIGN',(3,0),(3,-1),'CENTER'),
+        ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+    ]))
+    story += [itbl2, Spacer(1,SECTION_GAP)]
+    story.append(CondPageBreak(32*mm))
 
-    # S4 areas
-    story += SH('4.  DAILY ACTIVITIES & MANPOWER BY AREA')
-    for area in d.get('areas',[]):
+    # S4 overall progress
+    story += SH('4.  OVERALL PROGRESS')
+    progress_rows = _normalise_overall_progress(d.get('overall_progress', []))
+    if progress_rows:
+        progress_h = S(
+            'Normal', fontSize=5.1, leading=5.8, fontName='Helvetica-Bold',
+            textColor=WHITE, alignment=1, splitLongWords=1,
+        )
+        progress_c = S(
+            'Normal', fontSize=5.5, leading=6.4, alignment=1,
+            splitLongWords=1,
+        )
+        progress_l = S(
+            'Normal', fontSize=6, leading=7, splitLongWords=1,
+        )
+        progress_total = S(
+            'Normal', fontSize=5.5, leading=6.4, fontName='Helvetica-Bold',
+            alignment=1, splitLongWords=1,
+        )
+
+        def PH(value):
+            return Paragraph(_esc(value), progress_h)
+
+        def PC(value, left=False):
+            return Paragraph(_esc(value), progress_l if left else progress_c)
+
+        progress_data = [
+            [
+                PH('No.'), PH('Description'), PH('Duration'), PH('Weight Factor'),
+                PH('Start'), PH('Finish'), PH('Cumulative Previous'), '',
+                PH('This Period'), '', PH('Cumulative Up to This Month'), '', '',
+            ],
+            ['', '', '', '', '', '', PH('Plan'), PH('Actual'), PH('Plan'),
+             PH('Actual'), PH('Plan'), PH('Actual'), PH('Deviation')],
+        ]
+
+        for index, row in enumerate(progress_rows, 1):
+            deviation = row.get('deviation', '')
+            if not deviation:
+                cumulative_plan = _progress_number(row.get('cumulative_to_date_plan'))
+                cumulative_actual = _progress_number(row.get('cumulative_to_date_actual'))
+                if cumulative_plan is not None and cumulative_actual is not None:
+                    deviation = f'{cumulative_actual - cumulative_plan:g}'
+            progress_data.append([
+                PC(index),
+                PC(row.get('description', ''), left=True),
+                PC(row.get('duration', '')),
+                PC(_progress_percent_text(row.get('weight_factor', ''))),
+                PC(row.get('start', '')),
+                PC(row.get('finish', '')),
+                *[
+                    PC(_progress_percent_text(row.get(field, '')))
+                    for field in OVERALL_PROGRESS_PERCENT_FIELDS
+                ],
+                PC(_progress_percent_text(deviation)),
+            ])
+
+        totals = _overall_progress_totals(progress_rows)
+        progress_data.append([
+            Paragraph('OVERALL PROGRESS', progress_total), '', '', '', '', '',
+            *[
+                Paragraph(
+                    '' if totals.get(field) is None else f"{totals[field]:.2f}%",
+                    progress_total,
+                )
+                for field in OVERALL_PROGRESS_PERCENT_FIELDS
+            ],
+            Paragraph(
+                '' if totals.get('deviation') is None else f"{totals['deviation']:.2f}%",
+                progress_total,
+            ),
+        ])
+
+        progress_widths = [
+            7*mm, 53*mm, 10*mm, 11*mm, 14*mm, 14*mm,
+            10*mm, 10*mm, 10*mm, 10*mm, 10*mm, 10*mm, 11*mm,
+        ]
+        progress_table = Table(
+            progress_data,
+            colWidths=progress_widths,
+            repeatRows=2,
+            splitByRow=1,
+        )
+        progress_table.setStyle(TableStyle([
+            ('SPAN',(0,0),(0,1)),('SPAN',(1,0),(1,1)),('SPAN',(2,0),(2,1)),
+            ('SPAN',(3,0),(3,1)),('SPAN',(4,0),(4,1)),('SPAN',(5,0),(5,1)),
+            ('SPAN',(6,0),(7,0)),('SPAN',(8,0),(9,0)),('SPAN',(10,0),(12,0)),
+            ('BACKGROUND',(0,0),(-1,1),st['PRI']),
+            ('TEXTCOLOR',(0,0),(-1,1),WHITE),
+            ('GRID',(0,0),(-1,-1),0.35,GREY_LINE),
+            ('ROWBACKGROUNDS',(0,2),(-1,-2),[WHITE,GREY_BG]),
+            ('BACKGROUND',(0,-1),(-1,-1),st['LB']),
+            ('SPAN',(0,-1),(5,-1)),
+            ('ALIGN',(0,0),(-1,-1),'CENTER'),
+            ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+            ('TOPPADDING',(0,0),(-1,-1),1.2),
+            ('BOTTOMPADDING',(0,0),(-1,-1),1.2),
+            ('LEFTPADDING',(0,0),(-1,-1),1.2),
+            ('RIGHTPADDING',(0,0),(-1,-1),1.2),
+        ]))
+        story.append(progress_table)
+    else:
+        story.append(Paragraph('No overall progress reported.', st['ital_s']))
+    story.append(Spacer(1, SECTION_GAP))
+    story.append(CondPageBreak(32*mm))
+
+    # S5 areas
+    story += SH('5.  DAILY ACTIVITIES & MANPOWER BY AREA')
+    areas = d.get('areas', [])
+    for area_index, area in enumerate(areas):
         aid = area.get('id','')
         blocks = list(AH(aid))
 
@@ -334,19 +760,25 @@ def generate_pdf(d, output_path, cfg):
         at.setStyle(TableStyle([
             ('VALIGN',(0,0),(-1,-1),'TOP'),('BOX',(0,0),(-1,-1),0.5,GREY_LINE),
             ('INNERGRID',(0,0),(-1,-1),0.4,GREY_LINE),('BACKGROUND',(0,0),(-1,-1),GREY_BG),
-            ('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4),
-            ('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5)]))
-        blocks += [at, Spacer(1,2*mm)]
+            ('TOPPADDING',(0,0),(-1,-1),3),('BOTTOMPADDING',(0,0),(-1,-1),3),
+            ('LEFTPADDING',(0,0),(-1,-1),4),('RIGHTPADDING',(0,0),(-1,-1),4)]))
+        blocks += [at, Spacer(1,1*mm)]
 
         mp = area.get('manpower',[])
         if mp:
             blocks.append(Paragraph(f'Direct Manpower — {_esc(aid)}', st['sub_s']))
             mrows = [['No.','Name','Position','Task Today','Hours']]
             for j,p in enumerate(mp,1):
-                mrows.append([str(j),_esc(p.get('name','')),_esc(p.get('role','')),_esc(p.get('task','')),_esc(p.get('hours',''))])
-            mt = Table(mrows, colWidths=[8*mm,38*mm,24*mm,80*mm,27*mm])
-            mt.setStyle(base_ts([('ALIGN',(0,0),(0,-1),'CENTER'),('ALIGN',(4,0),(4,-1),'CENTER')]))
-            blocks += [mt, Spacer(1,2*mm)]
+                mrows.append([
+                    str(j), TC(p.get('name','')), TC(p.get('role','')),
+                    TC(p.get('task','')), TC(p.get('hours',''), centered=True),
+                ])
+            mt = Table(mrows, colWidths=[8*mm,38*mm,30*mm,74*mm,CW-150*mm])
+            mt.setStyle(base_ts([
+                ('ALIGN',(0,0),(0,-1),'CENTER'),('ALIGN',(4,0),(4,-1),'CENTER'),
+                ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+            ]))
+            blocks += [mt, Spacer(1,1*mm)]
 
         # per-area indirect manpower
         area_ind = area.get('indirect_manpower', [])
@@ -354,11 +786,15 @@ def generate_pdf(d, output_path, cfg):
             blocks.append(Paragraph(f'Indirect Manpower — {_esc(aid)}', st['sub_s']))
             irows_a = [['No.','Name','Role / Position','Working Hours']]
             for j, p in enumerate(area_ind, 1):
-                irows_a.append([str(j), _esc(p.get('name','')), _esc(p.get('role','')), _esc(p.get('hours',''))])
+                irows_a.append([
+                    str(j), TC(p.get('name','')), TC(p.get('role','')),
+                    TC(p.get('hours',''), centered=True),
+                ])
             it_a = Table(irows_a, colWidths=[9*mm, 70*mm, 55*mm, CW - 134*mm])
             it_a.setStyle(base_ts([('ALIGN',(0,0),(0,-1),'CENTER'),
-                                    ('ALIGN',(3,0),(3,-1),'CENTER')]))
-            blocks += [it_a, Spacer(1,2*mm)]
+                                    ('ALIGN',(3,0),(3,-1),'CENTER'),
+                                    ('VALIGN',(0,0),(-1,-1),'MIDDLE')]))
+            blocks += [it_a, Spacer(1,1*mm)]
 
         ct = area.get('constraints','').strip()
         rm = area.get('remarks','').strip()
@@ -370,38 +806,48 @@ def generate_pdf(d, output_path, cfg):
             crt.setStyle(TableStyle([
                 ('VALIGN',(0,0),(-1,-1),'TOP'),('GRID',(0,0),(-1,-1),0.3,GREY_LINE),
                 ('BACKGROUND',(0,0),(0,-1),colors.HexColor('#FFF8E7')),
-                ('TOPPADDING',(0,0),(-1,-1),3),('BOTTOMPADDING',(0,0),(-1,-1),3),
-                ('LEFTPADDING',(0,0),(-1,-1),5)]))
-            blocks += [crt, Spacer(1,2*mm)]
+                ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),2),
+                ('LEFTPADDING',(0,0),(-1,-1),4)]))
+            blocks += [crt, Spacer(1,1*mm)]
 
-        blocks.append(Spacer(1,4*mm))
+        # The area-to-area gap is added below so every area ends with the same
+        # amount of whitespace, regardless of which optional tables it has.
+        if blocks and isinstance(blocks[-1], Spacer):
+            blocks.pop()
         story.append(KeepTogether(blocks[:4]))
         for b in blocks[4:]: story.append(b)
+        if area_index < len(areas) - 1:
+            story.append(Spacer(1,2.5*mm))
 
-    story.append(PageBreak())
+    story.append(Spacer(1,SECTION_GAP))
+    # The compact constraints/remarks pair needs about 25 mm. Keeping this
+    # threshold precise prevents a taller page header from wasting the rest
+    # of page one and pushing the final photo row onto a third page.
+    story.append(CondPageBreak(25*mm))
 
-    # S5 constraints
-    story += SH('5.  CONSTRAINTS & ISSUES')
+    # S6 constraints
+    story += SH('6.  CONSTRAINTS & ISSUES')
     any_c = any(a.get('constraints','').strip() for a in d.get('areas',[]))
     if any_c:
         gcr = [['Area','Constraint / Issue']]
         for a in d.get('areas',[]):
             c = a.get('constraints','').strip()
-            if c: gcr.append([_esc(a.get('id','')),_esc(c)])
+            if c: gcr.append([TC(a.get('id','')),TC(c)])
         gct = Table(gcr,colWidths=[20*mm,CW-20*mm])
         gct.setStyle(base_ts([('VALIGN',(0,0),(-1,-1),'TOP')]))
-        story += [gct, Spacer(1,3*mm)]
+        story.append(gct)
     else:
-        story += [Paragraph('No constraints reported.',st['ital_s']),Spacer(1,3*mm)]
+        story.append(Paragraph('No constraints reported.',st['ital_s']))
+    story.append(Spacer(1,SECTION_GAP))
 
-    story += SH('6.  REMARKS')
+    # S7 remarks
+    story += SH('7.  REMARKS')
     gr = d.get('global_remarks','').strip()
-    story += [Paragraph(_esc(gr) if gr else '—',st['body_s']),Spacer(1,5*mm)]
-    story.append(PageBreak())
+    story += [Paragraph(_esc(gr) if gr else '—',st['body_s']),Spacer(1,SECTION_GAP)]
+    story.append(CondPageBreak(42*mm))
 
-    # S6 sign-off (dynamic columns)
-    story += SH('7.  SIGN-OFF')
-    story.append(Spacer(1,3*mm))
+    # S8 sign-off (dynamic columns)
+    story += SH('8.  SIGN-OFF')
     sign_offs = d.get('sign_offs', [])
     if not sign_offs:
         sign_offs = [
@@ -433,53 +879,59 @@ def generate_pdf(d, output_path, cfg):
         ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),8.5),
         ('ALIGN',(0,0),(-1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'MIDDLE'),
         ('GRID',(0,0),(-1,-1),0.5,GREY_LINE),
-        ('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4),
+        ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),2),
         ('FONTNAME',(0,3),(-1,3),'Helvetica-Bold'),
         ('FONTSIZE',(0,4),(-1,4),7.5),('TEXTCOLOR',(0,4),(-1,4),colors.grey)]))
-    story += [so, Spacer(1,4*mm)]
-    story.append(PageBreak())
+    story += [so, Spacer(1,SECTION_GAP)]
+    PER_ROW = 3
+    photo_sections = _group_report_photos(areas, PER_ROW)
+    story.append(CondPageBreak(65*mm if photo_sections else 10*mm))
 
-    # S7 photos
-    story += SH('8.  PHOTO DOCUMENTATION')
-    story.append(Paragraph(
-        'Each box = one photo reference for weekly / monthly reports.',st['ital_s']))
-    story.append(Spacer(1,3*mm))
-    PER_ROW=3; BOX_W=(CW-4*mm)/PER_ROW; BOX_H=52*mm
+    # S9 photos. Each area has its own heading and grid so photos from different
+    # work areas are never presented as one continuous group.
+    story += SH('9.  PHOTO DOCUMENTATION')
+    photo_documentation_title = _bounded_pdf_text(
+        d.get('photo_documentation_title', ''),
+        PDF_PHOTO_AREA_MAX_CHARS,
+    )
+    if photo_documentation_title:
+        story.append(Paragraph(_esc(photo_documentation_title), st['sub_s']))
+        story.append(Spacer(1, 0.5*mm))
+    BOX_W=(CW-4*mm)/PER_ROW; BOX_H=52*mm
     PHOTO_INSET = 0
-    for area in d.get('areas',[]):
-        photos = area.get('photos',[])
-        if not photos: continue
-        aid = _bounded_pdf_text(area.get('id', ''), PDF_PHOTO_AREA_MAX_CHARS)
-        story.append(Paragraph(_esc(aid),st['sub_s']))
-        story.append(Spacer(1,1*mm))
-        photo_entries = []
-        for p in photos:
-            img_data = p.get('img_data','')
-            desc = _bounded_pdf_text(p.get('desc', ''), PDF_PHOTO_CAPTION_MAX_CHARS)
-            if img_data and ',' in img_data:
-                try:
-                    b64 = img_data.split(',')[1]
-                    raw_photo = base64.b64decode(b64)
-                    photo_w = BOX_W - 4*mm - 2*PHOTO_INSET
-                    photo_h = BOX_H - 2*PHOTO_INSET
-                    img_bytes = _prepare_pdf_photo(raw_photo, photo_w, photo_h)
-                    rl_img = RLImage(img_bytes, width=photo_w, height=photo_h)
-                    photo_cell = rl_img
-                except:
-                    photo_cell = ''
-            else:
-                photo_cell = ''
-            title_para = Paragraph(f'<b>{_esc(aid)}</b>', st['sm_s'])
-            caption_para = Paragraph(_esc(desc), st['ital_s'])
-            photo_entries.append((title_para, caption_para, photo_cell))
-
+    text_width = BOX_W - 10*mm
+    for raw_area_id, photo_groups in photo_sections:
+        aid = _bounded_pdf_text(raw_area_id, PDF_PHOTO_AREA_MAX_CHARS)
+        story.append(CondPageBreak(65*mm))
+        story.append(Paragraph(_esc(aid), st['sub_s']))
+        story.append(Spacer(1, 0.5*mm))
         rows = []
-        text_width = BOX_W - 10*mm
-        for start in range(0, len(photo_entries), PER_ROW):
-            group = photo_entries[start:start+PER_ROW]
 
-            # Let long area names and captions wrap. The previous fixed 5 mm
-            # rows caused a second line to spill over the divider and photo.
+        for photo_group in photo_groups:
+            group = []
+            for _, photo in photo_group:
+                img_data = photo.get('img_data','')
+                desc = _bounded_pdf_text(photo.get('desc', ''), PDF_PHOTO_CAPTION_MAX_CHARS)
+                if img_data and ',' in img_data:
+                    try:
+                        b64 = img_data.split(',')[1]
+                        raw_photo = base64.b64decode(b64)
+                        photo_w = BOX_W - 4*mm - 2*PHOTO_INSET
+                        photo_h = BOX_H - 2*PHOTO_INSET
+                        img_bytes = _prepare_pdf_photo(raw_photo, photo_w, photo_h)
+                        rl_img = RLImage(img_bytes, width=photo_w, height=photo_h)
+                        photo_cell = rl_img
+                    except:
+                        photo_cell = ''
+                else:
+                    photo_cell = ''
+                card_title = photo_documentation_title or aid
+                title_para = Paragraph(f'<b>{_esc(card_title)}</b>', st['sm_s'])
+                caption_para = Paragraph(_esc(desc), st['ital_s'])
+                group.append((title_para, caption_para, photo_cell))
+
+            # Let long area names and captions wrap. Every card in one area row
+            # uses the tallest text block so all photo borders remain aligned.
             title_h = max(
                 5*mm,
                 max(title.wrap(text_width, 100*mm)[1] for title, _, _ in group) + 2*mm,
@@ -520,16 +972,16 @@ def generate_pdf(d, output_path, cfg):
                 row.append('')
             rows.append(row)
 
-        # Automatic outer row heights follow the tallest wrapped caption in
-        # each group, keeping every line inside its photo card.
+        # Each area's rows get their own table, so the next area always starts
+        # as a visibly separate photo group.
         pg=Table(rows,colWidths=[BOX_W]*PER_ROW)
         pg.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'TOP'),
             ('LEFTPADDING',(0,0),(-1,-1),2),('RIGHTPADDING',(0,0),(-1,-1),2),
             ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),4)]))
-        story+=[pg,Spacer(1,3*mm)]
+        story += [pg, Spacer(1,2*mm)]
 
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf,pagesize=A4,topMargin=40*mm,bottomMargin=15*mm,leftMargin=M,rightMargin=M)
+    doc = SimpleDocTemplate(buf,pagesize=A4,topMargin=40.5*mm,bottomMargin=11*mm,leftMargin=M,rightMargin=M)
     doc.build(story, canvasmaker=_NC)
     if output_path:
         os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
@@ -1387,9 +1839,13 @@ def remove_logo():
 @login_required
 def logo_status():
     cfg = load_config()
+    resolved_gpa = resolve_logo_path(cfg.get('logo_gpa', ''), 'gpa')
+    resolved_kn = resolve_logo_path(cfg.get('logo_kn', ''), 'kn')
     return jsonify({
-        'gpa': bool(cfg.get('logo_gpa') and os.path.isfile(cfg.get('logo_gpa',''))),
-        'kn':  bool(cfg.get('logo_kn')  and os.path.isfile(cfg.get('logo_kn',''))),
+        'gpa': bool(resolved_gpa),
+        'kn': bool(resolved_kn),
+        'gpa_source': 'uploaded' if _is_drawable_logo(cfg.get('logo_gpa', '')) else 'bundled',
+        'kn_source': 'uploaded' if _is_drawable_logo(cfg.get('logo_kn', '')) else 'bundled',
     })
 
 
@@ -1861,10 +2317,11 @@ The user will describe their day's work in natural language (often in Indonesian
 Your job is to extract structured data and fill the daily report form.
 
 The report has these sections:
-1. **Report Info**: date, day_no (auto-calc from project_start_date), project_no, location, customer, equipment, project_title, prepared_by, checked_by, approved_by
+1. **Report Info**: date, day_no (auto-calc from project_start_date), project_no, location, customer, equipment, project_title, photo_documentation_title, prepared_by, checked_by, approved_by
 2. **Weather**: Morning, Afternoon, Evening (Cerah/Berawan/Hujan/Gerimis), Wind (Calm/Light/Moderate/Strong), Temperature (free text e.g. "30°C"), Impact (None/Minor/Stopped Work)
 3. **Global Indirect Manpower**: list of {name, role, hours}
-4. **Areas** (can be multiple): each has:
+4. **Overall Progress**: list of {description, duration, weight_factor, start, finish, cumulative_previous_plan, cumulative_previous_actual, this_period_plan, this_period_actual, cumulative_to_date_plan, cumulative_to_date_actual}
+5. **Areas** (can be multiple): each has:
    - id (area name like MA-14, MA-23, etc.)
    - activities_today: list of strings
    - activities_tomorrow: list of strings
@@ -1872,8 +2329,8 @@ The report has these sections:
    - indirect_manpower: list of {name, role, hours}
    - constraints: string
    - remarks: string
-5. **Global Remarks**: free text
-6. **Sign-offs**: auto-filled from config
+6. **Global Remarks**: free text
+7. **Sign-offs**: auto-filled from config
 
 Available areas: $areas
 Available manpower (name to role): $manpower
@@ -1895,7 +2352,9 @@ Your response MUST be valid JSON with exactly this structure:
   "reply": "Your conversational reply to the user (markdown OK)",
   "updates": {
     "date": "...",
+    "photo_documentation_title": "...",
     "weather": {"Morning": "...", ...},
+    "overall_progress": [{"description": "...", "weight_factor": "...", "cumulative_to_date_plan": "...", "cumulative_to_date_actual": "..."}],
     "areas": [{"id": "MA-14", "activities_today": [...], "activities_tomorrow": [...], "manpower": [...], "constraints": "...", "remarks": ""}]
   },
   "missing": ["list of important fields still missing"],
