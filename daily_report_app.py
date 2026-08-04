@@ -897,9 +897,13 @@ def generate_pdf(d, output_path, cfg):
                 parts.append(Paragraph('—', st['ital_s']))
             return parts
 
-        at = Table([[act_cell(area.get('activities_today',[]),'Activity Today'),
-                     act_cell(area.get('activities_tomorrow',[]),'Activity Tomorrow')]],
-                   colWidths=[CW*0.55,CW*0.45])
+        if area.get('activities_swapped'):
+            cols = [act_cell(area.get('activities_tomorrow',[]),'Activity Tomorrow'),
+                    act_cell(area.get('activities_today',[]),'Activity Today')]
+        else:
+            cols = [act_cell(area.get('activities_today',[]),'Activity Today'),
+                    act_cell(area.get('activities_tomorrow',[]),'Activity Tomorrow')]
+        at = Table([cols], colWidths=[CW*0.55,CW*0.45])
         at.setStyle(TableStyle([
             ('VALIGN',(0,0),(-1,-1),'TOP'),('BOX',(0,0),(-1,-1),0.5,GREY_LINE),
             ('INNERGRID',(0,0),(-1,-1),0.4,GREY_LINE),('BACKGROUND',(0,0),(-1,-1),GREY_BG),

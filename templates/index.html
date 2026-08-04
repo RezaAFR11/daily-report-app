@@ -1642,6 +1642,10 @@ function addAreaBlock(data={}) {
     </div>
     <div class="card-body p-2">
       <!-- Activities -->
+      <div class="d-flex align-items-center mb-1 gap-2">
+        <span class="fld-lbl mb-0 fw-bold" style="font-size:.78rem;">Activities</span>
+        <button class="btn btn-sm btn-outline-secondary acts-swap-btn" style="font-size:.7rem;padding:1px 8px;" onclick="toggleActsSwap(this)" title="Swap column order in PDF">⇄ Today first</button>
+      </div>
       <div class="row g-2 mb-2">
         <div class="col-md-6">
           <div class="fld-lbl mb-1 fw-bold">Activity Today</div>
@@ -1713,6 +1717,7 @@ function addAreaBlock(data={}) {
 
   if (data.activities_today)    data.activities_today.forEach(t => addAct(block.querySelector('[onclick*="today"]'), 'today', t));
   if (data.activities_tomorrow) data.activities_tomorrow.forEach(t => addAct(block.querySelector('[onclick*="tomorrow"]'), 'tomorrow', t));
+  if (data.activities_swapped)  { const btn = block.querySelector('.acts-swap-btn'); if (btn) { btn.dataset.swapped='1'; btn.textContent='⇄ Tomorrow first'; btn.classList.replace('btn-outline-secondary','btn-outline-primary'); } }
   if (data.manpower)            data.manpower.forEach(p => addDM(block.querySelector('.add-dm-btn'), p));
   if (data.constraints)         block.querySelector('.area-const').value = data.constraints;
   if (data.remarks)             block.querySelector('.area-rem').value   = data.remarks;
@@ -1773,6 +1778,19 @@ function addAreaIndRow(btn, d={}) {
 // ════════════════════════════════════════════════════════════
 // ACTIVITIES
 // ════════════════════════════════════════════════════════════
+function toggleActsSwap(btn) {
+  const swapped = btn.dataset.swapped === '1';
+  if (swapped) {
+    btn.dataset.swapped = '0';
+    btn.textContent = '⇄ Today first';
+    btn.classList.replace('btn-outline-primary', 'btn-outline-secondary');
+  } else {
+    btn.dataset.swapped = '1';
+    btn.textContent = '⇄ Tomorrow first';
+    btn.classList.replace('btn-outline-secondary', 'btn-outline-primary');
+  }
+}
+
 function addAct(btn, type, text='') {
   const block = btn.closest('[data-ai]');
   const cont  = block.querySelector(type==='today' ? '.acts-today' : '.acts-tmr');
@@ -2178,10 +2196,12 @@ function collectData() {
       if (data || filename || desc) photos.push({ img_data: data, photo_filename: filename, desc });
     });
 
+    const swapBtn = block.querySelector('.acts-swap-btn');
     areas.push({
       id: areaId,
       activities_today,
       activities_tomorrow,
+      activities_swapped: swapBtn?.dataset.swapped === '1',
       manpower,
       indirect_manpower: indirect_manpower_area,
       constraints: (block.querySelector('.area-const') || {}).value || '',
