@@ -433,23 +433,21 @@ def _normalise_pdf_section_order(value):
                 if section_key in DAILY_PDF_SECTION_ORDER and section_key not in requested:
                     requested.append(section_key)
 
-    # Daily Activities, Constraints, and Remarks share one draggable Areas card
-    # in the form. Keep the three derived PDF sections together even if an
-    # imported JSON contains an incomplete or manually split order.
-    area_keys = ('daily_activities', 'constraints', 'remarks')
-    area_positions = [requested.index(key) for key in area_keys if key in requested]
-    if area_positions:
-        insert_at = min(area_positions)
-        requested = [key for key in requested if key not in area_keys]
-        requested[insert_at:insert_at] = area_keys
+    # Backward compatibility for the former six-card form. It emitted only the
+    # Daily Activities anchor for the Areas card; its two derived sections must
+    # follow it. A list that names either companion explicitly is treated as a
+    # current, independently ordered nine-section list and is left untouched.
+    if (
+        'daily_activities' in requested
+        and 'constraints' not in requested
+        and 'remarks' not in requested
+    ):
+        insert_at = requested.index('daily_activities') + 1
+        requested[insert_at:insert_at] = ['constraints', 'remarks']
 
     ordered = ['report_information']
     ordered.extend(key for key in requested if key != 'report_information')
     ordered.extend(key for key in DAILY_PDF_SECTION_ORDER if key not in ordered)
-    # Photo Documentation has no independent draggable card and remains the
-    # closing section, matching both the original report and the form contract.
-    ordered.remove('photo_documentation')
-    ordered.append('photo_documentation')
     return ordered
 
 

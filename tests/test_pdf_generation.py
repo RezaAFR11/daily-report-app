@@ -411,15 +411,10 @@ class PDFGenerationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            (
-                _normalise_pdf_section_order([
-                    'photo_documentation', 'weather', 'report_information',
-                ])[0],
-                _normalise_pdf_section_order([
-                    'photo_documentation', 'weather', 'report_information',
-                ])[-1],
-            ),
-            ('report_information', 'photo_documentation'),
+            _normalise_pdf_section_order([
+                'photo_documentation', 'weather', 'report_information',
+            ])[:3],
+            ['report_information', 'photo_documentation', 'weather'],
         )
         self.assertEqual(
             _normalise_pdf_section_order([
@@ -437,10 +432,58 @@ class PDFGenerationTests(unittest.TestCase):
                 'daily_activities', 'remarks', 'weather',
             ])[:6],
             [
-                'report_information', 'daily_activities', 'constraints',
-                'remarks', 'sign_off', 'weather',
+                'report_information', 'constraints', 'sign_off',
+                'daily_activities', 'remarks', 'weather',
             ],
         )
+        self.assertEqual(
+            _normalise_pdf_section_order([
+                'report_information', 'sign_off', 'areas', 'weather',
+            ])[:6],
+            [
+                'report_information', 'sign_off', 'daily_activities',
+                'constraints', 'remarks', 'weather',
+            ],
+        )
+
+    def test_pdf_area_sections_and_photos_can_move_independently(self):
+        report = deepcopy(MINIMAL_REPORT)
+        report['section_order'] = [
+            'report_information',
+            'photo_documentation',
+            'remarks',
+            'constraints',
+            'sign_off',
+            'daily_activities',
+            'indirect_manpower',
+            'weather',
+            'overall_progress',
+        ]
+        paragraph_texts = []
+        original_paragraph = daily_report_app.Paragraph
+
+        def paragraph_spy(text, *args, **kwargs):
+            paragraph_texts.append(str(text))
+            return original_paragraph(text, *args, **kwargs)
+
+        with patch('daily_report_app.Paragraph', side_effect=paragraph_spy):
+            generate_pdf(report, None, deepcopy(DEFAULT_CONFIG))
+
+        headings = [
+            re.sub(r'^\d+\.&#160;&#160;', '', text)
+            for text in paragraph_texts
+            if re.match(r'^\d+\.&#160;&#160;', text)
+        ]
+        self.assertEqual(headings, [
+            'REPORT INFORMATION',
+            'PHOTO DOCUMENTATION',
+            'REMARKS',
+            'CONSTRAINTS &amp; ISSUES',
+            'SIGN-OFF',
+            'DAILY ACTIVITIES &amp; MANPOWER BY AREA',
+            'INDIRECT MANPOWER',
+            'WEATHER REPORT',
+        ])
 
     def test_disabled_progress_keeps_its_saved_position_for_later_reenable(self):
         requested = [
@@ -553,8 +596,8 @@ class PDFGenerationTests(unittest.TestCase):
         self.assertIn('id="showOverallProgress"', page)
         self.assertIn('aria-expanded="false"', page)
         self.assertIn('class="card-body p-2 d-none" id="overallProgressBody"', page)
-        self.assertIn('id="areasSectionNo">4 · </span>', page)
-        self.assertIn('id="signOffSectionNo">5 · </span>', page)
+        self.assertIn('id="areasSectionNo">Step 4 · </span>', page)
+        self.assertIn('id="signOffSectionNo">Step 5 · </span>', page)
         self.assertIn('function syncOverallProgressSection', page)
         self.assertIn('show_overall_progress:', page)
         self.assertIn('overallProgressToggle.checked = false;', page)
@@ -562,15 +605,35 @@ class PDFGenerationTests(unittest.TestCase):
         self.assertIn('function addOverallProgressRow', page)
         self.assertIn('id="f_photo_documentation_title"', page)
         self.assertIn('id="reportSections"', page)
-        self.assertIn('id="resetSectionOrderBtn"', page)
-        self.assertEqual(page.count('class="section-drag-handle"'), 5)
-        self.assertIn('data-section-key="report_information" data-reorderable="false"', page)
+        self.assertIn('id="pdfSectionOrderModal"', page)
+        self.assertIn('id="pdfSectionOrderList"', page)
+        self.assertIn('id="resetPDFSectionOrderBtn"', page)
+        self.assertIn('id="confirmPDFSectionOrderBtn"', page)
+        self.assertIn("report_information: { label:'Report Information'", page)
+        self.assertIn("photo_documentation: { label:'Photo Documentation'", page)
+        self.assertIn('function openPDFSectionOrderModal()', page)
+        self.assertIn('function confirmPDFSectionOrder()', page)
+        self.assertIn('function renderPDFPreview()', page)
+        self.assertIn("backdrop: 'static'", page)
+        self.assertIn('keyboard: false', page)
         self.assertIn('section_order:  getSectionOrder()', page)
-        self.assertIn('function initSectionReordering()', page)
+        self.assertIn('function initPDFSectionOrderModal()', page)
+        self.assertNotIn('class="section-drag-handle"', page)
+        self.assertNotIn('id="resetSectionOrderBtn"', page)
+        self.assertNotIn('function initSectionReordering()', page)
         self.assertIn('<nav class="app-navbar">', page)
         self.assertIn('class="app-navbar-actions"', page)
         self.assertIn('flex-wrap:nowrap', page)
         self.assertNotIn('ms-auto flex-wrap align-items-center', page)
+        navbar_html = page[page.index('<nav class="app-navbar">'):page.index('</nav>')]
+        self.assertNotIn('id="autosave-indicator"', navbar_html)
+        self.assertIn(
+            'id="autosave-indicator" role="status" aria-live="polite"',
+            page,
+        )
+        self.assertIn("function showAutosaveStatus(message, type='info', autoHide=true)", page)
+        self.assertIn("showAutosaveStatus(`✓ Saved ${data.saved_at||''}`, 'success');", page)
+        self.assertIn('}, 2700);', page)
 
     def test_long_project_title_wraps_without_truncation(self):
         title = (
