@@ -135,12 +135,38 @@ def _percent(value: Any) -> str:
     return _plain(value, "\u2014")
 
 
-def _normalise_status(value: Any) -> str:
+def _normalise_report_type(value: Any) -> str:
+    """Return the supported report kind, defaulting safely to monthly.
+
+    Historical report JSON does not contain ``report_type``.  Treating every
+    missing or unknown value as monthly keeps those saved reports rendering as
+    they did before weekly reports were introduced.
+    """
+    text = _plain(value, "monthly").lower().replace("_", "-")
+    if text in {"weekly", "week", "wtd", "week-to-date", "week to date"}:
+        return "weekly"
+    return "monthly"
+
+
+def _report_type(report: Mapping[str, Any]) -> str:
+    return _normalise_report_type(report.get("report_type"))
+
+
+def _progress_report_title(report: Mapping[str, Any]) -> str:
+    period_name = "Weekly" if _report_type(report) == "weekly" else "Monthly"
+    return f"{period_name} Progress Report"
+
+
+def _normalise_status(value: Any, *, report_type: str = "monthly") -> str:
     text = _plain(value, "draft").lower().replace("_", "-")
     if text in {"final", "issued", "approved"}:
         return "FINAL"
+    if text in {"wtd", "week-to-date", "week to date"}:
+        return "WTD"
     if text in {"mtd", "month-to-date", "month to date"}:
-        return "MTD"
+        return "WTD" if _normalise_report_type(report_type) == "weekly" else "MTD"
+    if text in {"partial", "to-date", "to date"}:
+        return "WTD" if _normalise_report_type(report_type) == "weekly" else "MTD"
     return "DRAFT"
 
 
@@ -240,7 +266,12 @@ def _draw_outer_border(canvas: pdf_canvas.Canvas) -> None:
 
 
 def _status_color(status: str):
-    return {"DRAFT": ORANGE, "MTD": CYAN, "FINAL": FINAL_GREEN}.get(status, ORANGE)
+    return {
+        "DRAFT": ORANGE,
+        "MTD": CYAN,
+        "WTD": CYAN,
+        "FINAL": FINAL_GREEN,
+    }.get(status, ORANGE)
 
 
 def _draw_status_badge(
@@ -471,8 +502,9 @@ def _draw_cover(
     logo_path: str | os.PathLike[str] | None,
 ) -> None:
     canvas.saveState()
+    report_title = _progress_report_title(report)
     canvas.setTitle(
-        f"Monthly Progress Report - {_plain(_value(report, 'project_name', 'project_title'), 'Project')}"
+        f"{report_title} - {_plain(_value(report, 'project_name', 'project_title'), 'Project')}"
     )
     _draw_outer_border(canvas)
     if status == "DRAFT":
@@ -486,7 +518,7 @@ def _draw_cover(
         font_name="Helvetica-Bold", font_size=36, min_font_size=20,
     )
     _draw_box_paragraph(
-        canvas, "MONTHLY PROGRESS REPORT", 70, 586, PAGE_WIDTH - 140, 35,
+        canvas, report_title.upper(), 70, 586, PAGE_WIDTH - 140, 35,
         font_name="Helvetica-Bold", font_size=20, min_font_size=14,
     )
     period = _period_label(report)
@@ -536,7 +568,9 @@ def _draw_body_page(
     _draw_status_badge(canvas, status, 35.4, 790.0)
     canvas.setFillColor(BLACK)
     canvas.setFont("Helvetica-Bold", 14)
-    canvas.drawCentredString(PAGE_WIDTH / 2 + 6, 792.8, "Monthly Progress Report")
+    canvas.drawCentredString(
+        PAGE_WIDTH / 2 + 6, 792.8, _progress_report_title(report)
+    )
 
     project_name = _value(report, "project_name", "project_title", default="Project Name")
     _draw_box_paragraph(
@@ -633,7 +667,17 @@ def _normalise_progress(value: Any) -> list[dict[str, Any]]:
             raw, "previous", "previous_actual", "cumulative_previous_actual", default=None
         ))
         this_month = _number(_value(
-            raw, "this_month", "this", "period", "this_period_actual", default=None
+            raw,
+            "this_month",
+            "this_week",
+            "this_period",
+            "current_period",
+            "this",
+            "period",
+            "this_week_actual",
+            "this_period_actual",
+            "current_period_actual",
+            default=None,
         ))
         to_date = _number(_value(
             raw, "to_date", "cumulative", "cumulative_to_date_actual", default=None
@@ -659,7 +703,12 @@ def _normalise_progress(value: Any) -> list[dict[str, Any]]:
     return rows
 
 
-def _progress_table(rows: list[dict[str, Any]], styles: Mapping[str, ParagraphStyle]) -> LongTable:
+def _progress_table(
+    rows: list[dict[str, Any]],
+    styles: Mapping[str, ParagraphStyle],
+    *,
+    report_type: str = "monthly",
+) -> LongTable:
     display_rows = rows or [
         {"description": description, "previous": None, "this_month": None,
          "to_date": None, "plan": None, "variance": None}
@@ -668,12 +717,17 @@ def _progress_table(rows: list[dict[str, Any]], styles: Mapping[str, ParagraphSt
     header = styles["table_header"]
     body = styles["table"]
     centered = styles["table_center"]
+    current_period_label = (
+        "This Week\n(b)"
+        if _normalise_report_type(report_type) == "weekly"
+        else "This Month\n(b)"
+    )
     data: list[list[Any]] = [
         [_paragraph("Description", header), _paragraph("Progress", header), "", "",
          _paragraph("To-date Plan\n(d)", header),
          _paragraph("Variance\n(e) = (c) - (d)", header)],
         ["", _paragraph("Previous\n(a)", header),
-         _paragraph("This Month\n(b)", header),
+         _paragraph(current_period_label, header),
          _paragraph("To-date\n(c) = (a) + (b)", header), "", ""],
     ]
     for row in display_rows:
@@ -1178,6 +1232,7 @@ def _build_story(
     report: Mapping[str, Any],
     styles: Mapping[str, ParagraphStyle],
 ) -> list[Flowable]:
+    report_type = _report_type(report)
     progress = _normalise_progress(report.get("progress", report.get("overall_progress", [])))
     include_s_curve = _coerce_bool(report.get("include_s_curve"), bool(progress))
     curve = _normalise_s_curve(report.get("s_curve"), progress) if include_s_curve else None
@@ -1208,7 +1263,7 @@ def _build_story(
         _heading("1. Executive Summary", styles["h1"], 0),
         _paragraph(_executive_summary(report, progress), styles["body"]),
         Spacer(1, 6),
-        _progress_table(progress, styles),
+        _progress_table(progress, styles, report_type=report_type),
         Spacer(1, 18),
         _heading("2. Safety Status", styles["h1"], 0),
         Paragraph("<b>Status summary:</b>", styles["body"]),
@@ -1268,21 +1323,80 @@ def _build_story(
     story.append(PageBreak())
 
     site = report.get("site") if isinstance(report.get("site"), Mapping) else {}
+    if report_type == "weekly":
+        current_activity_keys = (
+            "this_period_activities",
+            "current_period_activities",
+            "this_period",
+            "current_period",
+            "this_week_activities",
+            "this_week",
+            "this_month_activities",
+            "this_month",
+            "activities",
+        )
+        next_activity_keys = (
+            "next_period_activities",
+            "planned_next_period_activities",
+            "next_period",
+            "next_week_activities",
+            "next_week",
+            "next_month_activities",
+            "next_month",
+            "planned_activities",
+        )
+        current_heading = "5.2 This Week Activities"
+        next_heading = "5.3 Planned Activities Next Week"
+        current_empty = "No current-week activities supplied."
+        next_empty = "No next-week activities supplied."
+    else:
+        current_activity_keys = (
+            "this_month_activities",
+            "this_month",
+            "this_period_activities",
+            "current_period_activities",
+            "this_period",
+            "current_period",
+            "activities",
+        )
+        next_activity_keys = (
+            "next_month_activities",
+            "next_month",
+            "next_period_activities",
+            "planned_next_period_activities",
+            "next_period",
+            "planned_activities",
+        )
+        current_heading = "5.2 This Month Activities"
+        next_heading = "5.3 Planned Activities Next Month"
+        current_empty = "No current-month activities supplied."
+        next_empty = "No next-month activities supplied."
+
+    current_activities = _value(
+        site,
+        *current_activity_keys,
+        default=_value(report, *current_activity_keys, default=[]),
+    )
+    next_activities = _value(
+        site,
+        *next_activity_keys,
+        default=_value(report, *next_activity_keys, default=[]),
+    )
     story.append(_heading("5. Site Services / Construction", styles["h1"], 0))
     story.append(_heading("5.1 Project Schedule Status", styles["h2"], 1))
     story.extend(_content_flowables(
         _value(site, "schedule_status", "project_schedule_status"), styles,
         empty_message="See the overall schedule appendix when supplied.",
     ))
-    story.append(_heading("5.2 This Month Activities", styles["h2"], 1))
+    story.append(_heading(current_heading, styles["h2"], 1))
     story.extend(_content_flowables(
-        _value(site, "this_month_activities", "activities", default=report.get("activities")),
-        styles, empty_message="No current-month activities supplied.", bullets=True,
+        current_activities,
+        styles, empty_message=current_empty, bullets=True,
     ))
-    story.append(_heading("5.3 Planned Activities Next Month", styles["h2"], 1))
+    story.append(_heading(next_heading, styles["h2"], 1))
     story.extend(_content_flowables(
-        _value(site, "next_month_activities", "planned_activities", default=report.get("planned_activities")),
-        styles, empty_message="No next-month activities supplied.", bullets=True,
+        next_activities,
+        styles, empty_message=next_empty, bullets=True,
     ))
     story.append(_heading(
         "5.4 Area of Concern and Suggested Corrective Action", styles["h2"], 1
@@ -1330,20 +1444,26 @@ def render_monthly_report(
     *,
     logo_path: str | os.PathLike[str] | None = None,
 ) -> io.BytesIO:
-    """Render a Monthly Progress Report and return a rewound PDF buffer.
+    """Render a Weekly or Monthly Progress Report and return a rewound buffer.
 
     ``report`` is a reviewed runtime mapping.  The main supported keys are
     ``status``, project/document metadata, ``revision_rows``, ``progress``,
     ``safety``, ``engineering``, ``procurement``, ``equipment_delivery``,
     ``shipments``, ``site``, ``appendices``, and optional ``s_curve``.
 
-    ``status`` accepts ``draft``, ``mtd``, or ``final``.  Missing/unknown
-    statuses deliberately render as DRAFT.  The function never writes to disk.
+    ``report_type`` accepts ``weekly`` or ``monthly`` and defaults to monthly
+    for backward compatibility. ``status`` accepts ``draft``, ``wtd``, ``mtd``,
+    or ``final``. Missing/unknown statuses deliberately render as DRAFT. The
+    function never writes to disk.
     """
     if not isinstance(report, Mapping):
         raise TypeError("report must be a mapping")
 
-    status = _normalise_status(_value(report, "status", "report_mode", default="draft"))
+    report_type = _report_type(report)
+    status = _normalise_status(
+        _value(report, "status", "report_mode", default="draft"),
+        report_type=report_type,
+    )
     resolved_logo = logo_path if logo_path is not None else report.get("logo_path")
     styles = _styles()
     buffer = io.BytesIO()
@@ -1355,7 +1475,10 @@ def render_monthly_report(
         topMargin=BODY_TOP_MARGIN,
         bottomMargin=BODY_BOTTOM,
         allowSplitting=1,
-        title=f"Monthly Progress Report - {_plain(_value(report, 'project_name', 'project_title'), 'Project')}",
+        title=(
+            f"{_progress_report_title(report)} - "
+            f"{_plain(_value(report, 'project_name', 'project_title'), 'Project')}"
+        ),
         author=_plain(_value(report, "company_name", "vendor_name")),
     )
     cover_frame = Frame(

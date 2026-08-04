@@ -30,6 +30,8 @@
     font-size:.7rem; padding:.18rem .5rem; font-weight:700;
   }
   .badge-status { background:var(--primary); }
+  .badge-report-type.weekly { background:#0f766e; }
+  .badge-report-type.monthly { background:#52606d; }
   .report-tabs { border-bottom:1px solid #d9e1ea; }
   .report-tabs .nav-link { color:#52606d; font-weight:650; border:0; border-bottom:3px solid transparent; }
   .report-tabs .nav-link.active { color:var(--primary); background:transparent; border-bottom-color:var(--accent); }
@@ -56,6 +58,15 @@
   .progress-table th { font-size:.74rem; background:#e9eef4; white-space:nowrap; }
   .progress-table td { vertical-align:middle; }
   .monthly-history { border-top:1px solid #e4e7ec; padding-top:1rem; }
+  .type-card {
+    border:1px solid #cfd8e3; border-radius:8px; padding:.85rem 1rem;
+    cursor:pointer; height:100%; transition:.15s ease; background:#fff;
+  }
+  .type-card:hover { border-color:#8aa9c8; }
+  .type-card.active { border:2px solid var(--primary); background:var(--soft); }
+  .type-card input { margin-right:.4rem; }
+  .type-card .title { font-weight:700; color:var(--primary); }
+  .type-card .hint { color:#667085; font-size:.8rem; margin-top:.25rem; }
   #monthly-alert { white-space:pre-line; }
   .spinner-border-sm { width:.9rem; height:.9rem; }
   @media (max-width:768px) {
@@ -86,7 +97,7 @@
     </li>
     <li class="nav-item" role="presentation">
       <button class="nav-link" id="monthly-tab" data-bs-toggle="tab"
-        data-bs-target="#monthly-pane" type="button" role="tab">Monthly Reports</button>
+        data-bs-target="#monthly-pane" type="button" role="tab">Weekly / Monthly Reports</button>
     </li>
   </ul>
 
@@ -139,15 +150,33 @@
       <div class="panel mb-4">
         <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap mb-3">
           <div>
-            <h5 class="mb-1" style="color:var(--primary);">Create Monthly Report</h5>
-            <div class="muted-note">Compile a full month or Month-to-Date report from final JSON or uploaded legacy PDFs.</div>
+            <h5 class="mb-1" id="create-report-title" style="color:var(--primary);">Create Monthly Report</h5>
+            <div class="muted-note" id="create-report-hint">Compile a full month or Month-to-Date report from final JSON or uploaded legacy PDFs.</div>
           </div>
           <span class="badge text-bg-warning">Draft workflow</span>
         </div>
 
         <div id="monthly-alert" class="alert d-none" role="alert"></div>
 
-        <div class="section-label">1. Choose data source</div>
+        <div class="section-label">1. Choose report type</div>
+        <div class="row g-3 mb-4">
+          <div class="col-md-6">
+            <label class="type-card d-block" id="type-weekly-card">
+              <input type="radio" name="report-type" value="weekly" onchange="setReportType(this.value)">
+              <span class="title">Weekly Report</span>
+              <div class="hint">Create a Week-to-Date report or a complete Monday-Sunday report, including historical weeks.</div>
+            </label>
+          </div>
+          <div class="col-md-6">
+            <label class="type-card active d-block" id="type-monthly-card">
+              <input type="radio" name="report-type" value="monthly" checked onchange="setReportType(this.value)">
+              <span class="title">Monthly Report</span>
+              <div class="hint">Create a Month-to-Date report or a complete monthly report.</div>
+            </label>
+          </div>
+        </div>
+
+        <div class="section-label">2. Choose data source</div>
         <div class="row g-3 mb-4">
           <div class="col-md-6">
             <label class="source-card active d-block" id="source-json-card">
@@ -165,7 +194,7 @@
           </div>
         </div>
 
-        <div class="section-label">2. Project and reporting period</div>
+        <div class="section-label">3. Project and reporting period</div>
         <div class="row g-3 mb-3">
           <div class="col-lg-5">
             <label class="form-label small">Project</label>
@@ -179,21 +208,24 @@
             </select>
           </div>
           <div class="col-sm-6 col-lg-2">
-            <label class="form-label small">From</label>
+            <label class="form-label small" id="period-from-label">From</label>
             <input type="date" class="form-control" id="monthly-date-from" required>
           </div>
           <div class="col-sm-6 col-lg-2">
-            <label class="form-label small">To / Cutoff</label>
+            <label class="form-label small" id="period-to-label">To / Cutoff</label>
             <input type="date" class="form-control" id="monthly-date-to" required>
           </div>
           <div class="col-lg-3">
             <label class="form-label small">Report mode</label>
             <select class="form-select" id="monthly-report-mode">
               <option value="mtd">Month-to-Date / Partial</option>
-              <option value="draft">Full Month — Draft</option>
-              <option value="final">Full Month — Final</option>
+              <option value="draft">Monthly Draft</option>
+              <option value="final">Monthly Final</option>
             </select>
           </div>
+        </div>
+        <div class="muted-note mb-3 d-none" id="weekly-period-help">
+          Week-to-Date starts on Monday and may use any cutoff within 7 days. Full Week is automatically aligned to Monday-Sunday.
         </div>
 
         <div id="pdf-upload-panel" class="mb-3 d-none">
@@ -210,15 +242,15 @@
         {% endif %}
 
         <button class="btn btn-primary" id="compile-monthly-btn" onclick="compileMonthly()">
-          Compile & Review
+          Compile Monthly & Review
         </button>
       </div>
 
       <div class="panel mb-4 d-none" id="monthly-review-panel">
         <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap mb-3">
           <div>
-            <h5 class="mb-1" style="color:var(--primary);">Review Monthly Draft</h5>
-            <div class="muted-note">Check missing dates and edit monthly-only fields before generating the PDF.</div>
+            <h5 class="mb-1" id="review-report-title" style="color:var(--primary);">Review Monthly Draft</h5>
+            <div class="muted-note" id="review-report-hint">Check missing dates and edit monthly-only fields before generating the PDF.</div>
           </div>
           <span class="badge-status" id="review-source-badge">Stored JSON</span>
         </div>
@@ -253,7 +285,7 @@
         <div class="table-responsive mb-4">
           <table class="table table-sm table-bordered progress-table" id="review-progress-table">
             <thead><tr>
-              <th>Description</th><th>Weight %</th><th>Previous %</th><th>This Month %</th>
+              <th>Description</th><th>Weight %</th><th>Previous %</th><th id="progress-current-label">This Month %</th>
               <th>To-date %</th><th>Plan %</th><th>Variance %</th><th></th>
             </tr></thead>
             <tbody></tbody>
@@ -279,11 +311,11 @@
             <textarea class="form-control" id="review-procurement"></textarea>
           </div>
           <div class="col-md-6">
-            <label class="form-label section-label">This Month Activities</label>
+            <label class="form-label section-label" id="activities-current-label">This Month Activities</label>
             <textarea class="form-control" id="review-this-month" placeholder="One activity per line"></textarea>
           </div>
           <div class="col-md-6">
-            <label class="form-label section-label">Planned Activities Next Period</label>
+            <label class="form-label section-label" id="activities-next-label">Planned Activities Next Month</label>
             <textarea class="form-control" id="review-next-month" placeholder="One activity per line"></textarea>
           </div>
           <div class="col-12">
@@ -295,22 +327,22 @@
         <div class="alert alert-warning mt-4 mb-0 d-none" id="final-confirm-panel">
           <div class="form-check">
             <input class="form-check-input" type="checkbox" id="review-confirm-final">
-            <label class="form-check-label small" for="review-confirm-final">
+            <label class="form-check-label small" id="final-confirm-text" for="review-confirm-final">
               I have reviewed the source warnings, missing dates, and all monthly values, and approve this report as Final.
             </label>
           </div>
         </div>
 
         <div class="d-flex gap-2 mt-4 flex-wrap">
-          <button class="btn btn-outline-primary" id="preview-monthly-btn" onclick="previewMonthly()">👁 Preview PDF</button>
-          <button class="btn btn-success" id="generate-monthly-btn" onclick="generateMonthly()">Generate & Save PDF</button>
+          <button class="btn btn-outline-primary" id="preview-monthly-btn" onclick="previewMonthly()">👁 Preview Monthly PDF</button>
+          <button class="btn btn-success" id="generate-monthly-btn" onclick="generateMonthly()">Generate & Save Monthly PDF</button>
           <button class="btn btn-outline-secondary" onclick="document.getElementById('monthly-review-panel').classList.add('d-none')">Close Review</button>
         </div>
       </div>
 
       <div class="monthly-history">
         <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-          <h5 class="mb-0" style="color:var(--primary);">Monthly Report History</h5>
+          <h5 class="mb-0" style="color:var(--primary);">Weekly / Monthly Report History</h5>
           <span class="text-muted small" id="monthly-report-count">{{ monthly_reports|length }} report(s)</span>
         </div>
         <div id="monthly-report-list">
@@ -321,6 +353,8 @@
             <div class="report-meta">
               <div class="fname">{{ r.filename }}</div>
               <div class="info">
+                <span class="badge-status badge-report-type {{ (r.report_type or 'monthly')|lower }}">{{ (r.report_type or 'monthly')|upper }}</span>
+                &nbsp;
                 <span class="badge-status">{{ (r.status or 'draft')|upper }}</span>
                 &nbsp;{{ r.period_start }} → {{ r.period_end }}
                 {% if r.project_no %}&nbsp;·&nbsp;{{ r.project_no }}{% endif %}
@@ -335,7 +369,7 @@
           </div>
           {% endfor %}
         {% else %}
-          <div class="empty" id="monthly-empty"><div style="font-size:3rem;">🗓️</div><p class="mt-2">No monthly reports generated yet.</p></div>
+          <div class="empty" id="monthly-empty"><div style="font-size:3rem;">🗓️</div><p class="mt-2">No weekly or monthly reports generated yet.</p></div>
         {% endif %}
         </div>
       </div>
@@ -347,6 +381,151 @@
 <script>
 let monthlySource = 'stored_json';
 let monthlyDraftId = '';
+let reportType = 'monthly';
+
+function parseIsoDate(value) {
+  if (!value) return null;
+  const parts = value.split('-').map(Number);
+  if (parts.length !== 3 || parts.some(Number.isNaN)) return null;
+  return new Date(parts[0], parts[1] - 1, parts[2]);
+}
+
+function isoDate(value) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function addDays(value, amount) {
+  const result = new Date(value.getFullYear(), value.getMonth(), value.getDate());
+  result.setDate(result.getDate() + amount);
+  return result;
+}
+
+function mondayFor(value) {
+  const day = value.getDay();
+  return addDays(value, -(day === 0 ? 6 : day - 1));
+}
+
+function inclusiveDays(fromValue, toValue) {
+  const fromUtc = Date.UTC(fromValue.getFullYear(), fromValue.getMonth(), fromValue.getDate());
+  const toUtc = Date.UTC(toValue.getFullYear(), toValue.getMonth(), toValue.getDate());
+  return Math.floor((toUtc - fromUtc) / 86400000) + 1;
+}
+
+function updateReportTypeCopy() {
+  const weekly = reportType === 'weekly';
+  const typeName = weekly ? 'Weekly' : 'Monthly';
+  document.getElementById('create-report-title').textContent = `Create ${typeName} Report`;
+  document.getElementById('create-report-hint').textContent = weekly
+    ? 'Compile a Week-to-Date or full Monday-Sunday report from final JSON or uploaded legacy PDFs.'
+    : 'Compile a selected monthly period from final JSON or uploaded legacy PDFs.';
+  document.getElementById('period-from-label').textContent = weekly ? 'Week starts (Monday)' : 'From';
+  document.getElementById('period-to-label').textContent = weekly ? 'To / Cutoff' : 'To / Cutoff';
+  document.getElementById('weekly-period-help').classList.toggle('d-none', !weekly);
+  document.getElementById('review-report-title').textContent = `Review ${typeName} Draft`;
+  document.getElementById('review-report-hint').textContent = weekly
+    ? 'Check missing dates and edit weekly fields before generating the PDF.'
+    : 'Check missing dates and edit monthly fields before generating the PDF.';
+  document.getElementById('progress-current-label').textContent = weekly ? 'This Week %' : 'This Month %';
+  document.getElementById('activities-current-label').textContent = weekly ? 'This Week Activities' : 'This Month Activities';
+  document.getElementById('activities-next-label').textContent = weekly ? 'Planned Activities Next Week' : 'Planned Activities Next Month';
+  document.getElementById('final-confirm-text').textContent =
+    `I have reviewed the source warnings, missing dates, and all ${reportType} values, and approve this report as Final.`;
+  document.getElementById('compile-monthly-btn').textContent = `Compile ${typeName} & Review`;
+  document.getElementById('preview-monthly-btn').textContent = `Preview ${typeName} PDF`;
+  document.getElementById('generate-monthly-btn').textContent = `Generate & Save ${typeName} PDF`;
+}
+
+function populateReportModes() {
+  const select = document.getElementById('monthly-report-mode');
+  select.innerHTML = reportType === 'weekly'
+    ? '<option value="wtd">Week-to-Date / Partial</option><option value="draft">Full Week - Draft</option><option value="final">Full Week - Final</option>'
+    : '<option value="mtd">Month-to-Date / Partial</option><option value="draft">Monthly Draft</option><option value="final">Monthly Final</option>';
+}
+
+function invalidateCompiledDraft(message='Report setup changed. Compile & Review again before creating the PDF.') {
+  if (!monthlyDraftId) return;
+  monthlyDraftId = '';
+  document.getElementById('monthly-review-panel').classList.add('d-none');
+  showMonthlyAlert(message, 'warning');
+}
+
+function setReportPeriodDefaults() {
+  const today = new Date();
+  const from = document.getElementById('monthly-date-from');
+  const to = document.getElementById('monthly-date-to');
+  if (reportType === 'weekly') {
+    const monday = mondayFor(today);
+    from.value = isoDate(monday);
+    to.value = isoDate(today);
+  } else {
+    from.value = isoDate(new Date(today.getFullYear(), today.getMonth(), 1));
+    to.value = isoDate(today);
+  }
+  updatePeriodLimits();
+}
+
+function updatePeriodLimits() {
+  const fromInput = document.getElementById('monthly-date-from');
+  const toInput = document.getElementById('monthly-date-to');
+  if (reportType !== 'weekly' || !fromInput.value) {
+    toInput.removeAttribute('min');
+    toInput.removeAttribute('max');
+    return;
+  }
+  const start = parseIsoDate(fromInput.value);
+  toInput.min = fromInput.value;
+  toInput.max = isoDate(addDays(start, 6));
+}
+
+function alignWeeklyPeriod() {
+  if (reportType !== 'weekly') return;
+  const fromInput = document.getElementById('monthly-date-from');
+  const toInput = document.getElementById('monthly-date-to');
+  const selected = parseIsoDate(fromInput.value) || new Date();
+  const monday = mondayFor(selected);
+  fromInput.value = isoDate(monday);
+  const mode = document.getElementById('monthly-report-mode').value;
+  if (mode === 'draft' || mode === 'final') {
+    toInput.value = isoDate(addDays(monday, 6));
+  } else {
+    const cutoff = parseIsoDate(toInput.value);
+    if (!cutoff || cutoff < monday || inclusiveDays(monday, cutoff) > 7) {
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      toInput.value = isoDate(today >= monday && today <= addDays(monday, 6) ? today : addDays(monday, 6));
+    }
+  }
+  updatePeriodLimits();
+}
+
+function handleReportModeChange() {
+  const mode = document.getElementById('monthly-report-mode').value;
+  document.getElementById('monthly-date-to').readOnly =
+    reportType === 'weekly' && (mode === 'draft' || mode === 'final');
+  if (reportType === 'weekly') alignWeeklyPeriod();
+  toggleFinalConfirmation();
+  invalidateCompiledDraft();
+}
+
+function setReportType(value, resetPeriod=true) {
+  reportType = value === 'weekly' ? 'weekly' : 'monthly';
+  document.getElementById('type-weekly-card').classList.toggle('active', reportType === 'weekly');
+  document.getElementById('type-monthly-card').classList.toggle('active', reportType === 'monthly');
+  document.querySelectorAll('input[name="report-type"]').forEach(input => {
+    input.checked = input.value === reportType;
+  });
+  populateReportModes();
+  updateReportTypeCopy();
+  if (resetPeriod) setReportPeriodDefaults();
+  document.getElementById('monthly-date-to').readOnly = false;
+  monthlyDraftId = '';
+  document.getElementById('monthly-review-panel').classList.add('d-none');
+  hideMonthlyAlert();
+  toggleFinalConfirmation();
+}
 
 function setLoading(buttonId, loading, label) {
   const btn = document.getElementById(buttonId);
@@ -374,12 +553,14 @@ function hideMonthlyAlert() {
 }
 
 function setMonthlySource(value) {
+  const sourceChanged = monthlySource !== value;
   monthlySource = value;
   document.getElementById('source-json-card').classList.toggle('active', value === 'stored_json');
   document.getElementById('source-pdf-card').classList.toggle('active', value === 'uploaded_pdf');
   document.getElementById('pdf-upload-panel').classList.toggle('d-none', value !== 'uploaded_pdf');
   const scope = document.getElementById('stored-scope-panel');
   if (scope) scope.classList.toggle('d-none', value !== 'stored_json');
+  if (sourceChanged) invalidateCompiledDraft();
 }
 
 function selectedProject() {
@@ -392,10 +573,21 @@ function validateMonthlyInput() {
   const project = selectedProject();
   const dateFrom = document.getElementById('monthly-date-from').value;
   const dateTo = document.getElementById('monthly-date-to').value;
+  const mode = document.getElementById('monthly-report-mode').value;
   if (!project.project_no) throw new Error('Select a project first.');
   if (!dateFrom || !dateTo) throw new Error('Select the reporting start and cutoff dates.');
   if (dateFrom > dateTo) throw new Error('The From date cannot be after the To date.');
-  return {project, dateFrom, dateTo};
+  if (reportType === 'weekly') {
+    const from = parseIsoDate(dateFrom);
+    const to = parseIsoDate(dateTo);
+    const days = inclusiveDays(from, to);
+    if (from.getDay() !== 1) throw new Error('A Weekly Report must start on Monday.');
+    if (days < 1 || days > 7) throw new Error('A Weekly Report may cover a maximum of 7 days.');
+    if ((mode === 'draft' || mode === 'final') && (days !== 7 || to.getDay() !== 0)) {
+      throw new Error('A Full Week report must cover Monday through Sunday.');
+    }
+  }
+  return {project, dateFrom, dateTo, mode};
 }
 
 async function compileMonthly() {
@@ -415,7 +607,8 @@ async function compileMonthly() {
           project_title:input.project.project_title,
           date_from:input.dateFrom,
           date_to:input.dateTo,
-          report_mode:document.getElementById('monthly-report-mode').value,
+          report_type:reportType,
+          report_mode:input.mode,
           include_all_users:document.getElementById('monthly-all-users')?.checked === true,
         }),
       });
@@ -428,12 +621,13 @@ async function compileMonthly() {
       form.append('project_title', input.project.project_title);
       form.append('date_from', input.dateFrom);
       form.append('date_to', input.dateTo);
-      form.append('report_mode', document.getElementById('monthly-report-mode').value);
+      form.append('report_type', reportType);
+      form.append('report_mode', input.mode);
       response = await fetch('/monthly/compile/upload', {method:'POST', body:form});
     }
 
     const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || 'Could not compile monthly report.');
+    if (!response.ok || !data.ok) throw new Error(data.error || `Could not compile ${reportType} report.`);
     monthlyDraftId = data.draft_id;
     populateMonthlyReview(data.draft);
     document.getElementById('monthly-review-panel').classList.remove('d-none');
@@ -584,6 +778,7 @@ function collectMonthlyReview() {
     return {concern:concern.trim(), corrective_action:action.join('|').trim()};
   });
   return {
+    report_type:reportType,
     report_mode:document.getElementById('monthly-report-mode').value,
     confirm_final:document.getElementById('review-confirm-final').checked,
     executive_summary:document.getElementById('review-executive-summary').value.trim(),
@@ -600,9 +795,10 @@ function collectMonthlyReview() {
 }
 
 async function postMonthlyPdf(endpoint, save) {
-  if (!monthlyDraftId) { showMonthlyAlert('Compile a monthly draft first.', 'warning'); return; }
+  if (!monthlyDraftId) { showMonthlyAlert(`Compile a ${reportType} draft first.`, 'warning'); return; }
+  const typeName = reportType === 'weekly' ? 'Weekly' : 'Monthly';
   const previewWindow = save ? null : window.open('about:blank', '_blank');
-  if (previewWindow) previewWindow.document.title = 'Preparing Monthly Report Preview...';
+  if (previewWindow) previewWindow.document.title = `Preparing ${typeName} Report Preview...`;
   const btnId = save ? 'generate-monthly-btn' : 'preview-monthly-btn';
   setLoading(btnId, true, save ? 'Generating...' : 'Preparing preview...');
   try {
@@ -612,11 +808,11 @@ async function postMonthlyPdf(endpoint, save) {
     if (!response.ok) {
       const contentType = response.headers.get('content-type') || '';
       const message = contentType.includes('application/json') ? (await response.json()).error : await response.text();
-      throw new Error(message || 'Monthly PDF generation failed.');
+      throw new Error(message || `${typeName} PDF generation failed.`);
     }
     if (save) {
       const data = await response.json();
-      showMonthlyAlert('Monthly Report generated and saved successfully.', 'success');
+      showMonthlyAlert(`${typeName} Report generated and saved successfully.`, 'success');
       setTimeout(() => window.location.reload(), 800);
     } else {
       const blob = await response.blob();
@@ -668,13 +864,19 @@ function updateMonthlyCount() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  const now = new Date();
-  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
-  const end = local.toISOString().slice(0,10);
-  const start = `${end.slice(0,8)}01`;
-  document.getElementById('monthly-date-from').value = start;
-  document.getElementById('monthly-date-to').value = end;
-  document.getElementById('monthly-report-mode').addEventListener('change', toggleFinalConfirmation);
+  setReportType('monthly');
+  document.getElementById('monthly-report-mode').addEventListener('change', handleReportModeChange);
+  document.getElementById('monthly-date-from').addEventListener('change', () => {
+    if (reportType === 'weekly') alignWeeklyPeriod();
+    invalidateCompiledDraft();
+  });
+  document.getElementById('monthly-date-to').addEventListener('change', () => {
+    updatePeriodLimits();
+    invalidateCompiledDraft();
+  });
+  document.getElementById('monthly-project').addEventListener('change', () => invalidateCompiledDraft());
+  document.getElementById('monthly-pdf-files').addEventListener('change', () => invalidateCompiledDraft());
+  document.getElementById('monthly-all-users')?.addEventListener('change', () => invalidateCompiledDraft());
   toggleFinalConfirmation();
   if (location.hash === '#monthly') new bootstrap.Tab(document.getElementById('monthly-tab')).show();
 });

@@ -22,6 +22,33 @@ _DRAFT_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._() -]+")
 _MAX_UPLOAD_FILES = 35
 _MAX_REVIEW_TEXT = 30_000
+_REPORT_TYPES = {"monthly", "weekly"}
+
+
+def _report_type(value: Any) -> str:
+    text = str(value or "monthly").strip().lower()
+    if text not in _REPORT_TYPES:
+        raise ValueError("Report type must be monthly or weekly.")
+    return text
+
+
+def _report_name(report_type: Any) -> str:
+    return "Weekly" if _report_type(report_type) == "weekly" else "Monthly"
+
+
+def _normalise_report_mode(report_type: Any, value: Any) -> str:
+    kind = _report_type(report_type)
+    default = "wtd" if kind == "weekly" else "mtd"
+    mode = str(value or default).strip().lower().replace("_", "-")
+    aliases = {
+        "month-to-date": "mtd",
+        "month to date": "mtd",
+        "week-to-date": "wtd",
+        "week to date": "wtd",
+    }
+    mode = aliases.get(mode, mode)
+    allowed = {"wtd", "draft", "final"} if kind == "weekly" else {"mtd", "draft", "final"}
+    return mode if mode in allowed else default
 
 
 def _atomic_json(path: str | Path, value: Any) -> None:
@@ -60,7 +87,14 @@ def get_monthly_reports_index(data_dir: str | Path, username: str) -> list[dict[
     try:
         with index_path.open(encoding="utf-8") as handle:
             value = json.load(handle)
-        return value if isinstance(value, list) else []
+        if not isinstance(value, list):
+            return []
+        # Reports created before weekly support did not store a type. They are
+        # monthly reports and remain visible to old and new clients.
+        for row in value:
+            if isinstance(row, dict):
+                row.setdefault("report_type", "monthly")
+        return value
     except (OSError, ValueError, TypeError):
         return []
 
@@ -112,11 +146,18 @@ def _load_draft(data_dir: str | Path, username: str, draft_id: str) -> dict[str,
 def _update_draft(data_dir: str | Path, username: str, draft: dict[str, Any]) -> None:
     draft_id = str(draft.get("draft_id") or "")
     if not _DRAFT_ID_RE.fullmatch(draft_id):
-        raise ValueError("Invalid monthly draft ID")
+        raise ValueError("Invalid report draft ID")
     _atomic_json(_monthly_user_dir(data_dir, username) / "drafts" / f"{draft_id}.json", draft)
 
 
-def _parse_period(date_from: str, date_to: str) -> tuple[datetime, datetime]:
+def _parse_period(
+    date_from: str,
+    date_to: str,
+    report_type: str = "monthly",
+    report_mode: str | None = None,
+) -> tuple[datetime, datetime]:
+    kind = _report_type(report_type)
+    mode = _normalise_report_mode(kind, report_mode)
     try:
         start = datetime.strptime(str(date_from or ""), "%Y-%m-%d")
         end = datetime.strptime(str(date_to or ""), "%Y-%m-%d")
@@ -124,8 +165,16 @@ def _parse_period(date_from: str, date_to: str) -> tuple[datetime, datetime]:
         raise ValueError("Use valid From and To dates.") from exc
     if start > end:
         raise ValueError("The From date cannot be after the To date.")
-    if (start.year, start.month) != (end.year, end.month):
+    if kind == "monthly" and (start.year, start.month) != (end.year, end.month):
         raise ValueError("A Monthly Report period must stay within one calendar month.")
+    if kind == "weekly":
+        day_count = (end - start).days + 1
+        if start.weekday() != 0:
+            raise ValueError("A Weekly Report period must start on Monday.")
+        if day_count > 7:
+            raise ValueError("A Weekly Report period cannot be longer than 7 days.")
+        if mode != "wtd" and (day_count != 7 or end.weekday() != 6):
+            raise ValueError("A full Weekly Report period must run from Monday through Sunday.")
     return start, end
 
 
@@ -226,13 +275,22 @@ def _prepare_draft(
     source_manifest: list[dict[str, Any]],
     report_context: dict[str, Any] | None = None,
     extra_warnings: list[str] | None = None,
+    report_type: str = "monthly",
 ) -> dict[str, Any]:
+    kind = _report_type(report_type)
+    mode = _normalise_report_mode(kind, report_mode)
+    # Validate again at the draft boundary so direct callers cannot create a
+    # weekly draft with a malformed period.
+    start, end = _parse_period(date_from, date_to, kind, mode)
+    report_name = _report_name(kind)
     draft = copy.deepcopy(aggregated if isinstance(aggregated, dict) else {})
-    draft["schema_version"] = "monthly-report/1"
+    draft["schema_version"] = "weekly-report/1" if kind == "weekly" else "monthly-report/1"
+    draft["report_type"] = kind
+    draft["report_title"] = f"{report_name} Progress Report"
     draft["project_no"] = project_no
     draft["project_title"] = project_title
     draft["period"] = {"start": date_from, "end": date_to, "timezone": "Asia/Makassar"}
-    draft["report_mode"] = report_mode if report_mode in {"mtd", "draft", "final"} else "mtd"
+    draft["report_mode"] = mode
     draft["status"] = draft["report_mode"]
     draft["source_method"] = source_method
     draft["source_manifest"] = source_manifest
@@ -250,7 +308,7 @@ def _prepare_draft(
     draft["approved_by"] = context.get("approved_by", "")
 
     coverage = draft.get("coverage") if isinstance(draft.get("coverage"), dict) else {}
-    expected = _expected_dates(*_parse_period(date_from, date_to))
+    expected = _expected_dates(start, end)
     found_dates = sorted({
         str(item.get("report_date") or item.get("date") or "")
         for item in source_manifest if isinstance(item, dict)
@@ -301,8 +359,8 @@ def _prepare_draft(
         "lost_workdays": 0,
         "lost_time_injuries": 0,
     })
-    draft.setdefault("engineering", {"summary": "Manual monthly input required."})
-    draft.setdefault("procurement", {"summary": "Manual monthly input required."})
+    draft.setdefault("engineering", {"summary": f"Manual {kind} input required."})
+    draft.setdefault("procurement", {"summary": f"Manual {kind} input required."})
 
     site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
     if not site.get("this_month_activities"):
@@ -314,12 +372,25 @@ def _prepare_draft(
         )
     if not site.get("concerns"):
         site["concerns"] = draft.get("concerns", draft.get("constraints", []))
+    # Generic aliases let the renderer and review UI use period-neutral labels
+    # while legacy monthly keys continue to support archived drafts.
+    site["current_period_activities"] = site.get("this_month_activities", [])
+    site["this_period_activities"] = site["current_period_activities"]
+    site["next_period_activities"] = site.get("next_month_activities", [])
+    if kind == "weekly":
+        site["this_week_activities"] = site["current_period_activities"]
+        site["next_week_activities"] = site["next_period_activities"]
     draft["site"] = site
     if not draft.get("executive_summary"):
         included = coverage.get("included_count", len(source_manifest))
         missing = len(coverage.get("missing_dates", []))
+        period_description = (
+            ("week-to-date" if mode == "wtd" else "weekly")
+            if kind == "weekly"
+            else mode.upper()
+        )
         draft["executive_summary"] = (
-            f"This {report_mode.upper()} draft compiles {included} Daily Report(s) for "
+            f"This {period_description} draft compiles {included} Daily Report(s) for "
             f"{project_title or project_no} from {date_from} to {date_to}. "
             f"There are {missing} calendar date(s) without an included report. "
             "Progress, safety incidents, engineering, and procurement values must be reviewed before issue."
@@ -361,7 +432,10 @@ def _normalize_progress(review: Any) -> dict[str, Any]:
         if not description or description.lower() in {"total", "total overall"}:
             continue
         previous = _number(raw.get("previous"))
-        this_month = _number(raw.get("this_month", raw.get("this_period_actual")))
+        this_month = _number(raw.get(
+            "this_month",
+            raw.get("this_week", raw.get("this_period", raw.get("this_period_actual"))),
+        ))
         to_date = previous + this_month
         plan = _number(raw.get("plan", raw.get("cumulative_to_date_plan")))
         rows.append({
@@ -398,8 +472,13 @@ def _normalize_progress(review: Any) -> dict[str, Any]:
 
 def _apply_review(draft: dict[str, Any], review: dict[str, Any]) -> dict[str, Any]:
     value = copy.deepcopy(draft)
-    mode = str(review.get("report_mode") or value.get("report_mode") or "mtd").lower()
-    value["report_mode"] = mode if mode in {"mtd", "draft", "final"} else "mtd"
+    kind = _report_type(value.get("report_type") or "monthly")
+    mode = _normalise_report_mode(kind, review.get("report_mode") or value.get("report_mode"))
+    period = value.get("period") if isinstance(value.get("period"), dict) else {}
+    _parse_period(period.get("start"), period.get("end"), kind, mode)
+    value["report_type"] = kind
+    value["report_title"] = f"{_report_name(kind)} Progress Report"
+    value["report_mode"] = mode
     value["status"] = value["report_mode"]
     value["executive_summary"] = _clean_text(review.get("executive_summary", value.get("executive_summary")))
     value["progress"] = _normalize_progress(review.get("progress", value.get("progress", {})))
@@ -429,12 +508,37 @@ def _apply_review(draft: dict[str, Any], review: dict[str, Any]) -> dict[str, An
 
     current_site = value.get("site") if isinstance(value.get("site"), dict) else {}
     incoming_site = review.get("site") if isinstance(review.get("site"), dict) else {}
-    current_site["this_month_activities"] = _list_text(
-        incoming_site.get("this_month_activities", current_site.get("this_month_activities", []))
+    current_activities = incoming_site.get(
+        "current_period_activities",
+        incoming_site.get(
+            "this_period_activities",
+            incoming_site.get(
+                "this_week_activities",
+                incoming_site.get("this_month_activities", current_site.get(
+                    "current_period_activities",
+                    current_site.get("this_month_activities", []),
+                )),
+            ),
+        ),
     )
-    current_site["next_month_activities"] = _list_text(
-        incoming_site.get("next_month_activities", current_site.get("next_month_activities", []))
+    next_activities = incoming_site.get(
+        "next_period_activities",
+        incoming_site.get(
+            "next_week_activities",
+            incoming_site.get("next_month_activities", current_site.get(
+                "next_period_activities",
+                current_site.get("next_month_activities", []),
+            )),
+        ),
     )
+    current_site["this_month_activities"] = _list_text(current_activities)
+    current_site["next_month_activities"] = _list_text(next_activities)
+    current_site["current_period_activities"] = current_site["this_month_activities"]
+    current_site["this_period_activities"] = current_site["this_month_activities"]
+    current_site["next_period_activities"] = current_site["next_month_activities"]
+    if kind == "weekly":
+        current_site["this_week_activities"] = current_site["this_month_activities"]
+        current_site["next_week_activities"] = current_site["next_month_activities"]
     concerns = []
     for item in incoming_site.get("concerns", current_site.get("concerns", []))[:250]:
         if isinstance(item, str):
@@ -456,12 +560,18 @@ def _safe_filename_part(value: Any, fallback: str) -> str:
 
 
 def _monthly_filename(draft: dict[str, Any], revision: int) -> str:
+    report_name = _report_name(draft.get("report_type") or "monthly")
     project = _safe_filename_part(draft.get("project_no"), "Project")
     period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
     start = _safe_filename_part(period.get("start"), "Start")
     end = _safe_filename_part(period.get("end"), "End")
     mode = _safe_filename_part(str(draft.get("status", "draft")).upper(), "DRAFT")
-    return f"Monthly Progress Report - {project} - {start} to {end} ({mode}) - R{revision}.pdf"
+    return f"{report_name} Progress Report - {project} - {start} to {end} ({mode}) - R{revision}.pdf"
+
+
+def _draft_report_type(draft: dict[str, Any]) -> str:
+    """Read new report types while treating every legacy draft as monthly."""
+    return _report_type(draft.get("report_type") or "monthly")
 
 
 def _render(draft: dict[str, Any], config: dict[str, Any]):
@@ -477,7 +587,7 @@ def _render(draft: dict[str, Any], config: dict[str, Any]):
     if hasattr(result, "seek") and hasattr(result, "getvalue"):
         result.seek(0)
         return result
-    raise TypeError("Monthly PDF renderer did not return a BytesIO object")
+    raise TypeError(f"{_report_name(draft.get('report_type') or 'monthly')} PDF renderer did not return a BytesIO object")
 
 
 def register_monthly_routes(
@@ -487,7 +597,7 @@ def register_monthly_routes(
     config_provider: Callable[[], dict[str, Any]],
     activity_logger: Callable[[str, str, str], None] | None = None,
 ) -> None:
-    """Register Monthly Report endpoints on the existing Flask application."""
+    """Register Weekly/Monthly Report endpoints on the existing Flask application."""
 
     def require_login_json():
         if "username" not in session:
@@ -501,9 +611,12 @@ def register_monthly_routes(
             return auth
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
-            return jsonify({"error": "Invalid monthly compile request."}), 400
+            return jsonify({"error": "Invalid report compile request."}), 400
+        kind = "monthly"
         try:
-            start, end = _parse_period(body.get("date_from"), body.get("date_to"))
+            kind = _report_type(body.get("report_type") or "monthly")
+            mode = _normalise_report_mode(kind, body.get("report_mode"))
+            start, end = _parse_period(body.get("date_from"), body.get("date_to"), kind, mode)
             project_no = _clean_text(body.get("project_no"), 250)
             project_title = _clean_text(body.get("project_title"), 500)
             if not project_no:
@@ -518,8 +631,14 @@ def register_monthly_routes(
                 date_to=end.strftime("%Y-%m-%d"),
             )
             if not records:
+                error = (
+                    "No final stored JSON was found for this project and weekly period. "
+                    "Use Upload Daily Report PDF for older reports."
+                    if kind == "weekly"
+                    else "No final stored JSON was found for this project and period. Use Upload Daily Report PDF for older reports."
+                )
                 return jsonify({
-                    "error": "No final stored JSON was found for this project and period. Use Upload Daily Report PDF for older reports."
+                    "error": error
                 }), 404
             aggregated = aggregate_monthly_records(
                 records,
@@ -544,10 +663,11 @@ def register_monthly_routes(
                 project_title=project_title,
                 date_from=start.strftime("%Y-%m-%d"),
                 date_to=end.strftime("%Y-%m-%d"),
-                report_mode=str(body.get("report_mode") or "mtd"),
+                report_mode=mode,
                 source_method="stored_json",
                 source_manifest=manifest,
                 report_context=_latest_report_context(selected_records),
+                report_type=kind,
             )
             draft_id = _save_draft(data_dir, session["username"], draft)
             draft["draft_id"] = draft_id
@@ -555,8 +675,9 @@ def register_monthly_routes(
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         except Exception as exc:
-            app.logger.exception("Stored JSON monthly compilation failed")
-            return jsonify({"error": f"Monthly compilation failed: {exc}"}), 500
+            report_name = _report_name(kind)
+            app.logger.exception("Stored JSON %s compilation failed", kind)
+            return jsonify({"error": f"{report_name} compilation failed: {exc}"}), 500
 
     @app.post("/monthly/compile/upload")
     def compile_monthly_upload():
@@ -568,8 +689,16 @@ def register_monthly_routes(
             return jsonify({"error": "Choose at least one Daily Report PDF."}), 400
         if len(uploads) > _MAX_UPLOAD_FILES:
             return jsonify({"error": f"A maximum of {_MAX_UPLOAD_FILES} PDF files can be compiled at once."}), 413
+        kind = "monthly"
         try:
-            start, end = _parse_period(request.form.get("date_from"), request.form.get("date_to"))
+            kind = _report_type(request.form.get("report_type") or "monthly")
+            mode = _normalise_report_mode(kind, request.form.get("report_mode"))
+            start, end = _parse_period(
+                request.form.get("date_from"),
+                request.form.get("date_to"),
+                kind,
+                mode,
+            )
             project_no = _clean_text(request.form.get("project_no"), 250)
             project_title = _clean_text(request.form.get("project_title"), 500)
             if not project_no:
@@ -639,8 +768,14 @@ def register_monthly_routes(
                     warnings.append(f"{filename}: {_warning_text(warning)}")
 
             if not records:
+                error = (
+                    "None of the uploaded PDFs could be included in this Weekly Report. "
+                    "Check the project, period, text layer, and file warnings."
+                    if kind == "weekly"
+                    else "None of the uploaded PDFs could be included. Check the project, period, text layer, and file warnings."
+                )
                 return jsonify({
-                    "error": "None of the uploaded PDFs could be included. Check the project, period, text layer, and file warnings.",
+                    "error": error,
                     "warnings": warnings,
                 }), 400
             aggregated = aggregate_monthly_records(
@@ -666,11 +801,12 @@ def register_monthly_routes(
                 project_title=project_title,
                 date_from=start.strftime("%Y-%m-%d"),
                 date_to=end.strftime("%Y-%m-%d"),
-                report_mode=str(request.form.get("report_mode") or "mtd"),
+                report_mode=mode,
                 source_method="uploaded_pdf",
                 source_manifest=manifest,
                 report_context=_latest_report_context(selected_records),
                 extra_warnings=warnings,
+                report_type=kind,
             )
             draft_id = _save_draft(data_dir, session["username"], draft)
             draft["draft_id"] = draft_id
@@ -678,8 +814,9 @@ def register_monthly_routes(
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         except Exception as exc:
-            app.logger.exception("Uploaded PDF monthly compilation failed")
-            return jsonify({"error": f"PDF compilation failed: {exc}"}), 500
+            app.logger.exception("Uploaded PDF %s compilation failed", kind)
+            prefix = "Weekly PDF" if kind == "weekly" else "PDF"
+            return jsonify({"error": f"{prefix} compilation failed: {exc}"}), 500
 
     @app.post("/monthly/preview/<draft_id>")
     def preview_monthly_report(draft_id: str):
@@ -688,7 +825,9 @@ def register_monthly_routes(
             return auth
         draft = _load_draft(data_dir, session["username"], draft_id)
         if draft is None:
-            return jsonify({"error": "Monthly draft not found."}), 404
+            return jsonify({"error": "Report draft not found."}), 404
+        kind = _draft_report_type(draft)
+        report_name = _report_name(kind)
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
             return jsonify({"error": "Invalid review data."}), 400
@@ -700,11 +839,13 @@ def register_monthly_routes(
                 buffer,
                 mimetype="application/pdf",
                 as_attachment=False,
-                download_name="Monthly Progress Report Preview.pdf",
+                download_name=f"{report_name} Progress Report Preview.pdf",
             )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
         except Exception as exc:
-            app.logger.exception("Monthly preview failed")
-            return jsonify({"error": f"Monthly preview failed: {exc}"}), 500
+            app.logger.exception("%s preview failed", report_name)
+            return jsonify({"error": f"{report_name} preview failed: {exc}"}), 500
 
     @app.post("/monthly/generate/<draft_id>")
     def generate_monthly_report_route(draft_id: str):
@@ -714,7 +855,9 @@ def register_monthly_routes(
         username = session["username"]
         draft = _load_draft(data_dir, username, draft_id)
         if draft is None:
-            return jsonify({"error": "Monthly draft not found."}), 404
+            return jsonify({"error": "Report draft not found."}), 404
+        kind = _draft_report_type(draft)
+        report_name = _report_name(kind)
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
             return jsonify({"error": "Invalid review data."}), 400
@@ -722,7 +865,7 @@ def register_monthly_routes(
             reviewed = _apply_review(draft, body)
             if reviewed.get("status") == "final" and not bool(body.get("confirm_final")):
                 return jsonify({
-                    "error": "Confirm that all warnings, missing dates, and monthly values were reviewed before saving a Final report."
+                    "error": f"Confirm that all warnings, missing dates, and {kind} values were reviewed before saving a Final report."
                 }), 400
             if reviewed.get("status") == "final":
                 reviewed["final_review"] = {
@@ -732,7 +875,8 @@ def register_monthly_routes(
                 }
             index = get_monthly_reports_index(data_dir, username)
             same_period = [row for row in index if (
-                row.get("project_no") == reviewed.get("project_no")
+                (row.get("report_type") or "monthly") == kind
+                and row.get("project_no") == reviewed.get("project_no")
                 and row.get("period_start") == reviewed.get("period", {}).get("start")
                 and row.get("period_end") == reviewed.get("period", {}).get("end")
             )]
@@ -757,12 +901,17 @@ def register_monthly_routes(
                         pass
 
             reviewed["monthly_report_id"] = uuid.uuid4().hex
+            reviewed["report_id"] = reviewed["monthly_report_id"]
+            if kind == "weekly":
+                reviewed["weekly_report_id"] = reviewed["monthly_report_id"]
             reviewed["revision"] = revision
             reviewed["generated_at"] = datetime.now().isoformat(timespec="seconds")
             reviewed["filename"] = filename
             _atomic_json(json_path, reviewed)
             entry = {
                 "monthly_report_id": reviewed["monthly_report_id"],
+                "report_id": reviewed["monthly_report_id"],
+                "report_type": kind,
                 "filename": filename,
                 "json_filename": json_filename,
                 "project_no": reviewed.get("project_no", ""),
@@ -779,19 +928,26 @@ def register_monthly_routes(
             _save_monthly_index(data_dir, username, index)
             _update_draft(data_dir, username, reviewed)
             if activity_logger:
+                detail = (
+                    f"project={entry['project_no']} period={entry['period_start']}..{entry['period_end']} revision={revision}"
+                )
+                if kind == "weekly":
+                    detail = f"type=weekly {detail}"
                 activity_logger(
                     username,
-                    "monthly_report_generated",
-                    f"project={entry['project_no']} period={entry['period_start']}..{entry['period_end']} revision={revision}",
+                    f"{kind}_report_generated",
+                    detail,
                 )
             return jsonify({
                 "ok": True,
                 "filename": filename,
                 "download_url": url_for("download_monthly_report", filename=filename),
             })
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
         except Exception as exc:
-            app.logger.exception("Monthly report generation failed")
-            return jsonify({"error": f"Monthly report generation failed: {exc}"}), 500
+            app.logger.exception("%s report generation failed", report_name)
+            return jsonify({"error": f"{report_name} report generation failed: {exc}"}), 500
 
     @app.get("/monthly/download/<path:filename>")
     def download_monthly_report(filename: str):
@@ -823,7 +979,7 @@ def register_monthly_routes(
         index = get_monthly_reports_index(data_dir, username)
         matches = [row for row in index if row.get("filename") == basename]
         if not matches:
-            return jsonify({"error": "Monthly report not found."}), 404
+            return jsonify({"error": "Report not found."}), 404
         reports_dir = _monthly_user_dir(data_dir, username) / "reports"
         for match in matches:
             for name in (match.get("filename"), match.get("json_filename")):
@@ -834,5 +990,6 @@ def register_monthly_routes(
                     path.unlink()
         _save_monthly_index(data_dir, username, [row for row in index if row.get("filename") != basename])
         if activity_logger:
-            activity_logger(username, "monthly_report_deleted", basename)
+            report_type = str(matches[0].get("report_type") or "monthly")
+            activity_logger(username, f"{report_type}_report_deleted", basename)
         return jsonify({"ok": True})
