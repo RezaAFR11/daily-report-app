@@ -15,8 +15,27 @@
       --navbar-bg: #003366;
     }
     body { background: #f0f4f8; font-size: 0.9rem; }
-    .app-navbar { background: var(--navbar-bg) !important; padding: 8px 16px; position: sticky; top:0; z-index:900; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+    .app-navbar { background: var(--navbar-bg) !important; padding: 8px 16px; position: sticky; top:0; z-index:900;
+                  box-shadow: 0 2px 8px rgba(0,0,0,.25); display:flex; flex-direction:column;
+                  align-items:stretch; gap:6px; overflow:hidden; }
+    .app-navbar-title { flex:0 0 auto; }
+    .app-navbar-actions { display:flex; align-items:center; gap:4px; width:100%; min-width:0;
+                          flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden; padding-bottom:2px;
+                          scrollbar-width:thin; scrollbar-color:rgba(255,255,255,.45) transparent; }
+    .app-navbar-actions::-webkit-scrollbar { height:5px; }
+    .app-navbar-actions::-webkit-scrollbar-thumb { background:rgba(255,255,255,.45); border-radius:10px; }
+    .app-navbar-actions::-webkit-scrollbar-track { background:transparent; }
+    .app-navbar-actions .btn { white-space:nowrap; }
     .section-hdr { background: var(--primary); color: white; font-weight: 600; font-size: 0.85rem; padding: 8px 14px; }
+    .section-drag-handle { border: 0; background: transparent; color: rgba(255,255,255,.9);
+                           padding: 2px 5px; margin-left: 2px; line-height: 1; font-size: 1rem;
+                           cursor: grab; touch-action: none; user-select: none; border-radius: 4px; }
+    .section-drag-handle:hover, .section-drag-handle:focus-visible {
+      color: #fff; background: rgba(255,255,255,.16); outline: 2px solid rgba(255,255,255,.7); outline-offset: 1px;
+    }
+    .section-drag-handle:active { cursor: grabbing; }
+    .report-section.section-dragging { opacity: .58; box-shadow: 0 8px 24px rgba(0,0,0,.22) !important; }
+    body.section-reordering { cursor: grabbing; user-select: none; }
     .overall-progress-table { min-width: 1420px; table-layout: fixed; font-size: .69rem; }
     .overall-progress-table th { background: var(--secondary); color: white; text-align: center;
                                  vertical-align: middle; padding: 5px 4px; line-height: 1.15; }
@@ -112,8 +131,8 @@
     #previewModal .modal-dialog { max-width: 860px; }
     #previewFrame { width: 100%; height: 72vh; border: none; }
     /* Navbar btn group */
-    .nav-group { display: flex; gap: 4px; align-items: center; }
-    .nav-divider { width: 1px; height: 24px; background: rgba(255,255,255,.3); margin: 0 4px; }
+    .nav-group { display:flex; gap:4px; align-items:center; flex:0 0 auto; white-space:nowrap; }
+    .nav-divider { width:1px; height:24px; background:rgba(255,255,255,.3); margin:0 4px; flex:0 0 1px; }
     @media (max-width: 768px) {
       .app-navbar .btn { font-size: .72rem; padding: 3px 7px; }
       .nav-divider { display: none; }
@@ -148,9 +167,9 @@
 </div>
 
 <!-- ═══ NAVBAR ═══ -->
-<nav class="app-navbar d-flex align-items-center gap-2 flex-wrap">
-  <span class="text-white fw-bold me-2" style="font-size:.92rem;white-space:nowrap;">📋 Daily Report — PT. GPA</span>
-  <div class="d-flex gap-1 ms-auto flex-wrap align-items-center">
+<nav class="app-navbar">
+  <span class="app-navbar-title text-white fw-bold" style="font-size:.92rem;white-space:nowrap;">📋 Daily Report — PT. GPA</span>
+  <div class="app-navbar-actions" tabindex="0" aria-label="Daily Report menu; scroll horizontally when needed">
     <!-- Draft controls -->
     <div class="nav-group">
       <button class="btn btn-sm btn-outline-light" onclick="saveDraft(true)" title="Auto-saves every 60s">💾 Save</button>
@@ -191,9 +210,17 @@
 
 <div class="container-fluid py-3" style="max-width:1140px;">
 
+<div id="reportSections">
+
 <!-- ── S1: Report Information ── -->
-<div class="card mb-3 border-0 shadow-sm">
-  <div class="card-header section-hdr">📋 1 · Report Information</div>
+<div class="card mb-3 border-0 shadow-sm report-section" data-section-key="report_information" data-reorderable="false">
+  <div class="card-header section-hdr d-flex justify-content-between align-items-center gap-2">
+    <span>📋 <span class="section-number">1 · </span>Report Information</span>
+    <button type="button" class="btn btn-sm btn-outline-light py-0" id="resetSectionOrderBtn"
+            onclick="resetSectionOrder()" disabled title="Restore the default section order without clearing form data">
+      ↺ Reset Order
+    </button>
+  </div>
   <div class="card-body">
     <div class="row g-2">
       <div class="col-6 col-md-3">
@@ -247,8 +274,12 @@
 </div>
 
 <!-- ── S2: Weather ── -->
-<div class="card mb-3 border-0 shadow-sm">
-  <div class="card-header section-hdr">🌤️ 2 · Weather Report</div>
+<div class="card mb-3 border-0 shadow-sm report-section" data-section-key="weather" data-reorderable="true">
+  <div class="card-header section-hdr d-flex justify-content-between align-items-center gap-2">
+    <span>🌤️ <span class="section-number">2 · </span>Weather Report</span>
+    <button type="button" class="section-drag-handle" title="Drag to move Weather Report"
+            aria-label="Move Weather Report section">☰</button>
+  </div>
   <div class="card-body">
     <div class="row g-2">
       <div class="col-6 col-md-2">
@@ -290,12 +321,14 @@
 </div>
 
 <!-- ── S3: Indirect Manpower (Global) ── -->
-<div class="card mb-3 border-0 shadow-sm">
+<div class="card mb-3 border-0 shadow-sm report-section" data-section-key="indirect_manpower" data-reorderable="true">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center">
-    <span>👔 3 · Indirect Manpower <span class="badge bg-secondary ms-1" style="font-size:.68rem;">Global</span></span>
-    <div class="d-flex gap-2">
+    <span>👔 <span class="section-number">3 · </span>Indirect Manpower <span class="badge bg-secondary ms-1" style="font-size:.68rem;">Global</span></span>
+    <div class="d-flex gap-2 align-items-center">
       <button class="btn btn-sm btn-outline-light" style="font-size:.72rem;" onclick="loadYesterdayCrew()" title="Copy entire crew from last saved draft">🔄 Yesterday's Crew</button>
       <button class="btn btn-sm btn-outline-light" onclick="addIndirectRow()">+ Add Person</button>
+      <button type="button" class="section-drag-handle" title="Drag to move Indirect Manpower"
+              aria-label="Move Indirect Manpower section">☰</button>
     </div>
   </div>
   <div class="card-body p-2">
@@ -310,7 +343,7 @@
 </div>
 
 <!-- S4: Overall Progress -->
-<div class="card mb-3 border-0 shadow-sm" id="overallProgressCard">
+<div class="card mb-3 border-0 shadow-sm report-section" id="overallProgressCard" data-section-key="overall_progress" data-reorderable="true">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center flex-wrap gap-2">
     <span>📈 <span id="overallProgressSectionNo"></span>Overall Progress <span id="overallProgressInactiveBadge" class="badge bg-secondary ms-1">Inactive</span></span>
     <div class="d-flex align-items-center flex-wrap gap-3">
@@ -322,6 +355,8 @@
         </label>
       </div>
       <button type="button" class="btn btn-sm btn-outline-light d-none" id="addOverallProgressBtn" onclick="addOverallProgressRow()">+ Add Progress Item</button>
+      <button type="button" class="section-drag-handle" title="Drag to move Overall Progress"
+              aria-label="Move Overall Progress section">☰</button>
     </div>
   </div>
   <div class="card-body p-2 d-none" id="overallProgressBody">
@@ -379,10 +414,14 @@
 </div>
 
 <!-- ── S5: Areas ── -->
-<div class="card mb-3 border-0 shadow-sm">
+<div class="card mb-3 border-0 shadow-sm report-section" data-section-key="daily_activities" data-reorderable="true">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center">
     <span>📍 <span id="areasSectionNo">4 · </span>Daily Activities &amp; Manpower by Area</span>
-    <button class="btn btn-sm btn-outline-light" onclick="addAreaBlock()">+ Add Area</button>
+    <div class="d-flex gap-2 align-items-center">
+      <button class="btn btn-sm btn-outline-light" onclick="addAreaBlock()">+ Add Area</button>
+      <button type="button" class="section-drag-handle" title="Drag to move Daily Activities"
+              aria-label="Move Daily Activities section">☰</button>
+    </div>
   </div>
   <div class="card-body p-2">
     <div class="mb-2 px-1">
@@ -398,10 +437,14 @@
 </div>
 
 <!-- ── S6: Sign-Off Builder ── -->
-<div class="card mb-3 border-0 shadow-sm">
+<div class="card mb-3 border-0 shadow-sm report-section" data-section-key="sign_off" data-reorderable="true">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center">
     <span>✍️ <span id="signOffSectionNo">5 · </span>Sign-Off Columns</span>
-    <button class="btn btn-sm btn-outline-light" onclick="addSignOffCol()">+ Add Column</button>
+    <div class="d-flex gap-2 align-items-center">
+      <button class="btn btn-sm btn-outline-light" onclick="addSignOffCol()">+ Add Column</button>
+      <button type="button" class="section-drag-handle" title="Drag to move Sign-Off Columns"
+              aria-label="Move Sign-Off Columns section">☰</button>
+    </div>
   </div>
   <div class="card-body p-2">
     <div class="row g-2" id="signOffContainer">
@@ -409,6 +452,8 @@
     </div>
   </div>
 </div>
+
+</div><!-- /reportSections -->
 
 <!-- Action buttons -->
 <div class="d-flex gap-3 justify-content-end mb-5 flex-wrap">
@@ -973,6 +1018,222 @@ function lookupMp(name) {
 let _aidx = 0;
 let _soidx = 0;
 
+// Report section order is edited directly from the Daily Report form.
+const DEFAULT_UI_SECTION_ORDER = [
+  'report_information',
+  'weather',
+  'indirect_manpower',
+  'overall_progress',
+  'daily_activities',
+  'sign_off',
+];
+const DEFAULT_PDF_SECTION_ORDER = [
+  'report_information',
+  'weather',
+  'indirect_manpower',
+  'overall_progress',
+  'daily_activities',
+  'constraints',
+  'remarks',
+  'sign_off',
+  'photo_documentation',
+];
+const AREA_PDF_SECTION_KEYS = ['daily_activities', 'constraints', 'remarks'];
+
+function getUISectionOrder() {
+  const container = document.getElementById('reportSections');
+  if (!container) return [...DEFAULT_UI_SECTION_ORDER];
+  return [...container.querySelectorAll(':scope > .report-section')]
+    .map(card => card.dataset.sectionKey)
+    .filter(Boolean);
+}
+
+function getSectionOrder() {
+  const order = [];
+  getUISectionOrder().forEach(key => {
+    if (key === 'daily_activities') order.push(...AREA_PDF_SECTION_KEYS);
+    else order.push(key);
+  });
+  // Photos stay last because their inputs are embedded in each area card.
+  order.push('photo_documentation');
+  return [...new Set(order)];
+}
+
+function normaliseSavedSectionOrder(sectionOrder) {
+  if (!Array.isArray(sectionOrder) || !sectionOrder.length) {
+    return [...DEFAULT_PDF_SECTION_ORDER];
+  }
+  const known = new Set(DEFAULT_PDF_SECTION_ORDER);
+  const result = [];
+  sectionOrder.forEach(key => {
+    if (typeof key !== 'string') return;
+    const cleanKey = key.trim();
+    if (known.has(cleanKey) && !result.includes(cleanKey)) result.push(cleanKey);
+  });
+  DEFAULT_PDF_SECTION_ORDER.forEach(key => {
+    if (!result.includes(key)) result.push(key);
+  });
+  return result;
+}
+
+function applySectionOrder(sectionOrder) {
+  const container = document.getElementById('reportSections');
+  if (!container) return;
+
+  const savedOrder = normaliseSavedSectionOrder(sectionOrder);
+  const rank = key => {
+    const keys = key === 'daily_activities' ? AREA_PDF_SECTION_KEYS : [key];
+    return Math.min(...keys.map(item => savedOrder.indexOf(item)).filter(index => index >= 0));
+  };
+  const cards = [...container.querySelectorAll(':scope > .report-section[data-reorderable="true"]')];
+  cards.sort((left, right) => rank(left.dataset.sectionKey) - rank(right.dataset.sectionKey));
+  cards.forEach(card => container.appendChild(card));
+  updateSectionNumbering();
+  updateResetOrderButton();
+}
+
+function updateSectionNumbering() {
+  const container = document.getElementById('reportSections');
+  if (!container) return;
+  const overallEnabled = document.getElementById('showOverallProgress')?.checked === true;
+  let sectionNumber = 1;
+  container.querySelectorAll(':scope > .report-section').forEach(card => {
+    const numberLabel = card.querySelector('.section-number, #overallProgressSectionNo, #areasSectionNo, #signOffSectionNo');
+    const excluded = card.dataset.sectionKey === 'overall_progress' && !overallEnabled;
+    if (numberLabel) numberLabel.textContent = excluded ? '' : `${sectionNumber} · `;
+    card.dataset.visibleSectionNumber = excluded ? '' : String(sectionNumber);
+    if (!excluded) sectionNumber += 1;
+  });
+}
+
+function updateResetOrderButton() {
+  const button = document.getElementById('resetSectionOrderBtn');
+  if (!button) return;
+  const current = getUISectionOrder();
+  button.disabled = current.length === DEFAULT_UI_SECTION_ORDER.length
+    && current.every((key, index) => key === DEFAULT_UI_SECTION_ORDER[index]);
+}
+
+function resetSectionOrder(showFeedback=true, persist=true) {
+  const changed = getUISectionOrder().some((key, index) => key !== DEFAULT_UI_SECTION_ORDER[index]);
+  applySectionOrder(DEFAULT_PDF_SECTION_ORDER);
+  if (changed && persist) {
+    saveDraft(false).then(saved => {
+      if (showFeedback) {
+        toast(
+          saved ? 'Default section order restored and saved.' : 'Order restored, but saving failed.',
+          saved ? 'success' : 'danger',
+        );
+      }
+    });
+  } else if (showFeedback) {
+    toast(changed ? 'Default section order restored.' : 'Section order is already the default.', 'success');
+  }
+}
+
+let _draggedReportSection = null;
+let _draggedSectionHandle = null;
+let _draggedPointerId = null;
+let _sectionOrderBeforeDrag = '';
+
+function finishSectionDrag() {
+  if (!_draggedReportSection) return;
+  if (_draggedSectionHandle && _draggedPointerId !== null
+      && _draggedSectionHandle.hasPointerCapture?.(_draggedPointerId)) {
+    _draggedSectionHandle.releasePointerCapture(_draggedPointerId);
+  }
+  _draggedReportSection.classList.remove('section-dragging');
+  _draggedSectionHandle?.setAttribute('aria-grabbed', 'false');
+  document.body.classList.remove('section-reordering');
+  const changed = _sectionOrderBeforeDrag !== getUISectionOrder().join('|');
+  _draggedReportSection = null;
+  _draggedSectionHandle = null;
+  _draggedPointerId = null;
+  updateSectionNumbering();
+  updateResetOrderButton();
+  if (changed) {
+    saveDraft(false).then(saved => toast(
+      saved ? 'Section order updated and saved.' : 'Order updated, but saving failed.',
+      saved ? 'success' : 'danger',
+    ));
+  }
+}
+
+function moveSectionWithKeyboard(handle, direction) {
+  const container = document.getElementById('reportSections');
+  const card = handle.closest('.report-section[data-reorderable="true"]');
+  if (!container || !card) return;
+  const cards = [...container.querySelectorAll(':scope > .report-section[data-reorderable="true"]')];
+  const currentIndex = cards.indexOf(card);
+  const targetIndex = currentIndex + direction;
+  if (currentIndex < 0 || targetIndex < 0 || targetIndex >= cards.length) return;
+  if (direction < 0) container.insertBefore(card, cards[targetIndex]);
+  else container.insertBefore(card, cards[targetIndex].nextSibling);
+  updateSectionNumbering();
+  updateResetOrderButton();
+  handle.focus();
+  saveDraft(false).then(saved => toast(
+    saved ? 'Section order updated and saved.' : 'Order updated, but saving failed.',
+    saved ? 'success' : 'danger',
+  ));
+}
+
+function initSectionReordering() {
+  const container = document.getElementById('reportSections');
+  if (!container) return;
+
+  container.querySelectorAll('.section-drag-handle').forEach(handle => {
+    handle.setAttribute('aria-grabbed', 'false');
+    handle.addEventListener('keydown', event => {
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+      event.preventDefault();
+      moveSectionWithKeyboard(handle, event.key === 'ArrowUp' ? -1 : 1);
+    });
+  });
+
+  container.addEventListener('pointerdown', event => {
+    const handle = event.target.closest('.section-drag-handle');
+    if (!handle || event.button > 0) return;
+    const card = handle.closest('.report-section[data-reorderable="true"]');
+    if (!card) return;
+    event.preventDefault();
+    _draggedReportSection = card;
+    _draggedSectionHandle = handle;
+    _draggedPointerId = event.pointerId;
+    _sectionOrderBeforeDrag = getUISectionOrder().join('|');
+    card.classList.add('section-dragging');
+    handle.setAttribute('aria-grabbed', 'true');
+    handle.setPointerCapture?.(event.pointerId);
+    document.body.classList.add('section-reordering');
+  });
+
+  container.addEventListener('pointermove', event => {
+    if (!_draggedReportSection || event.pointerId !== _draggedPointerId) return;
+    event.preventDefault();
+
+    if (event.clientY < 70) window.scrollBy(0, -14);
+    else if (event.clientY > window.innerHeight - 70) window.scrollBy(0, 14);
+
+    const candidates = [...container.querySelectorAll(':scope > .report-section[data-reorderable="true"]')]
+      .filter(card => card !== _draggedReportSection);
+    const insertBefore = candidates.find(card => {
+      const header = card.querySelector('.section-hdr') || card;
+      const rect = header.getBoundingClientRect();
+      return event.clientY < rect.top + (rect.height / 2);
+    });
+    if (insertBefore) container.insertBefore(_draggedReportSection, insertBefore);
+    else container.appendChild(_draggedReportSection);
+    updateSectionNumbering();
+  });
+
+  container.addEventListener('pointerup', event => {
+    if (event.pointerId === _draggedPointerId) finishSectionDrag();
+  });
+  container.addEventListener('pointercancel', event => {
+    if (event.pointerId === _draggedPointerId) finishSectionDrag();
+  });
+}
+
 // ════════════════════════════════════════════════════════════
 // AUTOCOMPLETE
 // ════════════════════════════════════════════════════════════
@@ -1081,15 +1342,10 @@ function syncOverallProgressSection() {
   document.getElementById('addOverallProgressBtn')?.classList.toggle('d-none', !enabled);
   document.getElementById('overallProgressInactiveBadge')?.classList.toggle('d-none', enabled);
 
-  const overallNo = document.getElementById('overallProgressSectionNo');
-  const areasNo = document.getElementById('areasSectionNo');
-  const signOffNo = document.getElementById('signOffSectionNo');
   const toggleLabel = document.getElementById('overallProgressToggleLabel');
-  if (overallNo) overallNo.textContent = enabled ? '4 · ' : '';
-  if (areasNo) areasNo.textContent = enabled ? '5 · ' : '4 · ';
-  if (signOffNo) signOffNo.textContent = enabled ? '6 · ' : '5 · ';
   if (toggleLabel) toggleLabel.textContent = `${enabled ? 'ON' : 'OFF'} · Show in Report`;
   if (toggle) toggle.setAttribute('aria-expanded', String(enabled));
+  updateSectionNumbering();
 }
 
 function parseProgressNumber(value) {
@@ -1768,6 +2024,7 @@ function collectData() {
   });
 
   return {
+    section_order:  getSectionOrder(),
     date:           v('f_date'),
     day_no:         v('f_day_no'),
     project_no:     v('f_project_no'),
@@ -1793,6 +2050,7 @@ function collectData() {
 // POPULATE FORM FROM DATA
 // ════════════════════════════════════════════════════════════
 function populateForm(d) {
+  applySectionOrder(d.section_order);
   const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
   set('f_date',          d.date);
   set('f_day_no',        d.day_no);
@@ -2023,6 +2281,7 @@ function importDraft(input) {
 
 function clearFormConfirm() {
   if (!confirm('Clear the entire form? This cannot be undone.')) return;
+  resetSectionOrder(false, false);
   document.getElementById('areasContainer').innerHTML = '';
   document.getElementById('indirectContainer').innerHTML = '';
   document.getElementById('overallProgressContainer').innerHTML = '';
@@ -2352,6 +2611,8 @@ function initSignOffDefaults() {
 // ════════════════════════════════════════════════════════════
 // SAVE DRAFT PERIODICALLY + ON UNLOAD
 // ════════════════════════════════════════════════════════════
+let _draftSaveQueue = Promise.resolve(true);
+
 function loadDraftFromServer() {
   fetch('/load_draft')
   .then(r => r.json())
@@ -2360,19 +2621,31 @@ function loadDraftFromServer() {
 }
 
 function saveDraft(showToast=false) {
+  // Capture the payload at invocation time and serialize writes so rapid
+  // section moves cannot let an older request overwrite the newest order.
+  const payload = collectData();
   const ind = document.getElementById('autosave-indicator');
   if (ind) ind.textContent = '💾 saving…';
-  fetch('/save_draft', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify(collectData()),
-  })
-  .then(r => r.json())
-  .then(data => {
-    if (ind) ind.textContent = `✓ saved ${data.saved_at||''}`;
-    if (showToast) toast('Draft saved ✓', 'success');
-  })
-  .catch(() => { if (ind) ind.textContent = '⚠ save failed'; });
+  const runSave = () => fetch('/save_draft', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    })
+    .then(async response => {
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `Server returned ${response.status}`);
+      if (ind) ind.textContent = `✓ saved ${data.saved_at||''}`;
+      if (showToast) toast('Draft saved ✓', 'success');
+      return true;
+    })
+    .catch(() => {
+      if (ind) ind.textContent = '⚠ save failed';
+      if (showToast) toast('Draft save failed.', 'danger');
+      return false;
+    });
+
+  _draftSaveQueue = _draftSaveQueue.then(runSave, runSave);
+  return _draftSaveQueue;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -2880,6 +3153,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Build the project selector before applying a draft or fresh defaults.
   renderProjectSelect('', '');
+  initSectionReordering();
 
   // Populate form from draft or set defaults
   if (INITIAL_DATA) {
@@ -2888,6 +3162,7 @@ document.addEventListener('DOMContentLoaded', () => {
       initSignOffDefaults();
     }
   } else {
+    resetSectionOrder(false, false);
     initDefaults();
     initSignOffDefaults();
   }

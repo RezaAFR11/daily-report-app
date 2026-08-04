@@ -372,6 +372,96 @@ OVERALL_PROGRESS_PERCENT_FIELDS = (
     'cumulative_to_date_actual',
 )
 
+DAILY_PDF_SECTION_ORDER = (
+    'report_information',
+    'weather',
+    'indirect_manpower',
+    'overall_progress',
+    'daily_activities',
+    'constraints',
+    'remarks',
+    'sign_off',
+    'photo_documentation',
+)
+
+DAILY_PDF_SECTION_TITLES = {
+    'report_information': 'REPORT INFORMATION',
+    'weather': 'WEATHER REPORT',
+    'indirect_manpower': 'INDIRECT MANPOWER',
+    'overall_progress': 'OVERALL PROGRESS',
+    'daily_activities': 'DAILY ACTIVITIES & MANPOWER BY AREA',
+    'constraints': 'CONSTRAINTS & ISSUES',
+    'remarks': 'REMARKS',
+    'sign_off': 'SIGN-OFF',
+    'photo_documentation': 'PHOTO DOCUMENTATION',
+}
+
+_DAILY_PDF_SECTION_ALIASES = {
+    'report_info': ('report_information',),
+    'report': ('report_information',),
+    'weather_report': ('weather',),
+    'indirect': ('indirect_manpower',),
+    'progress': ('overall_progress',),
+    'area_activities': ('daily_activities',),
+    'activities': ('daily_activities',),
+    'constraints_issues': ('constraints',),
+    'signoff': ('sign_off',),
+    'photos': ('photo_documentation',),
+    # Accept a compact six-card order as well as the expanded order currently
+    # emitted by the Daily Report form.
+    'areas': ('daily_activities', 'constraints', 'remarks'),
+}
+
+
+def _normalise_pdf_section_order(value):
+    """Return a complete, safe Daily Report PDF section order.
+
+    Older reports have no ``section_order`` field, so they retain the original
+    order. Unknown/duplicate values are ignored, missing values are appended in
+    default order, and Report Information is always locked to position one.
+    """
+    requested = []
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if isinstance(item, dict):
+                item = item.get('id', item.get('key', ''))
+            if not isinstance(item, str):
+                continue
+            key = re.sub(r'[^a-z0-9]+', '_', item.strip().lower()).strip('_')
+            expanded = _DAILY_PDF_SECTION_ALIASES.get(key, (key,))
+            for section_key in expanded:
+                if section_key in DAILY_PDF_SECTION_ORDER and section_key not in requested:
+                    requested.append(section_key)
+
+    # Daily Activities, Constraints, and Remarks share one draggable Areas card
+    # in the form. Keep the three derived PDF sections together even if an
+    # imported JSON contains an incomplete or manually split order.
+    area_keys = ('daily_activities', 'constraints', 'remarks')
+    area_positions = [requested.index(key) for key in area_keys if key in requested]
+    if area_positions:
+        insert_at = min(area_positions)
+        requested = [key for key in requested if key not in area_keys]
+        requested[insert_at:insert_at] = area_keys
+
+    ordered = ['report_information']
+    ordered.extend(key for key in requested if key != 'report_information')
+    ordered.extend(key for key in DAILY_PDF_SECTION_ORDER if key not in ordered)
+    # Photo Documentation has no independent draggable card and remains the
+    # closing section, matching both the original report and the form contract.
+    ordered.remove('photo_documentation')
+    ordered.append('photo_documentation')
+    return ordered
+
+
+class _PDFSectionMarker:
+    """Internal marker used to reorder complete PDF section flowable groups."""
+
+    __slots__ = ('key', 'before')
+
+    def __init__(self, key, before=None):
+        self.key = key
+        self.before = list(before or [])
+
 def _bounded_pdf_text(value, max_chars):
     """Keep user text inside non-splittable PDF photo-card rows."""
     text = str(value or '').strip()
@@ -599,8 +689,41 @@ def generate_pdf(d, output_path, cfg):
             Spacer(1, 1.2*mm),
         ]
 
+    def SECTION(key, before=None):
+        return [_PDFSectionMarker(key, before)]
+
+    def assemble_sections(flowables, requested_order, progress_enabled):
+        """Reorder marked section groups and assign consecutive PDF numbers."""
+        prefix = []
+        chunks = {}
+        markers = {}
+        current_key = None
+        for flowable in flowables:
+            if isinstance(flowable, _PDFSectionMarker):
+                current_key = flowable.key
+                markers[current_key] = flowable
+                chunks.setdefault(current_key, [])
+            elif current_key is None:
+                prefix.append(flowable)
+            else:
+                chunks[current_key].append(flowable)
+
+        ordered_story = list(prefix)
+        section_number = 1
+        for key in _normalise_pdf_section_order(requested_order):
+            if key == 'overall_progress' and not progress_enabled:
+                continue
+            marker = markers.get(key)
+            if marker is None:
+                continue
+            ordered_story.extend(marker.before)
+            ordered_story.extend(SH(f'{section_number}.  {DAILY_PDF_SECTION_TITLES[key]}'))
+            ordered_story.extend(chunks.get(key, ()))
+            section_number += 1
+        return ordered_story
+
     # S1 info
-    story += SH('1.  REPORT INFORMATION')
+    story += SECTION('report_information')
     proj_title_val = d.get('project_title') or cfg.get('project_title', 'Electrical Installation &amp; Construction')
     info_rows = [
         ('Project No.',  _esc(proj)),
@@ -620,7 +743,7 @@ def generate_pdf(d, output_path, cfg):
     story += [itbl, Spacer(1,SECTION_GAP)]
 
     # S2 weather
-    story += SH('2.  WEATHER REPORT')
+    story += SECTION('weather')
     wx = d.get('weather',{})
     if wx:
         keys = list(wx.keys())
@@ -637,7 +760,7 @@ def generate_pdf(d, output_path, cfg):
     story.append(Spacer(1,SECTION_GAP))
 
     # S3 indirect
-    story += SH('3.  INDIRECT MANPOWER')
+    story += SECTION('indirect_manpower')
     ind = d.get('indirect_manpower',[])
     irows = [['No.','Name','Role / Position','Working Hours']]
     for i,p in enumerate(ind,1):
@@ -651,15 +774,13 @@ def generate_pdf(d, output_path, cfg):
         ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
     ]))
     story += [itbl2, Spacer(1,SECTION_GAP)]
-    story.append(CondPageBreak(32*mm))
 
-    section_number = 4
     show_overall_progress = _coerce_bool(d.get('show_overall_progress'), False)
 
     # Optional overall progress section. Missing flags default to disabled;
     # explicit true values from the current form still enable the section.
     if show_overall_progress:
-        story += SH(f'{section_number}.  OVERALL PROGRESS')
+        story += SECTION('overall_progress', [CondPageBreak(32*mm)])
         progress_rows = _normalise_overall_progress(d.get('overall_progress', []))
         if progress_rows:
             progress_h = S(
@@ -762,12 +883,9 @@ def generate_pdf(d, output_path, cfg):
         else:
             story.append(Paragraph('No overall progress reported.', st['ital_s']))
         story.append(Spacer(1, SECTION_GAP))
-        story.append(CondPageBreak(32*mm))
-        section_number += 1
 
     # Daily activities and manpower by area
-    story += SH(f'{section_number}.  DAILY ACTIVITIES & MANPOWER BY AREA')
-    section_number += 1
+    story += SECTION('daily_activities', [CondPageBreak(32*mm)])
     areas = d.get('areas', [])
     for area_index, area in enumerate(areas):
         aid = area.get('id','')
@@ -850,11 +968,8 @@ def generate_pdf(d, output_path, cfg):
     # The compact constraints/remarks pair needs about 25 mm. Keeping this
     # threshold precise prevents a taller page header from wasting the rest
     # of page one and pushing the final photo row onto a third page.
-    story.append(CondPageBreak(25*mm))
-
     # Constraints and issues
-    story += SH(f'{section_number}.  CONSTRAINTS & ISSUES')
-    section_number += 1
+    story += SECTION('constraints', [CondPageBreak(25*mm)])
     any_c = any(a.get('constraints','').strip() for a in d.get('areas',[]))
     if any_c:
         gcr = [['Area','Constraint / Issue']]
@@ -869,15 +984,11 @@ def generate_pdf(d, output_path, cfg):
     story.append(Spacer(1,SECTION_GAP))
 
     # Remarks
-    story += SH(f'{section_number}.  REMARKS')
-    section_number += 1
+    story += SECTION('remarks')
     gr = d.get('global_remarks','').strip()
     story += [Paragraph(_esc(gr) if gr else '—',st['body_s']),Spacer(1,SECTION_GAP)]
-    story.append(CondPageBreak(42*mm))
-
     # Sign-off (dynamic columns)
-    story += SH(f'{section_number}.  SIGN-OFF')
-    section_number += 1
+    story += SECTION('sign_off', [CondPageBreak(42*mm)])
     sign_offs = d.get('sign_offs', [])
     if not sign_offs:
         sign_offs = [
@@ -915,11 +1026,12 @@ def generate_pdf(d, output_path, cfg):
     story += [so, Spacer(1,SECTION_GAP)]
     PER_ROW = 3
     photo_sections = _group_report_photos(areas, PER_ROW)
-    story.append(CondPageBreak(65*mm if photo_sections else 10*mm))
-
     # Photo documentation. Each area has its own heading and grid so photos from different
     # work areas are never presented as one continuous group.
-    story += SH(f'{section_number}.  PHOTO DOCUMENTATION')
+    story += SECTION(
+        'photo_documentation',
+        [CondPageBreak(65*mm if photo_sections else 10*mm)],
+    )
     photo_documentation_title = _bounded_pdf_text(
         d.get('photo_documentation_title', ''),
         PDF_PHOTO_AREA_MAX_CHARS,
@@ -1009,6 +1121,12 @@ def generate_pdf(d, output_path, cfg):
             ('LEFTPADDING',(0,0),(-1,-1),2),('RIGHTPADDING',(0,0),(-1,-1),2),
             ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),4)]))
         story += [pg, Spacer(1,2*mm)]
+
+    story = assemble_sections(
+        story,
+        d.get('section_order'),
+        show_overall_progress,
+    )
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf,pagesize=A4,topMargin=40.5*mm,bottomMargin=11*mm,leftMargin=M,rightMargin=M)
