@@ -85,6 +85,7 @@
     .sig-prev.show { display: block; }
     .sig-ph { font-size: .72rem; color: #bbb; text-align: center; padding: 8px; pointer-events: none; }
     /* Sign-off column card */
+    .area-section-hdr { background: var(--light-bg); border-radius: 4px; padding: 5px 8px; margin-bottom: 8px; }
     .so-col-card { border: 1px solid #d0d8e4; border-radius: 6px; padding: 10px;
                    background: #fff; position: relative; }
     .so-col-card:hover { border-color: var(--primary); }
@@ -1642,11 +1643,11 @@ function addAreaBlock(data={}) {
     </div>
     <div class="card-body p-2">
       <!-- Activities -->
-      <div class="d-flex align-items-center mb-1 gap-2">
-        <span class="fld-lbl mb-0 fw-bold" style="font-size:.78rem;">Activities</span>
+      <div class="area-section-hdr d-flex align-items-center gap-2">
+        <span class="fw-bold" style="font-size:.8rem;">📋 Daily Activities</span>
         <button class="btn btn-sm btn-outline-secondary acts-swap-btn" style="font-size:.7rem;padding:1px 8px;" onclick="toggleActsSwap(this)" title="Swap column order in PDF">⇄ Today first</button>
       </div>
-      <div class="row g-2 mb-2">
+      <div class="row g-2 mb-3">
         <div class="col-md-6">
           <div class="fld-lbl mb-1 fw-bold">Activity Today</div>
           <div class="acts-today"></div>
@@ -1659,13 +1660,12 @@ function addAreaBlock(data={}) {
         </div>
       </div>
       <!-- Direct Manpower -->
-      <div class="d-flex justify-content-between align-items-center mb-1">
-        <span class="fld-lbl mb-0 fw-bold">Direct Manpower</span>
+      <div class="area-section-hdr d-flex justify-content-between align-items-center">
+        <span class="fw-bold" style="font-size:.8rem;">👷 Direct Manpower</span>
         <button class="btn btn-sm btn-outline-primary add-dm-btn" onclick="addDM(this)">+ Add Person</button>
       </div>
       <div class="row g-1 mb-1 px-1" style="font-size:.7rem;color:#888;">
-        <div class="col-3">Name</div><div class="col-2">Position</div>
-        <div class="col-4">Task Today</div><div class="col-2">Hours</div><div class="col-1"></div>
+        <div class="col-4">Name</div><div class="col-4">Role / Position</div><div class="col-3">Working Hours</div><div class="col-1"></div>
       </div>
       <div class="dm-container"></div>
       <!-- Area Indirect Manpower (collapsible) -->
@@ -1811,17 +1811,14 @@ function addDM(btn, d={}) {
   const row   = document.createElement('div');
   row.className = 'row g-1 mb-1 align-items-center dm-row';
   row.innerHTML = `
-    <div class="col-3 ac-wrap">
+    <div class="col-4 ac-wrap">
       <input type="text" class="form-control form-control-sm mp-name" placeholder="Name…" value="${esc(d.name||'')}">
       <div class="ac-drop"></div>
     </div>
-    <div class="col-2">
-      <input type="text" class="form-control form-control-sm mp-role" placeholder="Position" value="${esc(d.role||'')}">
-    </div>
     <div class="col-4">
-      <input type="text" class="form-control form-control-sm mp-task" placeholder="Task today…" value="${esc(d.task||'')}">
+      <input type="text" class="form-control form-control-sm mp-role" placeholder="Role / Position" value="${esc(d.role||'')}">
     </div>
-    <div class="col-2">
+    <div class="col-3">
       <select class="form-select form-select-sm mp-hours">${hoursOpts(d.hours)}</select>
     </div>
     <div class="col-1 text-end">
@@ -2174,7 +2171,6 @@ function collectData() {
       manpower.push({
         name:  row.querySelector('.mp-name').value,
         role:  row.querySelector('.mp-role').value,
-        task:  row.querySelector('.mp-task').value,
         hours: row.querySelector('.mp-hours').value,
       });
     });
