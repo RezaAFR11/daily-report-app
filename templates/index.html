@@ -1883,6 +1883,8 @@ async function generatePDF() {
       body: JSON.stringify(collectData()),
     });
     const archiveStatus = r.headers.get('X-Report-Archive-Status');
+    const pdfArchiveStatus = r.headers.get('X-Report-Pdf-Archive-Status');
+    const jsonArchiveStatus = r.headers.get('X-Report-Json-Archive-Status');
 
     if (_genTimer) { clearInterval(_genTimer); _genTimer = null; }
 
@@ -1909,8 +1911,12 @@ async function generatePDF() {
 
     _setProgress('✅ PDF ready!', 100);
     setTimeout(_hideProgress, 1500);
-    if (archiveStatus === 'failed') {
+    if (pdfArchiveStatus === 'failed') {
       toast('PDF downloaded, but could not be saved to My Reports.', 'warning');
+    } else if (jsonArchiveStatus === 'failed') {
+      toast('PDF saved, but its Monthly Report JSON could not be archived. Please tell the admin.', 'warning');
+    } else if (archiveStatus === 'failed') {
+      toast('PDF downloaded, but part of the report archive could not be saved.', 'warning');
     } else {
       toast('✅ PDF generated and downloaded!', 'success');
     }

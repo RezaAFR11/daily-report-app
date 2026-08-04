@@ -18,6 +18,8 @@ _REQUIRED = {
     "PIL":        "pillow",
     "docx":       "python-docx",
     "anthropic":  "anthropic",
+    "pypdf":      "pypdf",
+    "rapidfuzz":  "rapidfuzz",
 }
 
 def _check_and_install():
@@ -79,6 +81,8 @@ import os, json, io, base64, uuid, re, string, copy, math
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for
 from PIL import Image, ImageOps, UnidentifiedImageError
+from monthly_report import archive_final_daily_record
+from monthly_report.web import get_monthly_reports_index, register_monthly_routes
 
 # ── PDF engine ────────────────────────────────────────────────────────────────
 from reportlab.lib.pagesizes import A4
@@ -1190,8 +1194,11 @@ DEFAULT_CONFIG = {
 # ── Flask ─────────────────────────────────────────────────────────────────────
 import hashlib, functools
 
+_SAFE_USERNAME = re.compile(r'^[a-z0-9][a-z0-9_.-]{1,63}$')
+
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'gpa-daily-report-s3cr3t-2026')
+app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_UPLOAD_BYTES', 128 * 1024 * 1024))
 
 SCRIPT_DIR        = os.path.dirname(os.path.abspath(__file__))
 # Keep mutable data outside the deployed source when DATA_DIR is configured.
@@ -1290,6 +1297,23 @@ def archive_generated_report(username, filename, pdf_bytes, entry):
     entry = dict(entry)
     entry['size_kb'] = round(len(pdf_bytes) / 1024, 1)
     append_report_index(username, entry)
+
+
+def get_owned_report_path(username, filename):
+    """Return a user's indexed Daily PDF path, never an arbitrary path."""
+    filename = str(filename or '')
+    if not filename or filename != os.path.basename(filename):
+        return None
+    if not any(row.get('filename') == filename for row in get_reports_index(username)):
+        return None
+    reports_dir = os.path.abspath(get_reports_dir(username))
+    candidate = os.path.abspath(os.path.join(reports_dir, filename))
+    try:
+        if os.path.commonpath([reports_dir, candidate]) != reports_dir:
+            return None
+    except ValueError:
+        return None
+    return candidate
 
 def login_required(f):
     @functools.wraps(f)
@@ -1435,6 +1459,10 @@ def admin_add_user():
     is_admin = bool(data.get('is_admin', False))
     if not username or len(username) < 2:
         return jsonify({'error': 'Username must be at least 2 characters.'}), 400
+    if not _SAFE_USERNAME.fullmatch(username):
+        return jsonify({
+            'error': 'Username may contain only lowercase letters, numbers, dot, underscore, and hyphen.'
+        }), 400
     users = load_users()
     if username in users:
         return jsonify({'error': f'User "{username}" already exists.'}), 400
@@ -1476,27 +1504,34 @@ def admin_reset_pin():
 @app.route('/admin/user_reports/<username>')
 @admin_required
 def admin_user_reports(username):
+    if username not in load_users():
+        return jsonify({'error': 'User not found.'}), 404
     reports = get_reports_index(username)
     return jsonify({'username': username, 'reports': reports})
 
 @app.route('/admin/download/<username>/<path:filename>')
 @admin_required
 def admin_download_report(username, filename):
-    rdir = get_reports_dir(username)
-    fpath = os.path.join(rdir, filename)
-    if not os.path.isfile(fpath):
+    if username not in load_users():
         return 'Not found', 404
-    return send_file(fpath, as_attachment=True, download_name=filename)
+    fpath = get_owned_report_path(username, filename)
+    if not fpath or not os.path.isfile(fpath):
+        return 'Not found', 404
+    return send_file(fpath, as_attachment=True, download_name=os.path.basename(filename))
 
 @app.route('/admin/delete_report', methods=['POST'])
 @admin_required
 def admin_delete_report():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     username = (data.get('username') or '').strip()
     filename = (data.get('filename') or '').strip()
     if not username or not filename:
         return jsonify({'error': 'Missing params'}), 400
-    fpath = os.path.join(get_reports_dir(username), filename)
+    if username not in load_users():
+        return jsonify({'error': 'User not found'}), 404
+    fpath = get_owned_report_path(username, filename)
+    if not fpath:
+        return jsonify({'error': 'Report not found'}), 404
     if os.path.isfile(fpath):
         os.remove(fpath)
     idx = [r for r in get_reports_index(username) if r.get('filename') != filename]
@@ -1511,8 +1546,11 @@ def my_reports():
     username = session['username']
     cfg = load_config()
     reports  = get_reports_index(username)
+    monthly_reports = get_monthly_reports_index(DATA_DIR, username)
     return render_template('reports.html',
         reports=reports,
+        monthly_reports=monthly_reports,
+        projects=normalize_projects(cfg.get('projects', DEFAULT_PROJECTS)),
         username=username,
         project_start_date=cfg.get('project_start_date',''),
         is_admin=session.get('is_admin', False))
@@ -1521,17 +1559,20 @@ def my_reports():
 @login_required
 def download_report(filename):
     username = session['username']
-    fpath = os.path.join(get_reports_dir(username), filename)
-    if not os.path.isfile(fpath):
+    fpath = get_owned_report_path(username, filename)
+    if not fpath or not os.path.isfile(fpath):
         return 'Not found', 404
-    return send_file(fpath, as_attachment=True, download_name=filename)
+    return send_file(fpath, as_attachment=True, download_name=os.path.basename(filename))
 
 @app.route('/reports/delete', methods=['POST'])
 @login_required
 def delete_report():
     username = session['username']
-    filename = (request.json.get('filename') or '').strip()
-    fpath = os.path.join(get_reports_dir(username), filename)
+    data = request.get_json(silent=True) or {}
+    filename = (data.get('filename') or '').strip()
+    fpath = get_owned_report_path(username, filename)
+    if not fpath:
+        return jsonify({'error': 'Report not found'}), 404
     if os.path.isfile(fpath):
         os.remove(fpath)
     idx = [r for r in get_reports_index(username) if r.get('filename') != filename]
@@ -1555,7 +1596,7 @@ def check_report_date():
 def health():
     import sys, importlib
     checks = {}
-    for mod in ['flask', 'reportlab', 'PIL', 'json', 'os', 'io', 'base64']:
+    for mod in ['flask', 'reportlab', 'PIL', 'pypdf', 'rapidfuzz', 'json', 'os', 'io', 'base64']:
         try:
             importlib.import_module(mod)
             checks[mod] = 'OK'
@@ -1734,6 +1775,9 @@ def generate():
         return jsonify({'error': 'Invalid report data'}), 400
 
     try:
+        # Keep an unmodified copy for the immutable final JSON archive.  The
+        # PDF resolver embeds photos as base64 and mutates its input.
+        canonical_payload = copy.deepcopy(payload)
         d = resolve_photos(payload, username)
         cfg = load_config()
         date_str = _safe_report_filename_part(d.get('date'), 'Report').replace(' ', '_')
@@ -1746,17 +1790,52 @@ def generate():
 
     pdf_bytes = buf.getvalue()
     archive_failed = False
+    json_archive_failed = False
+    pdf_archive_failed = False
+    canonical_record = None
     try:
-        archive_generated_report(username, fname, pdf_bytes, {
+        generated_at = datetime.now().astimezone().isoformat(timespec='seconds')
+        photo_paths = {}
+        temp_photos_dir = get_temp_photos_dir(username)
+        for area in canonical_payload.get('areas', []):
+            for photo in area.get('photos', []):
+                photo_name = str(photo.get('photo_filename') or '')
+                if not _SAFE_PHOTO.match(photo_name):
+                    continue
+                photo_path = os.path.join(temp_photos_dir, photo_name)
+                if os.path.isfile(photo_path):
+                    photo_paths[photo_name] = photo_path
+        canonical_record = archive_final_daily_record(
+            DATA_DIR,
+            username,
+            canonical_payload,
+            generated_at=generated_at,
+            photo_paths=photo_paths,
+        )
+    except Exception:
+        archive_failed = True
+        json_archive_failed = True
+        app.logger.exception('Could not archive final JSON for user %s', username)
+
+    try:
+        archive_entry = {
             'filename':     fname,
             'date':         d.get('date',''),
             'day_no':       d.get('day_no',''),
             'project_no':   d.get('project_no',''),
             'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
-        })
+        }
+        if canonical_record:
+            archive_entry.update({
+                'canonical_report_id': canonical_record.get('report_id', ''),
+                'canonical_revision': canonical_record.get('revision', 1),
+                'json_filename': f"{canonical_record.get('report_id', '')}.json",
+            })
+        archive_generated_report(username, fname, pdf_bytes, archive_entry)
     except Exception:
         # A temporary My Reports problem must not block a valid PDF download.
         archive_failed = True
+        pdf_archive_failed = True
         app.logger.exception('Could not archive generated PDF for user %s', username)
 
     buf.seek(0)
@@ -1767,6 +1846,8 @@ def generate():
         mimetype='application/pdf',
     )
     response.headers['X-Report-Archive-Status'] = 'failed' if archive_failed else 'saved'
+    response.headers['X-Report-Pdf-Archive-Status'] = 'failed' if pdf_archive_failed else 'saved'
+    response.headers['X-Report-Json-Archive-Status'] = 'failed' if json_archive_failed else 'saved'
     return response
 
 @app.route('/save_draft', methods=['POST'])
@@ -2583,8 +2664,20 @@ def admin_merge_submissions():
     return jsonify({'ok': True, 'merged': len(incoming)})
 
 
+# Monthly Report routes use the same authenticated Flask session and persistent
+# DATA_DIR as the Daily Report application.
+register_monthly_routes(
+    app,
+    data_dir=DATA_DIR,
+    config_provider=load_config,
+    activity_logger=log_activity,
+)
+
+
 if __name__ == '__main__':
     import webbrowser, threading, time, socket
+
+    bind_host = os.environ.get('DAILY_REPORT_HOST', '0.0.0.0')
 
     try:
         local_ip = socket.gethostbyname(socket.gethostname())
@@ -2596,7 +2689,10 @@ if __name__ == '__main__':
     print("   Daily Report App v2  --  PT. GPA")
     print("  ============================================")
     print(f"  Local  : http://localhost:5050")
-    print(f"  Network: http://{local_ip}:5050")
+    if bind_host in ('127.0.0.1', 'localhost', '::1'):
+        print("  Network: disabled (localhost only)")
+    else:
+        print(f"  Network: http://{local_ip}:5050")
     print("  Browser opening automatically...")
     print("  To stop: close this window or press Ctrl+C")
     print()
@@ -2606,4 +2702,4 @@ if __name__ == '__main__':
         webbrowser.open('http://localhost:5050')
 
     threading.Thread(target=_open_browser, daemon=True).start()
-    app.run(host='0.0.0.0', port=5050, debug=False)
+    app.run(host=bind_host, port=5050, debug=False)

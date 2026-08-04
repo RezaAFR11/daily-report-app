@@ -55,7 +55,14 @@ class PDFGenerationTests(unittest.TestCase):
     def test_generate_downloads_and_archives_pdf(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             reports_dir = os.path.join(temp_dir, 'reports')
-            with patch('daily_report_app.get_reports_dir', return_value=reports_dir):
+            canonical = {
+                'report_id': '2026-07-28-r1-test',
+                'revision': 1,
+            }
+            with (
+                patch('daily_report_app.get_reports_dir', return_value=reports_dir),
+                patch('daily_report_app.archive_final_daily_record', return_value=canonical) as archive_json,
+            ):
                 response = self.client.post('/generate', json=MINIMAL_REPORT)
 
             self.assertEqual(response.status_code, 200)
@@ -66,12 +73,18 @@ class PDFGenerationTests(unittest.TestCase):
                 index = json.load(index_file)
             self.assertEqual(len(index), 1)
             self.assertEqual(index[0]['date'], '2026-07-28')
+            self.assertEqual(index[0]['canonical_report_id'], canonical['report_id'])
             self.assertTrue(os.path.isfile(os.path.join(reports_dir, index[0]['filename'])))
+            self.assertEqual(archive_json.call_args.args[2], MINIMAL_REPORT)
 
     def test_archive_failure_does_not_block_pdf_download(self):
         fake_pdf = io.BytesIO(b'%PDF-1.4\nvalid test pdf\n%%EOF')
         with (
             patch('daily_report_app.generate_pdf', return_value=fake_pdf),
+            patch(
+                'daily_report_app.archive_final_daily_record',
+                return_value={'report_id': 'test-r1', 'revision': 1},
+            ),
             patch(
                 'daily_report_app.archive_generated_report',
                 side_effect=OSError('volume temporarily unavailable'),
@@ -92,6 +105,32 @@ class PDFGenerationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()['error'], 'Invalid report data')
+
+    def test_daily_report_download_and_delete_reject_path_traversal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reports_dir = os.path.join(temp_dir, 'reports')
+            os.makedirs(reports_dir)
+            allowed_name = 'Daily Report - Allowed.pdf'
+            allowed_path = os.path.join(reports_dir, allowed_name)
+            outside_path = os.path.join(temp_dir, 'secret.pdf')
+            with open(allowed_path, 'wb') as handle:
+                handle.write(b'%PDF allowed')
+            with open(outside_path, 'wb') as handle:
+                handle.write(b'%PDF secret')
+            with open(os.path.join(reports_dir, 'index.json'), 'w', encoding='utf-8') as handle:
+                json.dump([{'filename': allowed_name}], handle)
+
+            with patch('daily_report_app.get_reports_dir', return_value=reports_dir):
+                allowed = self.client.get(f'/reports/download/{allowed_name}')
+                traversal = self.client.get('/reports/download/..%2Fsecret.pdf')
+                deletion = self.client.post('/reports/delete', json={'filename': '../secret.pdf'})
+
+            self.assertEqual(allowed.status_code, 200)
+            allowed.get_data()
+            allowed.close()
+            self.assertEqual(traversal.status_code, 404)
+            self.assertEqual(deletion.status_code, 404)
+            self.assertTrue(os.path.isfile(outside_path))
 
     def test_very_long_photo_caption_does_not_break_pdf_layout(self):
         report = deepcopy(MINIMAL_REPORT)

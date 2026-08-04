@@ -1,0 +1,1393 @@
+"""Render the structured monthly-report model as a self-contained PDF.
+
+The renderer intentionally has no Flask or storage dependencies.  Callers pass
+the reviewed runtime data and receive a rewound :class:`io.BytesIO` object.
+"""
+
+from __future__ import annotations
+
+import io
+import math
+import os
+from collections.abc import Mapping, Sequence
+from datetime import date, datetime
+from html import escape
+from typing import Any
+
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfgen import canvas as pdf_canvas
+from reportlab.platypus import (
+    BaseDocTemplate,
+    Flowable,
+    Frame,
+    LongTable,
+    NextPageTemplate,
+    PageBreak,
+    PageTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+)
+from reportlab.platypus.tableofcontents import TableOfContents
+
+
+__all__ = ["render_monthly_report"]
+
+
+PAGE_WIDTH, PAGE_HEIGHT = A4
+BLACK = colors.HexColor("#000000")
+WHITE = colors.HexColor("#FFFFFF")
+GREY_HEADER = colors.HexColor("#D9D9D9")
+GREY_SUBHEADER = colors.HexColor("#DFDFDF")
+LIGHT_GREY = colors.HexColor("#F3F4F6")
+MID_GREY = colors.HexColor("#6B7280")
+CYAN = colors.HexColor("#00AFEF")
+ORANGE = colors.HexColor("#F79646")
+ROYAL_BLUE = colors.HexColor("#0000FF")
+TOC_BLUE = colors.HexColor("#365F91")
+FINAL_GREEN = colors.HexColor("#008751")
+
+OUTER_BORDER = (24.0, 24.0, PAGE_WIDTH - 48.0, PAGE_HEIGHT - 48.0)
+BODY_LEFT = 35.4
+BODY_RIGHT = 33.0
+BODY_BOTTOM = 48.0
+BODY_TOP_MARGIN = 109.0
+BODY_WIDTH = PAGE_WIDTH - BODY_LEFT - BODY_RIGHT
+BODY_HEIGHT = PAGE_HEIGHT - BODY_TOP_MARGIN - BODY_BOTTOM
+
+DEFAULT_APPENDICES = (
+    ("6.1", "Summary Progress"),
+    ("6.2", "Progress S-Curve"),
+    ("6.3", "Overall Schedule"),
+    ("6.4", "Document Deliverable List / Drawing Status"),
+    ("6.5", "Manning Manpower / Equipment Loading"),
+    ("6.6", "Photographs Activity"),
+    ("6.7", "Safety Report"),
+    ("6.8", "QC Document"),
+)
+
+
+def _value(mapping: Mapping[str, Any] | None, *keys: str, default: Any = "") -> Any:
+    if not isinstance(mapping, Mapping):
+        return default
+    for key in keys:
+        value = mapping.get(key)
+        if value is not None and value != "":
+            return value
+    return default
+
+
+def _plain(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    if isinstance(value, (date, datetime)):
+        return value.strftime("%d %b %Y")
+    text = str(value).strip()
+    return text if text else default
+
+
+def _xml(value: Any, default: str = "&#8212;") -> str:
+    text = _plain(value)
+    if not text:
+        return default
+    return escape(text, quote=False).replace("\n", "<br/>")
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, (str, bytes, bytearray, Mapping)):
+        return [value]
+    if isinstance(value, Sequence):
+        return list(value)
+    return [value]
+
+
+def _number(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    text = str(value).strip().replace("%", "").replace(" ", "")
+    if not text:
+        return None
+    if "," in text and "." not in text:
+        text = text.replace(",", ".")
+    else:
+        text = text.replace(",", "")
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _percent(value: Any) -> str:
+    number = _number(value)
+    if number is not None:
+        return f"{number:.1f}%"
+    return _plain(value, "\u2014")
+
+
+def _normalise_status(value: Any) -> str:
+    text = _plain(value, "draft").lower().replace("_", "-")
+    if text in {"final", "issued", "approved"}:
+        return "FINAL"
+    if text in {"mtd", "month-to-date", "month to date"}:
+        return "MTD"
+    return "DRAFT"
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _styles() -> dict[str, ParagraphStyle]:
+    base = dict(fontName="Helvetica", textColor=BLACK, splitLongWords=1)
+    return {
+        "body": ParagraphStyle(
+            "MonthlyBody", fontSize=10.5, leading=14, spaceAfter=5, **base
+        ),
+        "body_center": ParagraphStyle(
+            "MonthlyBodyCenter", parent=None, fontName="Helvetica", fontSize=10.5,
+            leading=14, alignment=TA_CENTER, textColor=BLACK, splitLongWords=1,
+        ),
+        "small": ParagraphStyle(
+            "MonthlySmall", fontSize=8.5, leading=10.5, spaceAfter=3, **base
+        ),
+        "small_center": ParagraphStyle(
+            "MonthlySmallCenter", fontName="Helvetica", fontSize=8.5, leading=10.5,
+            alignment=TA_CENTER, textColor=BLACK, splitLongWords=1,
+        ),
+        "small_right": ParagraphStyle(
+            "MonthlySmallRight", fontName="Helvetica", fontSize=8.5, leading=10.5,
+            alignment=TA_RIGHT, textColor=BLACK, splitLongWords=1,
+        ),
+        "table": ParagraphStyle(
+            "MonthlyTable", fontName="Helvetica", fontSize=8.5, leading=10.5,
+            textColor=BLACK, splitLongWords=1,
+        ),
+        "table_center": ParagraphStyle(
+            "MonthlyTableCenter", fontName="Helvetica", fontSize=8.3, leading=9.8,
+            alignment=TA_CENTER, textColor=BLACK, splitLongWords=1,
+        ),
+        "table_header": ParagraphStyle(
+            "MonthlyTableHeader", fontName="Helvetica-Bold", fontSize=8.3,
+            leading=9.6, alignment=TA_CENTER, textColor=BLACK, splitLongWords=1,
+        ),
+        "h1": ParagraphStyle(
+            "MonthlyH1", fontName="Helvetica-Bold", fontSize=14, leading=17,
+            textColor=BLACK, spaceBefore=0, spaceAfter=9, keepWithNext=True,
+        ),
+        "h2": ParagraphStyle(
+            "MonthlyH2", fontName="Helvetica-Bold", fontSize=11.5, leading=14,
+            textColor=BLACK, leftIndent=28.3, spaceBefore=5, spaceAfter=6,
+            keepWithNext=True,
+        ),
+        "appendix_item": ParagraphStyle(
+            "MonthlyAppendixItem", fontName="Helvetica-Bold", fontSize=11.5,
+            leading=15, textColor=BLACK, leftIndent=20, firstLineIndent=-20,
+            spaceAfter=4, keepWithNext=False,
+        ),
+        "toc_title": ParagraphStyle(
+            "MonthlyTOCTitle", fontName="Helvetica-Bold", fontSize=14, leading=17,
+            alignment=TA_CENTER, textColor=BLACK, spaceAfter=10,
+        ),
+        "toc_subtitle": ParagraphStyle(
+            "MonthlyTOCSubtitle", fontName="Helvetica", fontSize=16, leading=19,
+            textColor=TOC_BLUE, spaceAfter=4,
+        ),
+        "placeholder": ParagraphStyle(
+            "MonthlyPlaceholder", fontName="Helvetica-Oblique", fontSize=9.5,
+            leading=13, textColor=MID_GREY, leftIndent=28.3, spaceAfter=6,
+            splitLongWords=1,
+        ),
+    }
+
+
+def _paragraph(value: Any, style: ParagraphStyle, default: str = "&#8212;") -> Paragraph:
+    return Paragraph(_xml(value, default), style)
+
+
+def _heading(text: str, style: ParagraphStyle, level: int) -> Paragraph:
+    paragraph = Paragraph(escape(text, quote=False), style)
+    paragraph._monthly_toc_level = level  # type: ignore[attr-defined]
+    paragraph._monthly_toc_text = text  # type: ignore[attr-defined]
+    return paragraph
+
+
+def _draw_outer_border(canvas: pdf_canvas.Canvas) -> None:
+    x, y, width, height = OUTER_BORDER
+    canvas.setStrokeColor(BLACK)
+    canvas.setLineWidth(0.5)
+    canvas.rect(x, y, width, height, stroke=1, fill=0)
+
+
+def _status_color(status: str):
+    return {"DRAFT": ORANGE, "MTD": CYAN, "FINAL": FINAL_GREEN}.get(status, ORANGE)
+
+
+def _draw_status_badge(
+    canvas: pdf_canvas.Canvas, status: str, x: float, y: float, width: float = 55
+) -> None:
+    color = _status_color(status)
+    canvas.saveState()
+    canvas.setStrokeColor(color)
+    canvas.setFillColor(WHITE)
+    canvas.setLineWidth(1.2)
+    canvas.roundRect(x, y, width, 16, 3, stroke=1, fill=1)
+    canvas.setFillColor(color)
+    canvas.setFont("Helvetica-Bold", 8.5)
+    canvas.drawCentredString(x + width / 2, y + 4.2, status)
+    canvas.restoreState()
+
+
+def _draw_draft_watermark(canvas: pdf_canvas.Canvas) -> None:
+    canvas.saveState()
+    try:
+        canvas.setFillAlpha(0.16)
+    except (AttributeError, TypeError):
+        pass
+    canvas.setFillColor(ORANGE)
+    canvas.translate(PAGE_WIDTH / 2, PAGE_HEIGHT / 2)
+    canvas.rotate(28)
+    canvas.setFont("Helvetica-Bold", 64)
+    canvas.drawCentredString(0, 0, "DRAFT")
+    canvas.setFont("Helvetica-Bold", 17)
+    canvas.drawCentredString(0, -25, "SAMPLE DATA - NOT FOR ISSUE")
+    canvas.restoreState()
+
+
+def _draw_logo_fallback(
+    canvas: pdf_canvas.Canvas, x: float, y: float, width: float, height: float
+) -> None:
+    canvas.saveState()
+    canvas.setStrokeColor(ORANGE)
+    canvas.setFillColor(WHITE)
+    canvas.setLineWidth(2)
+    canvas.roundRect(x, y, width, height, 4, stroke=1, fill=1)
+    canvas.setFillColor(BLACK)
+    canvas.setFont("Helvetica", min(11, max(7, height * 0.23)))
+    canvas.drawCentredString(x + width / 2, y + height / 2 - 3, "LOGO VENDOR")
+    canvas.restoreState()
+
+
+def _draw_logo(
+    canvas: pdf_canvas.Canvas,
+    logo_path: str | os.PathLike[str] | None,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+) -> None:
+    if logo_path:
+        try:
+            path = os.fspath(logo_path)
+            if os.path.isfile(path):
+                image = ImageReader(path)
+                image_width, image_height = image.getSize()
+                if image_width > 0 and image_height > 0:
+                    scale = min(width / image_width, height / image_height)
+                    draw_width = image_width * scale
+                    draw_height = image_height * scale
+                    canvas.drawImage(
+                        image,
+                        x + (width - draw_width) / 2,
+                        y + (height - draw_height) / 2,
+                        draw_width,
+                        draw_height,
+                        preserveAspectRatio=True,
+                        mask="auto",
+                    )
+                    return
+        except (OSError, ValueError, TypeError):
+            pass
+    _draw_logo_fallback(canvas, x, y, width, height)
+
+
+def _draw_box_paragraph(
+    canvas: pdf_canvas.Canvas,
+    text: Any,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    *,
+    font_name: str = "Helvetica",
+    font_size: float = 11,
+    min_font_size: float = 7,
+    alignment: int = TA_CENTER,
+    text_color=BLACK,
+) -> None:
+    escaped = _xml(text)
+    size = font_size
+    paragraph = None
+    paragraph_height = 0.0
+    while size >= min_font_size:
+        style = ParagraphStyle(
+            "CanvasBox",
+            fontName=font_name,
+            fontSize=size,
+            leading=size * 1.15,
+            alignment=alignment,
+            textColor=text_color,
+            splitLongWords=1,
+        )
+        paragraph = Paragraph(escaped, style)
+        _, paragraph_height = paragraph.wrap(width, height)
+        if paragraph_height <= height:
+            break
+        size -= 0.5
+    if paragraph is not None:
+        paragraph.drawOn(canvas, x, y + max(0, (height - paragraph_height) / 2))
+
+
+def _period_label(report: Mapping[str, Any]) -> str:
+    direct = _plain(_value(report, "reporting_period", "report_period"))
+    if direct:
+        return direct
+    period = report.get("period")
+    if isinstance(period, Mapping):
+        start = _plain(_value(period, "start", "date_from"))
+        end = _plain(_value(period, "end", "date_to"))
+        if start and end:
+            return f"{start} to {end}"
+        return start or end
+    return ""
+
+
+def _normalise_revision_rows(report: Mapping[str, Any]) -> list[dict[str, str]]:
+    source = report.get("revision_rows", report.get("revisions", []))
+    rows: list[dict[str, str]] = []
+    for raw in _as_list(source):
+        if not isinstance(raw, Mapping):
+            continue
+        rows.append({
+            "rev": _plain(_value(raw, "rev", "revision")),
+            "description": _plain(_value(raw, "description", "status")),
+            "date": _plain(_value(raw, "date", "issued_date")),
+            "prepared": _plain(_value(raw, "prepared", "prepared_by")),
+            "checked": _plain(_value(raw, "checked", "checked_by")),
+            "vendor_approved": _plain(
+                _value(raw, "vendor_approved", "approved", "approved_by")
+            ),
+            "kn_approved": _plain(_value(raw, "kn_approved", "client_approved")),
+        })
+    if not rows and any(
+        _plain(report.get(key))
+        for key in ("prepared_by", "checked_by", "approved_by", "kn_approved_by")
+    ):
+        rows.append({
+            "rev": _plain(_value(report, "revision", "rev")),
+            "description": _plain(report.get("revision_description")),
+            "date": _plain(_value(report, "issued_date", "issue_date")),
+            "prepared": _plain(report.get("prepared_by")),
+            "checked": _plain(report.get("checked_by")),
+            "vendor_approved": _plain(report.get("approved_by")),
+            "kn_approved": _plain(report.get("kn_approved_by")),
+        })
+    return rows[-3:]
+
+
+def _draw_revision_table(canvas: pdf_canvas.Canvas, report: Mapping[str, Any]) -> None:
+    styles = _styles()
+    rows = _normalise_revision_rows(report)
+    while len(rows) < 3:
+        rows.append({key: "" for key in (
+            "rev", "description", "date", "prepared", "checked",
+            "vendor_approved", "kn_approved",
+        )})
+
+    def cell(value: Any, *, header: bool = False) -> Paragraph:
+        style = ParagraphStyle(
+            "RevisionHeader" if header else "RevisionCell",
+            parent=styles["table_center"],
+            fontName="Helvetica-Bold" if header else "Helvetica",
+            fontSize=7.4 if header else 6.8,
+            leading=8.2 if header else 7.7,
+            textColor=ROYAL_BLUE if header else BLACK,
+        )
+        return _paragraph(value, style, default="")
+
+    table_data = [
+        [cell("REV", header=True), cell("DESCRIPTION", header=True),
+         cell("DATE", header=True), cell("VENDOR", header=True), "", "",
+         cell("KN", header=True)],
+        ["", "", "", cell("PREPARED", header=True), cell("CHECKED", header=True),
+         cell("APVD", header=True), cell("APVD", header=True)],
+    ]
+    for row in rows:
+        table_data.append([
+            cell(row["rev"]), cell(row["description"]), cell(row["date"]),
+            cell(row["prepared"]), cell(row["checked"]),
+            cell(row["vendor_approved"]), cell(row["kn_approved"]),
+        ])
+    table_data.append(["", "", "", cell("CHECKED & REVIEWED BY KN", header=True), "", "", ""])
+
+    table = Table(
+        table_data,
+        colWidths=[42.3, 185.8, 62.3, 61.0, 57.5, 62.3, 58.2],
+        rowHeights=[15, 18, 26, 26, 26, 26.5],
+    )
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.72, ROYAL_BLUE),
+        ("SPAN", (0, 0), (0, 1)),
+        ("SPAN", (1, 0), (1, 1)),
+        ("SPAN", (2, 0), (2, 1)),
+        ("SPAN", (3, 0), (5, 0)),
+        ("SPAN", (3, 5), (6, 5)),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 1),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+    ]))
+    table.wrapOn(canvas, 529.4, 137.5)
+    table.drawOn(canvas, 35.4, 41.3)
+
+
+def _draw_cover(
+    canvas: pdf_canvas.Canvas,
+    _doc: BaseDocTemplate,
+    report: Mapping[str, Any],
+    status: str,
+    logo_path: str | os.PathLike[str] | None,
+) -> None:
+    canvas.saveState()
+    canvas.setTitle(
+        f"Monthly Progress Report - {_plain(_value(report, 'project_name', 'project_title'), 'Project')}"
+    )
+    _draw_outer_border(canvas)
+    if status == "DRAFT":
+        _draw_draft_watermark(canvas)
+    _draw_status_badge(canvas, status, 35.4, 786.0)
+    _draw_logo(canvas, logo_path, 415.5, 753.5, 128.25, 47.25)
+
+    customer = _value(report, "customer", "client_name", default="Kertas Nusantara")
+    _draw_box_paragraph(
+        canvas, customer, 70, 661, PAGE_WIDTH - 140, 48,
+        font_name="Helvetica-Bold", font_size=36, min_font_size=20,
+    )
+    _draw_box_paragraph(
+        canvas, "MONTHLY PROGRESS REPORT", 70, 586, PAGE_WIDTH - 140, 35,
+        font_name="Helvetica-Bold", font_size=20, min_font_size=14,
+    )
+    period = _period_label(report)
+    period_text = f"({period})" if period and not period.startswith("(") else period
+    _draw_box_paragraph(
+        canvas, period_text, 110, 553, PAGE_WIDTH - 220, 28,
+        font_name="Helvetica-Bold", font_size=18, min_font_size=11,
+    )
+    issued = _plain(_value(report, "issued_date", "issue_date"))
+    _draw_box_paragraph(
+        canvas, f"Issued on {issued}" if issued else "Issued on \u2014",
+        100, 526, PAGE_WIDTH - 200, 27,
+        font_name="Helvetica-Bold", font_size=18, min_font_size=11,
+    )
+    vendor_doc = _value(report, "vendor_doc_no", "document_no", "doc_no")
+    _draw_box_paragraph(
+        canvas, f"Vendor Doc No: {_plain(vendor_doc, '\u2014')}",
+        150, 485, PAGE_WIDTH - 300, 27,
+        font_name="Helvetica-Bold", font_size=14, min_font_size=9,
+    )
+    project_no = _value(report, "vendor_project_no", "project_no")
+    _draw_box_paragraph(
+        canvas, f"Vendor Project No.: {_plain(project_no, '\u2014')}",
+        95, 373, PAGE_WIDTH - 190, 35,
+        font_name="Helvetica-Bold", font_size=19, min_font_size=10,
+    )
+    project_name = _value(report, "project_name", "project_title", default="Project Name")
+    _draw_box_paragraph(
+        canvas, project_name, 70, 315, PAGE_WIDTH - 140, 64,
+        font_name="Helvetica-Bold", font_size=23, min_font_size=10,
+    )
+    _draw_revision_table(canvas, report)
+    canvas.restoreState()
+
+
+def _draw_body_page(
+    canvas: pdf_canvas.Canvas,
+    _doc: BaseDocTemplate,
+    report: Mapping[str, Any],
+    status: str,
+    logo_path: str | os.PathLike[str] | None,
+) -> None:
+    canvas.saveState()
+    _draw_outer_border(canvas)
+    if status == "DRAFT":
+        _draw_draft_watermark(canvas)
+    _draw_status_badge(canvas, status, 35.4, 790.0)
+    canvas.setFillColor(BLACK)
+    canvas.setFont("Helvetica-Bold", 14)
+    canvas.drawCentredString(PAGE_WIDTH / 2 + 6, 792.8, "Monthly Progress Report")
+
+    project_name = _value(report, "project_name", "project_title", default="Project Name")
+    _draw_box_paragraph(
+        canvas, project_name, 45.1, 752.0, 174, 29,
+        font_name="Helvetica-Bold", font_size=11.5, min_font_size=7,
+        alignment=TA_LEFT,
+    )
+    cod = _value(report, "cod", "project_code", "project_no")
+    _draw_box_paragraph(
+        canvas, f"({_plain(cod, 'COD')})", 224, 752.0, 95, 29,
+        font_name="Helvetica-Bold", font_size=12.5, min_font_size=7,
+    )
+    vendor_doc = _value(report, "vendor_doc_no", "document_no", "doc_no")
+    _draw_box_paragraph(
+        canvas, f"Doc No (Vendor): {_plain(vendor_doc, '\u2014')}",
+        337, 752.0, 128, 29,
+        font_name="Helvetica-Bold", font_size=10.5, min_font_size=6.5,
+        alignment=TA_LEFT,
+    )
+    _draw_logo(canvas, logo_path, 468.75, 776.75, 95.25, 32.25)
+    canvas.setStrokeColor(BLACK)
+    canvas.setLineWidth(0.5)
+    canvas.line(43.7, 746.8, 537.3, 746.8)
+    canvas.setLineWidth(0.75)
+    canvas.line(33.75, 742.3, 562.5, 742.3)
+    canvas.restoreState()
+
+
+class _NumberedCanvas(pdf_canvas.Canvas):
+    """Delay page output so the footer can contain the final page count."""
+
+    def __init__(self, *args, status: str = "DRAFT", **kwargs):
+        super().__init__(*args, **kwargs)
+        self._monthly_status = status
+        self._monthly_page_states: list[dict[str, Any]] = []
+
+    def showPage(self):  # noqa: N802 - ReportLab API
+        state = {
+            key: value for key, value in self.__dict__.items()
+            if key != "_monthly_page_states"
+        }
+        self._monthly_page_states.append(state)
+        self._startPage()
+
+    def save(self):
+        total_pages = len(self._monthly_page_states)
+        for state in self._monthly_page_states:
+            self.__dict__.update(state)
+            if self._pageNumber > 1:
+                self._draw_monthly_footer(total_pages)
+            pdf_canvas.Canvas.showPage(self)
+        pdf_canvas.Canvas.save(self)
+
+    def _draw_monthly_footer(self, total_pages: int) -> None:
+        status = self._monthly_status
+        self.saveState()
+        self.setFillColor(_status_color(status))
+        self.setFont("Helvetica-Bold", 8.5)
+        text = f"{status}  |  Page {self._pageNumber} of {total_pages}"
+        self.drawCentredString(PAGE_WIDTH / 2, 31.0, text)
+        self.restoreState()
+
+
+class _MonthlyDocTemplate(BaseDocTemplate):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._monthly_heading_counter = 0
+
+    def beforeDocument(self) -> None:  # noqa: N802 - ReportLab API
+        # ``multiBuild`` makes several complete passes while resolving the
+        # table of contents.  Stable bookmark keys are required for the TOC to
+        # consider two consecutive passes identical.
+        self._monthly_heading_counter = 0
+
+    def afterFlowable(self, flowable: Flowable) -> None:  # noqa: N802 - ReportLab API
+        level = getattr(flowable, "_monthly_toc_level", None)
+        if level is None:
+            return
+        self._monthly_heading_counter += 1
+        text = getattr(flowable, "_monthly_toc_text", "")
+        key = f"monthly-heading-{self._monthly_heading_counter}"
+        self.canv.bookmarkPage(key)
+        self.canv.addOutlineEntry(text, key, level=level, closed=False)
+        self.notify("TOCEntry", (level, text, self.page, key))
+
+
+def _normalise_progress(value: Any) -> list[dict[str, Any]]:
+    source = value.get("rows", []) if isinstance(value, Mapping) else value
+    rows: list[dict[str, Any]] = []
+    for index, raw in enumerate(_as_list(source), start=1):
+        if not isinstance(raw, Mapping):
+            continue
+        previous = _number(_value(
+            raw, "previous", "previous_actual", "cumulative_previous_actual", default=None
+        ))
+        this_month = _number(_value(
+            raw, "this_month", "this", "period", "this_period_actual", default=None
+        ))
+        to_date = _number(_value(
+            raw, "to_date", "cumulative", "cumulative_to_date_actual", default=None
+        ))
+        if to_date is None and previous is not None and this_month is not None:
+            to_date = previous + this_month
+        plan = _number(_value(
+            raw, "plan", "to_date_plan", "cumulative_to_date_plan", default=None
+        ))
+        variance = _number(_value(raw, "variance", "deviation", default=None))
+        if variance is None and to_date is not None and plan is not None:
+            variance = to_date - plan
+        rows.append({
+            "description": _plain(raw.get("description"), f"Progress item {index}"),
+            "previous": previous,
+            "this_month": this_month,
+            "to_date": to_date,
+            "plan": plan,
+            "variance": variance,
+            "weight": _number(_value(raw, "weight", "weight_factor", default=None)),
+            "is_total": bool(raw.get("is_total")),
+        })
+    return rows
+
+
+def _progress_table(rows: list[dict[str, Any]], styles: Mapping[str, ParagraphStyle]) -> LongTable:
+    display_rows = rows or [
+        {"description": description, "previous": None, "this_month": None,
+         "to_date": None, "plan": None, "variance": None}
+        for description in ("Engineering", "Purchasing", "Manufacturing", "Delivery", "Total Overall")
+    ]
+    header = styles["table_header"]
+    body = styles["table"]
+    centered = styles["table_center"]
+    data: list[list[Any]] = [
+        [_paragraph("Description", header), _paragraph("Progress", header), "", "",
+         _paragraph("To-date Plan\n(d)", header),
+         _paragraph("Variance\n(e) = (c) - (d)", header)],
+        ["", _paragraph("Previous\n(a)", header),
+         _paragraph("This Month\n(b)", header),
+         _paragraph("To-date\n(c) = (a) + (b)", header), "", ""],
+    ]
+    for row in display_rows:
+        data.append([
+            _paragraph(row.get("description"), body),
+            _paragraph(_percent(row.get("previous")), centered),
+            _paragraph(_percent(row.get("this_month")), centered),
+            _paragraph(_percent(row.get("to_date")), centered),
+            _paragraph(_percent(row.get("plan")), centered),
+            _paragraph(_percent(row.get("variance")), centered),
+        ])
+    table = LongTable(
+        data,
+        colWidths=[108.0, 76.6, 81.0, 76.6, 72.0, 76.6],
+        repeatRows=2,
+        splitByRow=1,
+        splitInRow=1,
+        hAlign="CENTER",
+    )
+    commands = [
+        ("GRID", (0, 0), (-1, -1), 0.75, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), GREY_HEADER),
+        ("BACKGROUND", (1, 1), (3, 1), GREY_SUBHEADER),
+        ("SPAN", (0, 0), (0, 1)),
+        ("SPAN", (1, 0), (3, 0)),
+        ("SPAN", (4, 0), (4, 1)),
+        ("SPAN", (5, 0), (5, 1)),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]
+    for row_index, row in enumerate(display_rows, start=2):
+        if row.get("is_total") or "total" in _plain(row.get("description")).lower():
+            commands.extend([
+                ("FONTNAME", (0, row_index), (-1, row_index), "Helvetica-Bold"),
+                ("BACKGROUND", (0, row_index), (-1, row_index), LIGHT_GREY),
+            ])
+    table.setStyle(TableStyle(commands))
+    return table
+
+
+def _executive_summary(report: Mapping[str, Any], progress: list[dict[str, Any]]) -> str:
+    supplied = _plain(report.get("executive_summary"))
+    if supplied:
+        return supplied
+    total = next(
+        (row for row in reversed(progress)
+         if row.get("is_total") or "total" in row["description"].lower()),
+        None,
+    )
+    if total and total.get("to_date") is not None and total.get("plan") is not None:
+        variance = total.get("variance")
+        if variance is None:
+            variance = total["to_date"] - total["plan"]
+        return (
+            "For this reporting period, overall project progress is "
+            f"{_percent(total['to_date'])} compared with the plan of "
+            f"{_percent(total['plan'])}, for a variance of {_percent(variance)}. "
+            "The summary of progress and S-Curve are shown in the appendices."
+        )
+    return (
+        "Overall progress values have not been supplied for this reporting period. "
+        "Complete and review the progress table before issue."
+    )
+
+
+def _safety_table(value: Any, styles: Mapping[str, ParagraphStyle]) -> Table:
+    safety = value if isinstance(value, Mapping) else {}
+    rows = [
+        ("Total Manpower", _value(safety, "total_manpower", "manpower")),
+        ("Total Man hours", _value(safety, "total_man_hours", "man_hours")),
+        ("Total Recordable Cases", _value(
+            safety, "total_recordable_cases", "recordable_cases"
+        )),
+        ("Lost Workdays", safety.get("lost_workdays")),
+        ("Lost Time Injuries", safety.get("lost_time_injuries")),
+        ("Severity Rate", safety.get("severity_rate")),
+        ("Average Day Away", safety.get("average_day_away")),
+    ]
+    table_data = []
+    for label, raw in rows:
+        rendered = _plain(raw, "\u2014")
+        if label == "Total Man hours" and rendered != "\u2014" and not rendered.upper().endswith("MH"):
+            rendered += " MH"
+        table_data.append([
+            _paragraph("\u2022", styles["body_center"], default=""),
+            _paragraph(label, styles["body"]),
+            _paragraph(":", styles["body_center"]),
+            _paragraph(rendered, styles["body"]),
+        ])
+    table = Table(table_data, colWidths=[18, 145, 24, 150], hAlign="CENTER")
+    table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    return table
+
+
+def _mapping_summary(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _value(value, "summary", "text", "description", "remarks")
+    return value
+
+
+def _describe_mapping(value: Mapping[str, Any]) -> str:
+    preferred = _value(value, "text", "description", "activity", "title", "name")
+    if preferred:
+        area = _plain(_value(value, "area", "location"))
+        return f"{area}: {_plain(preferred)}" if area else _plain(preferred)
+    pairs = []
+    for key, item in value.items():
+        if item in (None, "", [], {}):
+            continue
+        label = str(key).replace("_", " ").strip().title()
+        pairs.append(f"{label}: {_plain(item)}")
+    return "; ".join(pairs)
+
+
+def _content_flowables(
+    value: Any,
+    styles: Mapping[str, ParagraphStyle],
+    *,
+    empty_message: str,
+    bullets: bool = False,
+) -> list[Flowable]:
+    if isinstance(value, Mapping) and any(key in value for key in ("summary", "items", "rows")):
+        values: list[Any] = []
+        summary = _plain(value.get("summary"))
+        if summary:
+            values.append(summary)
+        values.extend(_as_list(_value(value, "items", "rows", default=[])))
+    else:
+        values = _as_list(value)
+
+    rendered: list[Flowable] = []
+    for item in values:
+        if isinstance(item, Mapping):
+            text = _describe_mapping(item)
+        else:
+            text = _plain(item)
+        if not text:
+            continue
+        if bullets:
+            rendered.append(Paragraph(
+                f"&#8226;&nbsp;&nbsp;{_xml(text)}", styles["body"]
+            ))
+        else:
+            rendered.append(_paragraph(text, styles["body"]))
+    if not rendered:
+        rendered.append(_paragraph(empty_message, styles["placeholder"]))
+    return rendered
+
+
+def _po_rows(value: Any) -> tuple[Any, list[Mapping[str, Any]], Any, Any]:
+    if not isinstance(value, Mapping):
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return None, [row for row in value if isinstance(row, Mapping)], None, None
+        return value, [], None, None
+    rows = _value(value, "rows", "purchase_orders", "pos", default=[])
+    return (
+        value.get("summary"),
+        [row for row in _as_list(rows) if isinstance(row, Mapping)],
+        value.get("equipment_delivery"),
+        value.get("shipments"),
+    )
+
+
+def _procurement_table(rows: list[Mapping[str, Any]], styles: Mapping[str, ParagraphStyle]) -> LongTable:
+    header = styles["table_header"]
+    body = styles["table"]
+    data: list[list[Any]] = [[
+        _paragraph("PO #", header),
+        _paragraph("PO Name", header),
+        _paragraph("Supplier/Vendor/\nContractor", header),
+        _paragraph("PO Status", header),
+    ]]
+    if rows:
+        for row in rows:
+            data.append([
+                _paragraph(_value(row, "po_number", "po_no", "po", "number"), body),
+                _paragraph(_value(row, "po_name", "name", "description"), body),
+                _paragraph(_value(row, "supplier", "vendor", "contractor"), body),
+                _paragraph(_value(row, "status", "po_status"), body),
+            ])
+    else:
+        data.append([_paragraph("No purchase-order data supplied.", styles["placeholder"]), "", "", ""])
+    table = LongTable(
+        data, colWidths=[72.5, 103.3, 98.9, 234.7], repeatRows=1,
+        splitByRow=1, splitInRow=1, hAlign="CENTER",
+    )
+    commands = [
+        ("GRID", (0, 0), (-1, -1), 0.5, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), CYAN),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]
+    if not rows:
+        commands.append(("SPAN", (0, 1), (-1, 1)))
+    table.setStyle(TableStyle(commands))
+    return table
+
+
+def _equipment_table(rows: list[Mapping[str, Any]], styles: Mapping[str, ParagraphStyle]) -> LongTable:
+    header = styles["table_header"]
+    body = styles["table"]
+    data: list[list[Any]] = [[
+        _paragraph("Equipment", header), _paragraph("Supplier", header),
+        _paragraph("Status", header), _paragraph("Expected Delivery", header),
+        _paragraph("Actual Delivery", header),
+    ]]
+    for row in rows:
+        data.append([
+            _paragraph(_value(row, "equipment", "name", "description"), body),
+            _paragraph(_value(row, "supplier", "vendor"), body),
+            _paragraph(row.get("status"), body),
+            _paragraph(_value(row, "expected_delivery", "eta", "expected"), body),
+            _paragraph(_value(row, "actual_delivery", "actual"), body),
+        ])
+    table = LongTable(
+        data, colWidths=[135, 95, 90, 95, 95], repeatRows=1,
+        splitByRow=1, splitInRow=1, hAlign="CENTER",
+    )
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), GREY_HEADER),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return table
+
+
+def _shipment_table(rows: list[Mapping[str, Any]], styles: Mapping[str, ParagraphStyle]) -> LongTable:
+    header = styles["table_header"]
+    body = styles["table"]
+    centered = styles["table_center"]
+    data: list[list[Any]] = [[
+        _paragraph("Shipment No.", header), _paragraph("Description", header),
+        _paragraph("PO Number", header), _paragraph("Expected Loading Port", header),
+        _paragraph("Arriving Port", header), _paragraph("ETD", header),
+        _paragraph("Actual departure date", header),
+    ]]
+    if rows:
+        for index, row in enumerate(rows, start=1):
+            data.append([
+                _paragraph(_value(row, "shipment_no", "number", default=index), centered),
+                _paragraph(row.get("description"), body),
+                _paragraph(_value(row, "po_number", "po_no", "po"), body),
+                _paragraph(_value(row, "expected_loading_port", "loading_port"), body),
+                _paragraph(_value(row, "arriving_port", "arrival_port"), body),
+                _paragraph(_value(row, "etd", "expected_departure"), centered),
+                _paragraph(_value(row, "actual_departure_date", "actual_departure"), centered),
+            ])
+    else:
+        data.append([_paragraph("No shipment data supplied.", styles["placeholder"]), "", "", "", "", "", ""])
+    table = LongTable(
+        data, colWidths=[58.8, 98.9, 55.9, 65.6, 67.7, 76.5, 78.1],
+        repeatRows=1, splitByRow=1, splitInRow=1, hAlign="CENTER",
+    )
+    commands = [
+        ("GRID", (0, 0), (-1, -1), 0.5, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), GREY_HEADER),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]
+    if not rows:
+        commands.append(("SPAN", (0, 1), (-1, 1)))
+    table.setStyle(TableStyle(commands))
+    return table
+
+
+def _concerns_table(rows: list[Any], styles: Mapping[str, ParagraphStyle]) -> LongTable | None:
+    data: list[list[Any]] = [[
+        _paragraph("Area of Concern", styles["table_header"]),
+        _paragraph("Suggested Corrective Action", styles["table_header"]),
+    ]]
+    for raw in rows:
+        if isinstance(raw, Mapping):
+            concern = _value(raw, "concern", "text", "description")
+            action = _value(raw, "corrective_action", "action", "suggested_action")
+        else:
+            concern, action = raw, ""
+        if _plain(concern) or _plain(action):
+            data.append([
+                _paragraph(concern, styles["table"]),
+                _paragraph(action, styles["table"]),
+            ])
+    if len(data) == 1:
+        return None
+    table = LongTable(
+        data, colWidths=[BODY_WIDTH * 0.47, BODY_WIDTH * 0.53],
+        repeatRows=1, splitByRow=1, splitInRow=1,
+    )
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), GREY_HEADER),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return table
+
+
+def _normalise_s_curve(
+    value: Any, progress: list[dict[str, Any]]
+) -> tuple[list[str], list[float], list[float], bool] | None:
+    if isinstance(value, Mapping):
+        labels = [_plain(item) for item in _as_list(value.get("labels"))]
+        plan_raw = _as_list(_value(value, "plan", "planned", default=[]))
+        actual_raw = _as_list(value.get("actual"))
+        count = min(len(labels), len(plan_raw), len(actual_raw))
+        if count >= 2:
+            plan = [_number(item) for item in plan_raw[:count]]
+            actual = [_number(item) for item in actual_raw[:count]]
+            if all(item is not None for item in plan + actual):
+                return labels[:count], [float(item) for item in plan], [float(item) for item in actual], False
+
+    total = next(
+        (row for row in reversed(progress)
+         if row.get("is_total") or "total" in row["description"].lower()),
+        progress[-1] if progress else None,
+    )
+    if not total:
+        return None
+    previous = total.get("previous")
+    actual_now = total.get("to_date")
+    plan_now = total.get("plan")
+    if actual_now is None and previous is None:
+        return None
+    previous = float(previous or 0)
+    actual_now = float(actual_now if actual_now is not None else previous)
+    plan_now = float(plan_now if plan_now is not None else actual_now)
+    return (
+        ["Start", "Previous", "Current"],
+        [0.0, min(previous, plan_now), plan_now],
+        [0.0, previous, actual_now],
+        True,
+    )
+
+
+class _SCurveFlowable(Flowable):
+    def __init__(
+        self,
+        labels: list[str],
+        planned: list[float],
+        actual: list[float],
+        *,
+        illustrative: bool,
+        width: float = 490,
+        height: float = 285,
+    ):
+        super().__init__()
+        self.width = width
+        self.height = height
+        self.labels = labels
+        self.planned = planned
+        self.actual = actual
+        self.illustrative = illustrative
+
+    def draw(self):
+        canvas = self.canv
+        left, bottom = 42.0, 43.0
+        chart_width = self.width - left - 18
+        chart_height = self.height - bottom - 42
+        maximum = max([100.0, *self.planned, *self.actual])
+        y_max = max(100.0, math.ceil(maximum / 20.0) * 20.0)
+
+        canvas.saveState()
+        canvas.setFillColor(BLACK)
+        canvas.setFont("Helvetica-Bold", 12)
+        title = "Progress S-Curve"
+        if self.illustrative:
+            title += " (Illustrative Snapshot)"
+        canvas.drawCentredString(self.width / 2, self.height - 18, title)
+
+        canvas.setStrokeColor(colors.HexColor("#D1D5DB"))
+        canvas.setFillColor(MID_GREY)
+        canvas.setFont("Helvetica", 7)
+        for tick in range(6):
+            value = y_max * tick / 5
+            y = bottom + chart_height * tick / 5
+            canvas.line(left, y, left + chart_width, y)
+            canvas.drawRightString(left - 5, y - 2.5, f"{value:.0f}%")
+
+        canvas.setStrokeColor(BLACK)
+        canvas.setLineWidth(0.8)
+        canvas.line(left, bottom, left, bottom + chart_height)
+        canvas.line(left, bottom, left + chart_width, bottom)
+
+        count = len(self.labels)
+        x_positions = [
+            left + (chart_width * index / max(1, count - 1))
+            for index in range(count)
+        ]
+        canvas.setFillColor(BLACK)
+        for index, (x, label) in enumerate(zip(x_positions, self.labels)):
+            if count > 10 and index not in {0, count - 1} and index % math.ceil(count / 8) != 0:
+                continue
+            canvas.drawCentredString(x, bottom - 13, label[:18])
+
+        def draw_series(values: list[float], color, label: str, legend_x: float):
+            canvas.setStrokeColor(color)
+            canvas.setFillColor(color)
+            canvas.setLineWidth(2)
+            points = [
+                (x, bottom + chart_height * max(0.0, min(y_max, value)) / y_max)
+                for x, value in zip(x_positions, values)
+            ]
+            path = canvas.beginPath()
+            path.moveTo(*points[0])
+            for point in points[1:]:
+                path.lineTo(*point)
+            canvas.drawPath(path, stroke=1, fill=0)
+            for x, y in points:
+                canvas.circle(x, y, 2.3, stroke=1, fill=1)
+            legend_y = 15
+            canvas.line(legend_x, legend_y, legend_x + 20, legend_y)
+            canvas.setFont("Helvetica", 8)
+            canvas.drawString(legend_x + 25, legend_y - 3, label)
+
+        draw_series(self.planned, CYAN, "Plan", self.width / 2 - 95)
+        draw_series(self.actual, ORANGE, "Actual", self.width / 2 + 20)
+        if self.illustrative:
+            canvas.setFillColor(ORANGE)
+            canvas.setFont("Helvetica-Bold", 7.5)
+            canvas.drawCentredString(
+                self.width / 2,
+                1,
+                "ILLUSTRATIVE ONLY - provide an approved time series before final issue",
+            )
+        canvas.restoreState()
+
+
+def _normalise_appendices(value: Any, *, has_s_curve: bool) -> list[dict[str, Any]]:
+    appendices = [
+        {"number": number, "title": title, "status": "Not supplied", "content": None}
+        for number, title in DEFAULT_APPENDICES
+    ]
+    by_number = {item["number"]: item for item in appendices}
+    next_index = 9
+    for raw in _as_list(value):
+        if isinstance(raw, Mapping):
+            number = _plain(raw.get("number"))
+            title = _plain(_value(raw, "title", "name", "description"))
+            status = _plain(raw.get("status"))
+            content = _value(raw, "content", "items", "notes", default=None)
+        else:
+            number, title, status, content = "", _plain(raw), "", None
+        if not title and not number:
+            continue
+        if number in by_number:
+            item = by_number[number]
+            if title:
+                item["title"] = title
+            if status:
+                item["status"] = status
+            if content not in (None, "", [], {}):
+                item["content"] = content
+                if not status:
+                    item["status"] = "Included"
+            continue
+        item = {
+            "number": number or f"6.{next_index}",
+            "title": title or "Appendix",
+            "status": status or ("Included" if content else "Not supplied"),
+            "content": content,
+        }
+        next_index += 1
+        appendices.append(item)
+        by_number[item["number"]] = item
+    if has_s_curve:
+        by_number["6.2"]["status"] = "Included (generated)"
+    return appendices
+
+
+def _appendix_label(item: Mapping[str, Any]) -> str:
+    number = _plain(item.get("number"))
+    title = _plain(item.get("title"), "Appendix")
+    status = _plain(item.get("status"))
+    label = f"{number}    {title}".strip()
+    if status:
+        label += f"  [{status}]"
+    return label
+
+
+def _build_story(
+    report: Mapping[str, Any],
+    styles: Mapping[str, ParagraphStyle],
+) -> list[Flowable]:
+    progress = _normalise_progress(report.get("progress", report.get("overall_progress", [])))
+    include_s_curve = _coerce_bool(report.get("include_s_curve"), bool(progress))
+    curve = _normalise_s_curve(report.get("s_curve"), progress) if include_s_curve else None
+    appendices = _normalise_appendices(report.get("appendices"), has_s_curve=curve is not None)
+
+    story: list[Flowable] = [
+        Spacer(1, 1),
+        NextPageTemplate("body"),
+        PageBreak(),
+        Paragraph("Table of Contents", styles["toc_title"]),
+        Paragraph("Table of Contents", styles["toc_subtitle"]),
+    ]
+    toc = TableOfContents()
+    toc.dotsMinLevel = 0
+    toc.levelStyles = [
+        ParagraphStyle(
+            "MonthlyTOCLevel0", fontName="Helvetica", fontSize=11.5, leading=14,
+            leftIndent=10, firstLineIndent=-10, spaceBefore=3, textColor=BLACK,
+        ),
+        ParagraphStyle(
+            "MonthlyTOCLevel1", fontName="Helvetica", fontSize=10.5, leading=13,
+            leftIndent=30, firstLineIndent=-10, spaceBefore=1, textColor=BLACK,
+        ),
+    ]
+    story.extend([toc, PageBreak()])
+
+    story.extend([
+        _heading("1. Executive Summary", styles["h1"], 0),
+        _paragraph(_executive_summary(report, progress), styles["body"]),
+        Spacer(1, 6),
+        _progress_table(progress, styles),
+        Spacer(1, 18),
+        _heading("2. Safety Status", styles["h1"], 0),
+        Paragraph("<b>Status summary:</b>", styles["body"]),
+        _safety_table(report.get("safety"), styles),
+        PageBreak(),
+    ])
+
+    story.append(_heading("3. Engineering", styles["h1"], 0))
+    story.append(_heading("3.1 Status Engineering", styles["h2"], 1))
+    story.extend(_content_flowables(
+        report.get("engineering"), styles,
+        empty_message="No engineering status information supplied.", bullets=True,
+    ))
+    story.append(PageBreak())
+
+    procurement = report.get("procurement")
+    summary, po_rows, embedded_equipment, embedded_shipments = _po_rows(procurement)
+    if _plain(summary):
+        procurement_intro = [_paragraph(summary, styles["body"]), Spacer(1, 3)]
+    else:
+        procurement_intro = []
+    equipment = report.get("equipment_delivery", embedded_equipment)
+    shipments = report.get("shipments", embedded_shipments)
+
+    story.append(_heading("4. Procurement", styles["h1"], 0))
+    story.extend(procurement_intro)
+    story.append(_heading("4.1 Procurement Status", styles["h2"], 1))
+    story.extend([_procurement_table(po_rows, styles), Spacer(1, 10)])
+    story.append(_heading("4.2 Equipment Delivery Status", styles["h2"], 1))
+    equipment_rows = []
+    equipment_summary = equipment
+    if isinstance(equipment, Mapping):
+        equipment_summary = equipment.get("summary")
+        equipment_rows = [
+            row for row in _as_list(_value(equipment, "rows", "items", default=[]))
+            if isinstance(row, Mapping)
+        ]
+    elif isinstance(equipment, Sequence) and not isinstance(equipment, (str, bytes, bytearray)):
+        equipment_rows = [row for row in equipment if isinstance(row, Mapping)]
+        if equipment_rows:
+            equipment_summary = None
+    if equipment_rows:
+        story.extend([_equipment_table(equipment_rows, styles), Spacer(1, 10)])
+    else:
+        story.extend(_content_flowables(
+            equipment_summary, styles,
+            empty_message="No equipment delivery information supplied.", bullets=True,
+        ))
+    story.append(_heading("4.3 Shipment Status", styles["h2"], 1))
+    shipment_rows = [row for row in _as_list(shipments) if isinstance(row, Mapping)]
+    if isinstance(shipments, Mapping):
+        shipment_rows = [
+            row for row in _as_list(_value(shipments, "rows", "items", default=[]))
+            if isinstance(row, Mapping)
+        ]
+    story.append(_shipment_table(shipment_rows, styles))
+    story.append(PageBreak())
+
+    site = report.get("site") if isinstance(report.get("site"), Mapping) else {}
+    story.append(_heading("5. Site Services / Construction", styles["h1"], 0))
+    story.append(_heading("5.1 Project Schedule Status", styles["h2"], 1))
+    story.extend(_content_flowables(
+        _value(site, "schedule_status", "project_schedule_status"), styles,
+        empty_message="See the overall schedule appendix when supplied.",
+    ))
+    story.append(_heading("5.2 This Month Activities", styles["h2"], 1))
+    story.extend(_content_flowables(
+        _value(site, "this_month_activities", "activities", default=report.get("activities")),
+        styles, empty_message="No current-month activities supplied.", bullets=True,
+    ))
+    story.append(_heading("5.3 Planned Activities Next Month", styles["h2"], 1))
+    story.extend(_content_flowables(
+        _value(site, "next_month_activities", "planned_activities", default=report.get("planned_activities")),
+        styles, empty_message="No next-month activities supplied.", bullets=True,
+    ))
+    story.append(_heading(
+        "5.4 Area of Concern and Suggested Corrective Action", styles["h2"], 1
+    ))
+    concern_rows = _as_list(_value(site, "concerns", "constraints", default=report.get("constraints")))
+    concerns_table = _concerns_table(concern_rows, styles)
+    if concerns_table is None:
+        story.append(_paragraph("No concerns supplied.", styles["placeholder"]))
+    else:
+        story.append(concerns_table)
+    story.append(PageBreak())
+
+    story.append(_heading("6. Appendices", styles["h1"], 0))
+    for item in appendices:
+        story.append(_heading(_appendix_label(item), styles["appendix_item"], 1))
+
+    if curve is not None:
+        labels, planned, actual, illustrative = curve
+        story.extend([
+            PageBreak(),
+            Paragraph("Appendix 6.2 - Progress S-Curve", styles["h1"]),
+            Spacer(1, 10),
+            _SCurveFlowable(labels, planned, actual, illustrative=illustrative),
+        ])
+
+    for item in appendices:
+        content = item.get("content")
+        if content in (None, "", [], {}):
+            continue
+        story.extend([
+            PageBreak(),
+            Paragraph(
+                escape(f"Appendix {item['number']} - {item['title']}", quote=False),
+                styles["h1"],
+            ),
+        ])
+        story.extend(_content_flowables(
+            content, styles, empty_message="No appendix content supplied.", bullets=True,
+        ))
+    return story
+
+
+def render_monthly_report(
+    report: Mapping[str, Any],
+    *,
+    logo_path: str | os.PathLike[str] | None = None,
+) -> io.BytesIO:
+    """Render a Monthly Progress Report and return a rewound PDF buffer.
+
+    ``report`` is a reviewed runtime mapping.  The main supported keys are
+    ``status``, project/document metadata, ``revision_rows``, ``progress``,
+    ``safety``, ``engineering``, ``procurement``, ``equipment_delivery``,
+    ``shipments``, ``site``, ``appendices``, and optional ``s_curve``.
+
+    ``status`` accepts ``draft``, ``mtd``, or ``final``.  Missing/unknown
+    statuses deliberately render as DRAFT.  The function never writes to disk.
+    """
+    if not isinstance(report, Mapping):
+        raise TypeError("report must be a mapping")
+
+    status = _normalise_status(_value(report, "status", "report_mode", default="draft"))
+    resolved_logo = logo_path if logo_path is not None else report.get("logo_path")
+    styles = _styles()
+    buffer = io.BytesIO()
+    document = _MonthlyDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=BODY_LEFT,
+        rightMargin=BODY_RIGHT,
+        topMargin=BODY_TOP_MARGIN,
+        bottomMargin=BODY_BOTTOM,
+        allowSplitting=1,
+        title=f"Monthly Progress Report - {_plain(_value(report, 'project_name', 'project_title'), 'Project')}",
+        author=_plain(_value(report, "company_name", "vendor_name")),
+    )
+    cover_frame = Frame(
+        24, 24, PAGE_WIDTH - 48, PAGE_HEIGHT - 48,
+        leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0,
+        id="monthly-cover-frame",
+    )
+    body_frame = Frame(
+        BODY_LEFT, BODY_BOTTOM, BODY_WIDTH, BODY_HEIGHT,
+        leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0,
+        id="monthly-body-frame",
+    )
+    document.addPageTemplates([
+        PageTemplate(
+            id="cover",
+            frames=[cover_frame],
+            onPage=lambda canv, doc: _draw_cover(
+                canv, doc, report, status, resolved_logo
+            ),
+        ),
+        PageTemplate(
+            id="body",
+            frames=[body_frame],
+            onPage=lambda canv, doc: _draw_body_page(
+                canv, doc, report, status, resolved_logo
+            ),
+        ),
+    ])
+
+    def canvas_maker(*args, **kwargs):
+        return _NumberedCanvas(*args, status=status, **kwargs)
+
+    document.multiBuild(_build_story(report, styles), canvasmaker=canvas_maker)
+    buffer.seek(0)
+    return buffer
