@@ -18,6 +18,8 @@ _REQUIRED = {
     "PIL":        "pillow",
     "docx":       "python-docx",
     "anthropic":  "anthropic",
+    "pypdf":      "pypdf",
+    "rapidfuzz":  "rapidfuzz",
 }
 
 def _check_and_install():
@@ -79,6 +81,8 @@ import os, json, io, base64, uuid, re, string, copy, math
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for
 from PIL import Image, ImageOps, UnidentifiedImageError
+from monthly_report import archive_final_daily_record
+from monthly_report.web import get_monthly_reports_index, register_monthly_routes
 
 # ── PDF engine ────────────────────────────────────────────────────────────────
 from reportlab.lib.pagesizes import A4
@@ -368,6 +372,93 @@ OVERALL_PROGRESS_PERCENT_FIELDS = (
     'cumulative_to_date_actual',
 )
 
+DAILY_PDF_SECTION_ORDER = (
+    'report_information',
+    'weather',
+    'indirect_manpower',
+    'overall_progress',
+    'area_activities',
+    'area_manpower',
+    'constraints',
+    'remarks',
+    'sign_off',
+    'photo_documentation',
+)
+
+DAILY_PDF_SECTION_TITLES = {
+    'report_information': 'REPORT INFORMATION',
+    'weather': 'WEATHER REPORT',
+    'indirect_manpower': 'INDIRECT MANPOWER',
+    'overall_progress': 'OVERALL PROGRESS',
+    'area_activities': 'DAILY ACTIVITIES BY AREA',
+    'area_manpower':   'DIRECT MANPOWER BY AREA',
+    'constraints': 'CONSTRAINTS & ISSUES',
+    'remarks': 'REMARKS',
+    'sign_off': 'SIGN-OFF',
+    'photo_documentation': 'PHOTO DOCUMENTATION',
+}
+
+_DAILY_PDF_SECTION_ALIASES = {
+    'report_info': ('report_information',),
+    'report': ('report_information',),
+    'weather_report': ('weather',),
+    'indirect': ('indirect_manpower',),
+    'progress': ('overall_progress',),
+    # Legacy key expands to both new sections
+    'daily_activities': ('area_activities', 'area_manpower'),
+    'activities': ('area_activities',),
+    'manpower': ('area_manpower',),
+    'constraints_issues': ('constraints',),
+    'signoff': ('sign_off',),
+    'photos': ('photo_documentation',),
+    'areas': ('area_activities', 'area_manpower', 'constraints', 'remarks'),
+}
+
+
+def _normalise_pdf_section_order(value):
+    """Return a complete, safe Daily Report PDF section order.
+
+    Older reports have no ``section_order`` field, so they retain the original
+    order. Unknown/duplicate values are ignored, missing values are appended in
+    default order, and Report Information is always locked to position one.
+    """
+    requested = []
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if isinstance(item, dict):
+                item = item.get('id', item.get('key', ''))
+            if not isinstance(item, str):
+                continue
+            key = re.sub(r'[^a-z0-9]+', '_', item.strip().lower()).strip('_')
+            expanded = _DAILY_PDF_SECTION_ALIASES.get(key, (key,))
+            for section_key in expanded:
+                if section_key in DAILY_PDF_SECTION_ORDER and section_key not in requested:
+                    requested.append(section_key)
+
+    # Backward compatibility: old drafts that still carry 'daily_activities'
+    # expand it to the two new sections; insert constraints/remarks after manpower.
+    if 'area_activities' in requested and 'area_manpower' not in requested:
+        insert_at = requested.index('area_activities') + 1
+        requested.insert(insert_at, 'area_manpower')
+    if 'area_manpower' in requested and 'constraints' not in requested and 'remarks' not in requested:
+        insert_at = requested.index('area_manpower') + 1
+        requested[insert_at:insert_at] = ['constraints', 'remarks']
+
+    ordered = ['report_information']
+    ordered.extend(key for key in requested if key != 'report_information')
+    ordered.extend(key for key in DAILY_PDF_SECTION_ORDER if key not in ordered)
+    return ordered
+
+
+class _PDFSectionMarker:
+    """Internal marker used to reorder complete PDF section flowable groups."""
+
+    __slots__ = ('key', 'before')
+
+    def __init__(self, key, before=None):
+        self.key = key
+        self.before = list(before or [])
+
 def _bounded_pdf_text(value, max_chars):
     """Keep user text inside non-splittable PDF photo-card rows."""
     text = str(value or '').strip()
@@ -595,8 +686,41 @@ def generate_pdf(d, output_path, cfg):
             Spacer(1, 1.2*mm),
         ]
 
+    def SECTION(key, before=None):
+        return [_PDFSectionMarker(key, before)]
+
+    def assemble_sections(flowables, requested_order, progress_enabled):
+        """Reorder marked section groups and assign consecutive PDF numbers."""
+        prefix = []
+        chunks = {}
+        markers = {}
+        current_key = None
+        for flowable in flowables:
+            if isinstance(flowable, _PDFSectionMarker):
+                current_key = flowable.key
+                markers[current_key] = flowable
+                chunks.setdefault(current_key, [])
+            elif current_key is None:
+                prefix.append(flowable)
+            else:
+                chunks[current_key].append(flowable)
+
+        ordered_story = list(prefix)
+        section_number = 1
+        for key in _normalise_pdf_section_order(requested_order):
+            if key == 'overall_progress' and not progress_enabled:
+                continue
+            marker = markers.get(key)
+            if marker is None:
+                continue
+            ordered_story.extend(marker.before)
+            ordered_story.extend(SH(f'{section_number}.  {DAILY_PDF_SECTION_TITLES[key]}'))
+            ordered_story.extend(chunks.get(key, ()))
+            section_number += 1
+        return ordered_story
+
     # S1 info
-    story += SH('1.  REPORT INFORMATION')
+    story += SECTION('report_information')
     proj_title_val = d.get('project_title') or cfg.get('project_title', 'Electrical Installation &amp; Construction')
     info_rows = [
         ('Project No.',  _esc(proj)),
@@ -616,7 +740,7 @@ def generate_pdf(d, output_path, cfg):
     story += [itbl, Spacer(1,SECTION_GAP)]
 
     # S2 weather
-    story += SH('2.  WEATHER REPORT')
+    story += SECTION('weather')
     wx = d.get('weather',{})
     if wx:
         keys = list(wx.keys())
@@ -633,7 +757,7 @@ def generate_pdf(d, output_path, cfg):
     story.append(Spacer(1,SECTION_GAP))
 
     # S3 indirect
-    story += SH('3.  INDIRECT MANPOWER')
+    story += SECTION('indirect_manpower')
     ind = d.get('indirect_manpower',[])
     irows = [['No.','Name','Role / Position','Working Hours']]
     for i,p in enumerate(ind,1):
@@ -647,15 +771,13 @@ def generate_pdf(d, output_path, cfg):
         ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
     ]))
     story += [itbl2, Spacer(1,SECTION_GAP)]
-    story.append(CondPageBreak(32*mm))
 
-    section_number = 4
     show_overall_progress = _coerce_bool(d.get('show_overall_progress'), False)
 
     # Optional overall progress section. Missing flags default to disabled;
     # explicit true values from the current form still enable the section.
     if show_overall_progress:
-        story += SH(f'{section_number}.  OVERALL PROGRESS')
+        story += SECTION('overall_progress', [CondPageBreak(32*mm)])
         progress_rows = _normalise_overall_progress(d.get('overall_progress', []))
         if progress_rows:
             progress_h = S(
@@ -758,99 +880,102 @@ def generate_pdf(d, output_path, cfg):
         else:
             story.append(Paragraph('No overall progress reported.', st['ital_s']))
         story.append(Spacer(1, SECTION_GAP))
-        story.append(CondPageBreak(32*mm))
-        section_number += 1
 
-    # Daily activities and manpower by area
-    story += SH(f'{section_number}.  DAILY ACTIVITIES & MANPOWER BY AREA')
-    section_number += 1
+    def act_cell(lines, label):
+        parts = [Paragraph(label, st['bold_s'])]
+        for j, line in enumerate([l for l in lines if str(l).strip()], 1):
+            parts.append(Paragraph(f'{j}.  {_esc(line)}', st['sm_s']))
+        if not parts[1:]:
+            parts.append(Paragraph('—', st['ital_s']))
+        return parts
+
     areas = d.get('areas', [])
+
+    # Section: Daily Activities by Area
+    story += SECTION('area_activities', [CondPageBreak(32*mm)])
     for area_index, area in enumerate(areas):
-        aid = area.get('id','')
+        aid = area.get('id', '')
         blocks = list(AH(aid))
-
-        def act_cell(lines, label):
-            parts = [Paragraph(label, st['bold_s'])]
-            for j,line in enumerate([l for l in lines if str(l).strip()],1):
-                parts.append(Paragraph(f'{j}.  {_esc(line)}', st['sm_s']))
-            if not parts[1:]:
-                parts.append(Paragraph('—', st['ital_s']))
-            return parts
-
-        at = Table([[act_cell(area.get('activities_today',[]),'Activity Today'),
-                     act_cell(area.get('activities_tomorrow',[]),'Activity Tomorrow')]],
-                   colWidths=[CW*0.55,CW*0.45])
+        if area.get('activities_swapped'):
+            cols = [act_cell(area.get('activities_tomorrow', []), 'Activity Tomorrow'),
+                    act_cell(area.get('activities_today', []), 'Activity Today')]
+        else:
+            cols = [act_cell(area.get('activities_today', []), 'Activity Today'),
+                    act_cell(area.get('activities_tomorrow', []), 'Activity Tomorrow')]
+        at = Table([cols], colWidths=[CW * 0.55, CW * 0.45])
         at.setStyle(TableStyle([
-            ('VALIGN',(0,0),(-1,-1),'TOP'),('BOX',(0,0),(-1,-1),0.5,GREY_LINE),
-            ('INNERGRID',(0,0),(-1,-1),0.4,GREY_LINE),('BACKGROUND',(0,0),(-1,-1),GREY_BG),
-            ('TOPPADDING',(0,0),(-1,-1),3),('BOTTOMPADDING',(0,0),(-1,-1),3),
-            ('LEFTPADDING',(0,0),(-1,-1),4),('RIGHTPADDING',(0,0),(-1,-1),4)]))
-        blocks += [at, Spacer(1,1*mm)]
-
-        mp = area.get('manpower',[])
-        if mp:
-            blocks.append(Paragraph(f'Direct Manpower — {_esc(aid)}', st['sub_s']))
-            mrows = [['No.','Name','Position','Task Today','Hours']]
-            for j,p in enumerate(mp,1):
-                mrows.append([
-                    str(j), TC(p.get('name','')), TC(p.get('role','')),
-                    TC(p.get('task','')), TC(p.get('hours',''), centered=True),
-                ])
-            mt = Table(mrows, colWidths=[8*mm,38*mm,30*mm,74*mm,CW-150*mm])
-            mt.setStyle(base_ts([
-                ('ALIGN',(0,0),(0,-1),'CENTER'),('ALIGN',(4,0),(4,-1),'CENTER'),
-                ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
-            ]))
-            blocks += [mt, Spacer(1,1*mm)]
-
-        # per-area indirect manpower
-        area_ind = area.get('indirect_manpower', [])
-        if area_ind:
-            blocks.append(Paragraph(f'Indirect Manpower — {_esc(aid)}', st['sub_s']))
-            irows_a = [['No.','Name','Role / Position','Working Hours']]
-            for j, p in enumerate(area_ind, 1):
-                irows_a.append([
-                    str(j), TC(p.get('name','')), TC(p.get('role','')),
-                    TC(p.get('hours',''), centered=True),
-                ])
-            it_a = Table(irows_a, colWidths=[9*mm, 70*mm, 55*mm, CW - 134*mm])
-            it_a.setStyle(base_ts([('ALIGN',(0,0),(0,-1),'CENTER'),
-                                    ('ALIGN',(3,0),(3,-1),'CENTER'),
-                                    ('VALIGN',(0,0),(-1,-1),'MIDDLE')]))
-            blocks += [it_a, Spacer(1,1*mm)]
-
-        ct = area.get('constraints','').strip()
-        rm = area.get('remarks','').strip()
-        if ct or rm:
-            cr = []
-            if ct: cr.append([Paragraph('Constraints:',st['bold_s']),Paragraph(_esc(ct),st['body_s'])])
-            if rm: cr.append([Paragraph('Remarks:',st['bold_s']),Paragraph(_esc(rm),st['body_s'])])
-            crt = Table(cr,colWidths=[25*mm,CW-25*mm])
-            crt.setStyle(TableStyle([
-                ('VALIGN',(0,0),(-1,-1),'TOP'),('GRID',(0,0),(-1,-1),0.3,GREY_LINE),
-                ('BACKGROUND',(0,0),(0,-1),colors.HexColor('#FFF8E7')),
-                ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),2),
-                ('LEFTPADDING',(0,0),(-1,-1),4)]))
-            blocks += [crt, Spacer(1,1*mm)]
-
-        # The area-to-area gap is added below so every area ends with the same
-        # amount of whitespace, regardless of which optional tables it has.
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'), ('BOX', (0, 0), (-1, -1), 0.5, GREY_LINE),
+            ('INNERGRID', (0, 0), (-1, -1), 0.4, GREY_LINE), ('BACKGROUND', (0, 0), (-1, -1), GREY_BG),
+            ('TOPPADDING', (0, 0), (-1, -1), 3), ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('LEFTPADDING', (0, 0), (-1, -1), 4), ('RIGHTPADDING', (0, 0), (-1, -1), 4)]))
+        blocks += [at, Spacer(1, 1 * mm)]
         if blocks and isinstance(blocks[-1], Spacer):
             blocks.pop()
         story.append(KeepTogether(blocks[:4]))
         for b in blocks[4:]: story.append(b)
         if area_index < len(areas) - 1:
-            story.append(Spacer(1,2.5*mm))
+            story.append(Spacer(1, 2.5 * mm))
+    story.append(Spacer(1, SECTION_GAP))
 
-    story.append(Spacer(1,SECTION_GAP))
+    # Section: Direct Manpower by Area
+    story += SECTION('area_manpower', [CondPageBreak(32*mm)])
+    for area_index, area in enumerate(areas):
+        aid = area.get('id', '')
+        blocks = list(AH(aid))
+        mp = area.get('manpower', [])
+        if mp:
+            mrows = [['No.', 'Name', 'Role / Position', 'Working Hours']]
+            for j, p in enumerate(mp, 1):
+                mrows.append([
+                    str(j), TC(p.get('name', '')), TC(p.get('role', '')),
+                    TC(p.get('hours', ''), centered=True),
+                ])
+            mt = Table(mrows, colWidths=[9*mm, 70*mm, 55*mm, CW - 134*mm])
+            mt.setStyle(base_ts([
+                ('ALIGN', (0, 0), (0, -1), 'CENTER'),
+                ('ALIGN', (3, 0), (3, -1), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ]))
+            blocks += [mt, Spacer(1, 1 * mm)]
+        area_ind = area.get('indirect_manpower', [])
+        if area_ind:
+            blocks.append(Paragraph(f'Indirect Manpower — {_esc(aid)}', st['sub_s']))
+            irows_a = [['No.', 'Name', 'Role / Position', 'Working Hours']]
+            for j, p in enumerate(area_ind, 1):
+                irows_a.append([
+                    str(j), TC(p.get('name', '')), TC(p.get('role', '')),
+                    TC(p.get('hours', ''), centered=True),
+                ])
+            it_a = Table(irows_a, colWidths=[9*mm, 70*mm, 55*mm, CW - 134*mm])
+            it_a.setStyle(base_ts([('ALIGN', (0, 0), (0, -1), 'CENTER'),
+                                    ('ALIGN', (3, 0), (3, -1), 'CENTER'),
+                                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
+            blocks += [it_a, Spacer(1, 1 * mm)]
+        ct = area.get('constraints', '').strip()
+        rm = area.get('remarks', '').strip()
+        if ct or rm:
+            cr = []
+            if ct: cr.append([Paragraph('Constraints:', st['bold_s']), Paragraph(_esc(ct), st['body_s'])])
+            if rm: cr.append([Paragraph('Remarks:', st['bold_s']), Paragraph(_esc(rm), st['body_s'])])
+            crt = Table(cr, colWidths=[25*mm, CW - 25*mm])
+            crt.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'), ('GRID', (0, 0), (-1, -1), 0.3, GREY_LINE),
+                ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#FFF8E7')),
+                ('TOPPADDING', (0, 0), (-1, -1), 2), ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4)]))
+            blocks += [crt, Spacer(1, 1 * mm)]
+        if blocks and isinstance(blocks[-1], Spacer):
+            blocks.pop()
+        story.append(KeepTogether(blocks[:4]))
+        for b in blocks[4:]: story.append(b)
+        if area_index < len(areas) - 1:
+            story.append(Spacer(1, 2.5 * mm))
+    story.append(Spacer(1, SECTION_GAP))
     # The compact constraints/remarks pair needs about 25 mm. Keeping this
     # threshold precise prevents a taller page header from wasting the rest
     # of page one and pushing the final photo row onto a third page.
-    story.append(CondPageBreak(25*mm))
-
     # Constraints and issues
-    story += SH(f'{section_number}.  CONSTRAINTS & ISSUES')
-    section_number += 1
+    story += SECTION('constraints', [CondPageBreak(25*mm)])
     any_c = any(a.get('constraints','').strip() for a in d.get('areas',[]))
     if any_c:
         gcr = [['Area','Constraint / Issue']]
@@ -865,15 +990,11 @@ def generate_pdf(d, output_path, cfg):
     story.append(Spacer(1,SECTION_GAP))
 
     # Remarks
-    story += SH(f'{section_number}.  REMARKS')
-    section_number += 1
+    story += SECTION('remarks')
     gr = d.get('global_remarks','').strip()
     story += [Paragraph(_esc(gr) if gr else '—',st['body_s']),Spacer(1,SECTION_GAP)]
-    story.append(CondPageBreak(42*mm))
-
     # Sign-off (dynamic columns)
-    story += SH(f'{section_number}.  SIGN-OFF')
-    section_number += 1
+    story += SECTION('sign_off', [CondPageBreak(42*mm)])
     sign_offs = d.get('sign_offs', [])
     if not sign_offs:
         sign_offs = [
@@ -911,11 +1032,12 @@ def generate_pdf(d, output_path, cfg):
     story += [so, Spacer(1,SECTION_GAP)]
     PER_ROW = 3
     photo_sections = _group_report_photos(areas, PER_ROW)
-    story.append(CondPageBreak(65*mm if photo_sections else 10*mm))
-
     # Photo documentation. Each area has its own heading and grid so photos from different
     # work areas are never presented as one continuous group.
-    story += SH(f'{section_number}.  PHOTO DOCUMENTATION')
+    story += SECTION(
+        'photo_documentation',
+        [CondPageBreak(65*mm if photo_sections else 10*mm)],
+    )
     photo_documentation_title = _bounded_pdf_text(
         d.get('photo_documentation_title', ''),
         PDF_PHOTO_AREA_MAX_CHARS,
@@ -1005,6 +1127,12 @@ def generate_pdf(d, output_path, cfg):
             ('LEFTPADDING',(0,0),(-1,-1),2),('RIGHTPADDING',(0,0),(-1,-1),2),
             ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),4)]))
         story += [pg, Spacer(1,2*mm)]
+
+    story = assemble_sections(
+        story,
+        d.get('section_order'),
+        show_overall_progress,
+    )
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf,pagesize=A4,topMargin=40.5*mm,bottomMargin=11*mm,leftMargin=M,rightMargin=M)
@@ -1190,8 +1318,11 @@ DEFAULT_CONFIG = {
 # ── Flask ─────────────────────────────────────────────────────────────────────
 import hashlib, functools
 
+_SAFE_USERNAME = re.compile(r'^[a-z0-9][a-z0-9_.-]{1,63}$')
+
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'gpa-daily-report-s3cr3t-2026')
+app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_UPLOAD_BYTES', 128 * 1024 * 1024))
 
 SCRIPT_DIR        = os.path.dirname(os.path.abspath(__file__))
 # Keep mutable data outside the deployed source when DATA_DIR is configured.
@@ -1290,6 +1421,23 @@ def archive_generated_report(username, filename, pdf_bytes, entry):
     entry = dict(entry)
     entry['size_kb'] = round(len(pdf_bytes) / 1024, 1)
     append_report_index(username, entry)
+
+
+def get_owned_report_path(username, filename):
+    """Return a user's indexed Daily PDF path, never an arbitrary path."""
+    filename = str(filename or '')
+    if not filename or filename != os.path.basename(filename):
+        return None
+    if not any(row.get('filename') == filename for row in get_reports_index(username)):
+        return None
+    reports_dir = os.path.abspath(get_reports_dir(username))
+    candidate = os.path.abspath(os.path.join(reports_dir, filename))
+    try:
+        if os.path.commonpath([reports_dir, candidate]) != reports_dir:
+            return None
+    except ValueError:
+        return None
+    return candidate
 
 def login_required(f):
     @functools.wraps(f)
@@ -1435,6 +1583,10 @@ def admin_add_user():
     is_admin = bool(data.get('is_admin', False))
     if not username or len(username) < 2:
         return jsonify({'error': 'Username must be at least 2 characters.'}), 400
+    if not _SAFE_USERNAME.fullmatch(username):
+        return jsonify({
+            'error': 'Username may contain only lowercase letters, numbers, dot, underscore, and hyphen.'
+        }), 400
     users = load_users()
     if username in users:
         return jsonify({'error': f'User "{username}" already exists.'}), 400
@@ -1476,27 +1628,34 @@ def admin_reset_pin():
 @app.route('/admin/user_reports/<username>')
 @admin_required
 def admin_user_reports(username):
+    if username not in load_users():
+        return jsonify({'error': 'User not found.'}), 404
     reports = get_reports_index(username)
     return jsonify({'username': username, 'reports': reports})
 
 @app.route('/admin/download/<username>/<path:filename>')
 @admin_required
 def admin_download_report(username, filename):
-    rdir = get_reports_dir(username)
-    fpath = os.path.join(rdir, filename)
-    if not os.path.isfile(fpath):
+    if username not in load_users():
         return 'Not found', 404
-    return send_file(fpath, as_attachment=True, download_name=filename)
+    fpath = get_owned_report_path(username, filename)
+    if not fpath or not os.path.isfile(fpath):
+        return 'Not found', 404
+    return send_file(fpath, as_attachment=True, download_name=os.path.basename(filename))
 
 @app.route('/admin/delete_report', methods=['POST'])
 @admin_required
 def admin_delete_report():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     username = (data.get('username') or '').strip()
     filename = (data.get('filename') or '').strip()
     if not username or not filename:
         return jsonify({'error': 'Missing params'}), 400
-    fpath = os.path.join(get_reports_dir(username), filename)
+    if username not in load_users():
+        return jsonify({'error': 'User not found'}), 404
+    fpath = get_owned_report_path(username, filename)
+    if not fpath:
+        return jsonify({'error': 'Report not found'}), 404
     if os.path.isfile(fpath):
         os.remove(fpath)
     idx = [r for r in get_reports_index(username) if r.get('filename') != filename]
@@ -1511,8 +1670,11 @@ def my_reports():
     username = session['username']
     cfg = load_config()
     reports  = get_reports_index(username)
+    monthly_reports = get_monthly_reports_index(DATA_DIR, username)
     return render_template('reports.html',
         reports=reports,
+        monthly_reports=monthly_reports,
+        projects=normalize_projects(cfg.get('projects', DEFAULT_PROJECTS)),
         username=username,
         project_start_date=cfg.get('project_start_date',''),
         is_admin=session.get('is_admin', False))
@@ -1521,17 +1683,20 @@ def my_reports():
 @login_required
 def download_report(filename):
     username = session['username']
-    fpath = os.path.join(get_reports_dir(username), filename)
-    if not os.path.isfile(fpath):
+    fpath = get_owned_report_path(username, filename)
+    if not fpath or not os.path.isfile(fpath):
         return 'Not found', 404
-    return send_file(fpath, as_attachment=True, download_name=filename)
+    return send_file(fpath, as_attachment=True, download_name=os.path.basename(filename))
 
 @app.route('/reports/delete', methods=['POST'])
 @login_required
 def delete_report():
     username = session['username']
-    filename = (request.json.get('filename') or '').strip()
-    fpath = os.path.join(get_reports_dir(username), filename)
+    data = request.get_json(silent=True) or {}
+    filename = (data.get('filename') or '').strip()
+    fpath = get_owned_report_path(username, filename)
+    if not fpath:
+        return jsonify({'error': 'Report not found'}), 404
     if os.path.isfile(fpath):
         os.remove(fpath)
     idx = [r for r in get_reports_index(username) if r.get('filename') != filename]
@@ -1555,7 +1720,7 @@ def check_report_date():
 def health():
     import sys, importlib
     checks = {}
-    for mod in ['flask', 'reportlab', 'PIL', 'json', 'os', 'io', 'base64']:
+    for mod in ['flask', 'reportlab', 'PIL', 'pypdf', 'rapidfuzz', 'json', 'os', 'io', 'base64']:
         try:
             importlib.import_module(mod)
             checks[mod] = 'OK'
@@ -1734,6 +1899,9 @@ def generate():
         return jsonify({'error': 'Invalid report data'}), 400
 
     try:
+        # Keep an unmodified copy for the immutable final JSON archive.  The
+        # PDF resolver embeds photos as base64 and mutates its input.
+        canonical_payload = copy.deepcopy(payload)
         d = resolve_photos(payload, username)
         cfg = load_config()
         date_str = _safe_report_filename_part(d.get('date'), 'Report').replace(' ', '_')
@@ -1746,17 +1914,52 @@ def generate():
 
     pdf_bytes = buf.getvalue()
     archive_failed = False
+    json_archive_failed = False
+    pdf_archive_failed = False
+    canonical_record = None
     try:
-        archive_generated_report(username, fname, pdf_bytes, {
+        generated_at = datetime.now().astimezone().isoformat(timespec='seconds')
+        photo_paths = {}
+        temp_photos_dir = get_temp_photos_dir(username)
+        for area in canonical_payload.get('areas', []):
+            for photo in area.get('photos', []):
+                photo_name = str(photo.get('photo_filename') or '')
+                if not _SAFE_PHOTO.match(photo_name):
+                    continue
+                photo_path = os.path.join(temp_photos_dir, photo_name)
+                if os.path.isfile(photo_path):
+                    photo_paths[photo_name] = photo_path
+        canonical_record = archive_final_daily_record(
+            DATA_DIR,
+            username,
+            canonical_payload,
+            generated_at=generated_at,
+            photo_paths=photo_paths,
+        )
+    except Exception:
+        archive_failed = True
+        json_archive_failed = True
+        app.logger.exception('Could not archive final JSON for user %s', username)
+
+    try:
+        archive_entry = {
             'filename':     fname,
             'date':         d.get('date',''),
             'day_no':       d.get('day_no',''),
             'project_no':   d.get('project_no',''),
             'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
-        })
+        }
+        if canonical_record:
+            archive_entry.update({
+                'canonical_report_id': canonical_record.get('report_id', ''),
+                'canonical_revision': canonical_record.get('revision', 1),
+                'json_filename': f"{canonical_record.get('report_id', '')}.json",
+            })
+        archive_generated_report(username, fname, pdf_bytes, archive_entry)
     except Exception:
         # A temporary My Reports problem must not block a valid PDF download.
         archive_failed = True
+        pdf_archive_failed = True
         app.logger.exception('Could not archive generated PDF for user %s', username)
 
     buf.seek(0)
@@ -1767,6 +1970,8 @@ def generate():
         mimetype='application/pdf',
     )
     response.headers['X-Report-Archive-Status'] = 'failed' if archive_failed else 'saved'
+    response.headers['X-Report-Pdf-Archive-Status'] = 'failed' if pdf_archive_failed else 'saved'
+    response.headers['X-Report-Json-Archive-Status'] = 'failed' if json_archive_failed else 'saved'
     return response
 
 @app.route('/save_draft', methods=['POST'])
@@ -2583,8 +2788,20 @@ def admin_merge_submissions():
     return jsonify({'ok': True, 'merged': len(incoming)})
 
 
+# Monthly Report routes use the same authenticated Flask session and persistent
+# DATA_DIR as the Daily Report application.
+register_monthly_routes(
+    app,
+    data_dir=DATA_DIR,
+    config_provider=load_config,
+    activity_logger=log_activity,
+)
+
+
 if __name__ == '__main__':
     import webbrowser, threading, time, socket
+
+    bind_host = os.environ.get('DAILY_REPORT_HOST', '0.0.0.0')
 
     try:
         local_ip = socket.gethostbyname(socket.gethostname())
@@ -2596,7 +2813,10 @@ if __name__ == '__main__':
     print("   Daily Report App v2  --  PT. GPA")
     print("  ============================================")
     print(f"  Local  : http://localhost:5050")
-    print(f"  Network: http://{local_ip}:5050")
+    if bind_host in ('127.0.0.1', 'localhost', '::1'):
+        print("  Network: disabled (localhost only)")
+    else:
+        print(f"  Network: http://{local_ip}:5050")
     print("  Browser opening automatically...")
     print("  To stop: close this window or press Ctrl+C")
     print()
@@ -2606,4 +2826,4 @@ if __name__ == '__main__':
         webbrowser.open('http://localhost:5050')
 
     threading.Thread(target=_open_browser, daemon=True).start()
-    app.run(host='0.0.0.0', port=5050, debug=False)
+    app.run(host=bind_host, port=5050, debug=False)

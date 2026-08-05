@@ -15,8 +15,38 @@
       --navbar-bg: #003366;
     }
     body { background: #f0f4f8; font-size: 0.9rem; }
-    .app-navbar { background: var(--navbar-bg) !important; padding: 8px 16px; position: sticky; top:0; z-index:900; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+    .app-navbar { background: var(--navbar-bg) !important; padding: 8px 16px; position: sticky; top:0; z-index:900;
+                  box-shadow: 0 2px 8px rgba(0,0,0,.25); display:flex; flex-direction:column;
+                  align-items:stretch; gap:6px; overflow:hidden; }
+    .app-navbar-title { flex:0 0 auto; }
+    .app-navbar-actions { display:flex; align-items:center; gap:4px; width:100%; min-width:0;
+                          flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden; padding-bottom:2px;
+                          scrollbar-width:thin; scrollbar-color:rgba(255,255,255,.45) transparent; }
+    .app-navbar-actions::-webkit-scrollbar { height:5px; }
+    .app-navbar-actions::-webkit-scrollbar-thumb { background:rgba(255,255,255,.45); border-radius:10px; }
+    .app-navbar-actions::-webkit-scrollbar-track { background:transparent; }
+    .app-navbar-actions .btn { white-space:nowrap; }
     .section-hdr { background: var(--primary); color: white; font-weight: 600; font-size: 0.85rem; padding: 8px 14px; }
+    /* PDF section order is arranged in a dedicated pre-preview dialog. */
+    #pdfSectionOrderList { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:7px; }
+    .pdf-order-item { display:flex; align-items:center; gap:8px; min-height:48px; padding:7px 9px;
+                      background:#fff; border:1px solid #cbd5e1; border-radius:7px;
+                      transition:border-color .15s ease, box-shadow .15s ease, opacity .15s ease; }
+    .pdf-order-item:not(.is-locked):not(.is-disabled):hover { border-color:var(--secondary); }
+    .pdf-order-item.is-dragging { opacity:.55; border-color:var(--primary); box-shadow:0 5px 16px rgba(0,51,102,.2); }
+    .pdf-order-item.is-locked { background:#f3f6f9; }
+    .pdf-order-item.is-disabled { background:#f7f7f7; color:#777; }
+    .pdf-order-number { flex:0 0 31px; height:31px; border-radius:50%; background:var(--primary); color:#fff;
+                        display:inline-flex; align-items:center; justify-content:center; font-weight:700; font-size:.78rem; }
+    .pdf-order-item.is-disabled .pdf-order-number { background:#adb5bd; }
+    .pdf-order-handle { border:0; background:transparent; color:var(--primary); padding:4px 6px;
+                        cursor:grab; touch-action:none; user-select:none; line-height:1; font-size:1.1rem;
+                        border-radius:4px; }
+    .pdf-order-handle:hover, .pdf-order-handle:focus-visible { background:#e4eef7; outline:2px solid var(--secondary); outline-offset:1px; }
+    .pdf-order-handle:active { cursor:grabbing; }
+    .pdf-order-actions { display:flex; gap:4px; margin-left:auto; }
+    .pdf-order-actions .btn { width:31px; padding:2px 4px; }
+    body.pdf-section-reordering { cursor:grabbing; user-select:none; }
     .overall-progress-table { min-width: 1420px; table-layout: fixed; font-size: .69rem; }
     .overall-progress-table th { background: var(--secondary); color: white; text-align: center;
                                  vertical-align: middle; padding: 5px 4px; line-height: 1.15; }
@@ -55,6 +85,7 @@
     .sig-prev.show { display: block; }
     .sig-ph { font-size: .72rem; color: #bbb; text-align: center; padding: 8px; pointer-events: none; }
     /* Sign-off column card */
+    .area-section-hdr { background: var(--light-bg); border-radius: 4px; padding: 5px 8px; margin-bottom: 8px; }
     .so-col-card { border: 1px solid #d0d8e4; border-radius: 6px; padding: 10px;
                    background: #fff; position: relative; }
     .so-col-card:hover { border-color: var(--primary); }
@@ -112,8 +143,8 @@
     #previewModal .modal-dialog { max-width: 860px; }
     #previewFrame { width: 100%; height: 72vh; border: none; }
     /* Navbar btn group */
-    .nav-group { display: flex; gap: 4px; align-items: center; }
-    .nav-divider { width: 1px; height: 24px; background: rgba(255,255,255,.3); margin: 0 4px; }
+    .nav-group { display:flex; gap:4px; align-items:center; flex:0 0 auto; white-space:nowrap; }
+    .nav-divider { width:1px; height:24px; background:rgba(255,255,255,.3); margin:0 4px; flex:0 0 1px; }
     @media (max-width: 768px) {
       .app-navbar .btn { font-size: .72rem; padding: 3px 7px; }
       .nav-divider { display: none; }
@@ -124,10 +155,21 @@
                   color:#fff; font-size:.84rem; box-shadow:0 3px 14px rgba(0,0,0,.22);
                   animation:fadeSlideIn .2s ease; }
     @keyframes fadeSlideIn { from{opacity:0;transform:translateY(-8px)} to{opacity:1;transform:translateY(0)} }
+    #autosave-indicator { position:fixed; right:18px; bottom:18px; z-index:9998; min-width:180px;
+                          padding:9px 14px; border-radius:8px; color:#fff; font-size:.8rem; font-weight:600;
+                          box-shadow:0 3px 14px rgba(0,0,0,.24); pointer-events:none;
+                          opacity:0; transform:translateY(8px); visibility:hidden;
+                          transition:opacity .3s ease, transform .3s ease, visibility 0s linear .3s; }
+    #autosave-indicator.show { opacity:1; transform:translateY(0); visibility:visible;
+                               transition:opacity .3s ease, transform .3s ease; }
+    @media (prefers-reduced-motion: reduce) {
+      #autosave-indicator { transition:none; transform:none; }
+    }
   </style>
 </head>
 <body>
 <div id="toast-wrap"></div>
+<div id="autosave-indicator" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <!-- PDF Generation Progress Bar -->
 <div id="gen-progress" style="display:none;position:fixed;top:0;left:0;right:0;z-index:10000;background:var(--primary);padding:10px 20px;box-shadow:0 2px 8px rgba(0,0,0,.4);">
@@ -148,12 +190,12 @@
 </div>
 
 <!-- ═══ NAVBAR ═══ -->
-<nav class="app-navbar d-flex align-items-center gap-2 flex-wrap">
-  <span class="text-white fw-bold me-2" style="font-size:.92rem;white-space:nowrap;">📋 Daily Report — PT. GPA</span>
-  <div class="d-flex gap-1 ms-auto flex-wrap align-items-center">
+<nav class="app-navbar">
+  <span class="app-navbar-title text-white fw-bold" style="font-size:.92rem;white-space:nowrap;">📋 Daily Report — PT. GPA</span>
+  <div class="app-navbar-actions" tabindex="0" aria-label="Daily Report menu; scroll horizontally when needed">
     <!-- Draft controls -->
     <div class="nav-group">
-      <button class="btn btn-sm btn-outline-light" onclick="saveDraft(true)" title="Auto-saves every 60s">💾 Save</button>
+      <button class="btn btn-sm btn-outline-light" onclick="saveDraft()" title="Auto-saves every 60s">💾 Save</button>
       <button class="btn btn-sm btn-outline-light" onclick="loadDraftFromServer()" title="Load last saved draft">📂 Load</button>
       <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#versionsModal" title="Restore a previous draft snapshot">🕐 Versions</button>
       <button class="btn btn-sm btn-outline-light" onclick="exportDraft()" title="Download draft as JSON">⬇ Export</button>
@@ -182,7 +224,6 @@
       </button>
       <a href="/admin" class="btn btn-sm btn-outline-light">🛡 Admin</a>
       {% endif %}
-      <span id="autosave-indicator" class="text-white opacity-50" style="font-size:.72rem;padding:0 .25rem;" title="Last auto-saved time"></span>
       <span class="text-white opacity-75" style="font-size:.78rem;padding:0 .25rem;">{{ username }}</span>
       <a href="/logout" class="btn btn-sm btn-outline-danger">Logout</a>
     </div>
@@ -191,9 +232,13 @@
 
 <div class="container-fluid py-3" style="max-width:1140px;">
 
+<div id="reportSections">
+
 <!-- ── S1: Report Information ── -->
-<div class="card mb-3 border-0 shadow-sm">
-  <div class="card-header section-hdr">📋 1 · Report Information</div>
+<div class="card mb-3 border-0 shadow-sm report-section">
+  <div class="card-header section-hdr">
+    <span>📋 <span class="form-step-number">Step 1 · </span>Report Information</span>
+  </div>
   <div class="card-body">
     <div class="row g-2">
       <div class="col-6 col-md-3">
@@ -247,8 +292,10 @@
 </div>
 
 <!-- ── S2: Weather ── -->
-<div class="card mb-3 border-0 shadow-sm">
-  <div class="card-header section-hdr">🌤️ 2 · Weather Report</div>
+<div class="card mb-3 border-0 shadow-sm report-section">
+  <div class="card-header section-hdr">
+    <span>🌤️ <span class="form-step-number">Step 2 · </span>Weather Report</span>
+  </div>
   <div class="card-body">
     <div class="row g-2">
       <div class="col-6 col-md-2">
@@ -290,10 +337,10 @@
 </div>
 
 <!-- ── S3: Indirect Manpower (Global) ── -->
-<div class="card mb-3 border-0 shadow-sm">
+<div class="card mb-3 border-0 shadow-sm report-section">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center">
-    <span>👔 3 · Indirect Manpower <span class="badge bg-secondary ms-1" style="font-size:.68rem;">Global</span></span>
-    <div class="d-flex gap-2">
+    <span>👔 <span class="form-step-number">Step 3 · </span>Indirect Manpower <span class="badge bg-secondary ms-1" style="font-size:.68rem;">Global</span></span>
+    <div class="d-flex gap-2 align-items-center">
       <button class="btn btn-sm btn-outline-light" style="font-size:.72rem;" onclick="loadYesterdayCrew()" title="Copy entire crew from last saved draft">🔄 Yesterday's Crew</button>
       <button class="btn btn-sm btn-outline-light" onclick="addIndirectRow()">+ Add Person</button>
     </div>
@@ -310,7 +357,7 @@
 </div>
 
 <!-- S4: Overall Progress -->
-<div class="card mb-3 border-0 shadow-sm" id="overallProgressCard">
+<div class="card mb-3 border-0 shadow-sm report-section" id="overallProgressCard">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center flex-wrap gap-2">
     <span>📈 <span id="overallProgressSectionNo"></span>Overall Progress <span id="overallProgressInactiveBadge" class="badge bg-secondary ms-1">Inactive</span></span>
     <div class="d-flex align-items-center flex-wrap gap-3">
@@ -379,10 +426,12 @@
 </div>
 
 <!-- ── S5: Areas ── -->
-<div class="card mb-3 border-0 shadow-sm">
+<div class="card mb-3 border-0 shadow-sm report-section">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center">
-    <span>📍 <span id="areasSectionNo">4 · </span>Daily Activities &amp; Manpower by Area</span>
-    <button class="btn btn-sm btn-outline-light" onclick="addAreaBlock()">+ Add Area</button>
+    <span>📍 <span id="areasSectionNo">Step 4 · </span>Daily Activities &amp; Manpower by Area</span>
+    <div class="d-flex gap-2 align-items-center">
+      <button class="btn btn-sm btn-outline-light" onclick="addAreaBlock()">+ Add Area</button>
+    </div>
   </div>
   <div class="card-body p-2">
     <div class="mb-2 px-1">
@@ -398,10 +447,12 @@
 </div>
 
 <!-- ── S6: Sign-Off Builder ── -->
-<div class="card mb-3 border-0 shadow-sm">
+<div class="card mb-3 border-0 shadow-sm report-section">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center">
-    <span>✍️ <span id="signOffSectionNo">5 · </span>Sign-Off Columns</span>
-    <button class="btn btn-sm btn-outline-light" onclick="addSignOffCol()">+ Add Column</button>
+    <span>✍️ <span id="signOffSectionNo">Step 5 · </span>Sign-Off Columns</span>
+    <div class="d-flex gap-2 align-items-center">
+      <button class="btn btn-sm btn-outline-light" onclick="addSignOffCol()">+ Add Column</button>
+    </div>
   </div>
   <div class="card-body p-2">
     <div class="row g-2" id="signOffContainer">
@@ -410,9 +461,11 @@
   </div>
 </div>
 
+</div><!-- /reportSections -->
+
 <!-- Action buttons -->
 <div class="d-flex gap-3 justify-content-end mb-5 flex-wrap">
-  <button class="btn btn-outline-secondary px-4" onclick="saveDraft(true)">💾 Save Draft</button>
+  <button class="btn btn-outline-secondary px-4" onclick="saveDraft()">💾 Save Draft</button>
   <button class="btn btn-outline-info px-4" onclick="previewPDF()">👁 Preview PDF</button>
   <button class="btn fw-bold text-white px-5 py-2" style="background:var(--accent);border-color:var(--accent);font-size:1rem;" onclick="generatePDF()">📄 Generate PDF</button>
 </div>
@@ -442,6 +495,39 @@
   <div id="aiChatInput">
     <textarea id="aiMsgBox" rows="2" placeholder="e.g. Hari ini kerja di MA-14, pasang cable tray..."></textarea>
     <button id="aiSendBtn" onclick="sendAIMessage()">Send</button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════
+     ARRANGE PDF SECTIONS MODAL
+═══════════════════════════════════════════════════════════ -->
+<div class="modal fade" id="pdfSectionOrderModal" tabindex="-1" aria-labelledby="pdfSectionOrderTitle" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable" style="max-width:650px;">
+    <div class="modal-content">
+      <div class="modal-header py-2" style="background:var(--primary);">
+        <h5 class="modal-title text-white fs-6" id="pdfSectionOrderTitle">☰ Arrange PDF Sections</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted mb-3" style="font-size:.8rem;">
+          Set the order used in Preview and the generated PDF. Drag the handle or use the arrow buttons.
+          The Daily Report form itself stays in its normal order.
+        </p>
+        <ul id="pdfSectionOrderList" aria-label="PDF section order"></ul>
+        <div class="alert alert-light border mt-3 mb-0 py-2" style="font-size:.75rem;">
+          <strong>Note:</strong> Overall Progress is kept in this order but is not included in the PDF while its toggle is OFF.
+        </div>
+      </div>
+      <div class="modal-footer py-2 justify-content-between">
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="resetPDFSectionOrderBtn" onclick="resetPendingPDFSectionOrder()">↺ Reset Default</button>
+        <div class="d-flex gap-2">
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-sm btn-primary" id="confirmPDFSectionOrderBtn" onclick="confirmPDFSectionOrder()">
+            Continue to Preview
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -973,6 +1059,355 @@ function lookupMp(name) {
 let _aidx = 0;
 let _soidx = 0;
 
+// The form stays fixed. This separate canonical order controls PDF output only.
+const DEFAULT_PDF_SECTION_ORDER = [
+  'report_information',
+  'weather',
+  'indirect_manpower',
+  'overall_progress',
+  'area_activities',
+  'area_manpower',
+  'constraints',
+  'remarks',
+  'sign_off',
+  'photo_documentation',
+];
+const PDF_SECTION_DEFINITIONS = {
+  report_information: { label:'Report Information', description:'Project, date, customer, and report details' },
+  weather:             { label:'Weather Report', description:'Morning, afternoon, evening, and work impact' },
+  indirect_manpower:   { label:'Indirect Manpower', description:'Global indirect manpower list' },
+  overall_progress:    { label:'Overall Progress', description:'Included only when the Overall Progress toggle is ON' },
+  area_activities:     { label:'Daily Activities', description:'Activity today and tomorrow for each area' },
+  area_manpower:       { label:'Direct Manpower', description:'Manpower table for each area' },
+  constraints:         { label:'Constraints & Issues', description:'Summary of constraints entered for each area' },
+  remarks:             { label:'Remarks', description:'Global report remarks' },
+  sign_off:            { label:'Sign-Off', description:'Approval names, roles, and signatures' },
+  photo_documentation: { label:'Photo Documentation', description:'Photos and captions entered inside each area' },
+};
+const PDF_SECTION_ALIASES = {
+  report_info: ['report_information'],
+  report: ['report_information'],
+  weather_report: ['weather'],
+  indirect: ['indirect_manpower'],
+  progress: ['overall_progress'],
+  daily_activities: ['area_activities', 'area_manpower'],
+  activities: ['area_activities'],
+  manpower: ['area_manpower'],
+  constraints_issues: ['constraints'],
+  signoff: ['sign_off'],
+  photos: ['photo_documentation'],
+  areas: ['area_activities', 'area_manpower', 'constraints', 'remarks'],
+};
+
+let _pdfSectionOrder = [...DEFAULT_PDF_SECTION_ORDER];
+let _pendingPDFSectionOrder = null;
+let _pdfSectionOrderModal = null;
+let _pdfOrderConfirming = false;
+let _pdfOrderModalReady = false;
+let _draggedPDFOrderItem = null;
+let _draggedPDFOrderHandle = null;
+let _draggedPDFOrderPointerId = null;
+
+function getSectionOrder() {
+  return [..._pdfSectionOrder];
+}
+
+function normaliseSavedSectionOrder(sectionOrder) {
+  if (!Array.isArray(sectionOrder)) sectionOrder = [];
+  const known = new Set(DEFAULT_PDF_SECTION_ORDER);
+  const requested = [];
+  sectionOrder.forEach(item => {
+    if (item && typeof item === 'object') item = item.id ?? item.key ?? '';
+    if (typeof item !== 'string') return;
+    const cleanKey = item.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    const expanded = PDF_SECTION_ALIASES[cleanKey] || [cleanKey];
+    expanded.forEach(key => {
+      if (known.has(key) && !requested.includes(key)) requested.push(key);
+    });
+  });
+  // Old drafts used 'daily_activities' which expands to both new keys via alias.
+  // If area_activities landed but area_manpower didn't, insert it right after.
+  if (requested.includes('area_activities') && !requested.includes('area_manpower')) {
+    requested.splice(requested.indexOf('area_activities') + 1, 0, 'area_manpower');
+  }
+  // Insert constraints/remarks after area_manpower if missing.
+  if (requested.includes('area_manpower') && !requested.includes('constraints') && !requested.includes('remarks')) {
+    requested.splice(requested.indexOf('area_manpower') + 1, 0, 'constraints', 'remarks');
+  }
+  const result = ['report_information'];
+  requested.forEach(key => { if (key !== 'report_information') result.push(key); });
+  DEFAULT_PDF_SECTION_ORDER.forEach(key => {
+    if (!result.includes(key)) result.push(key);
+  });
+  return result;
+}
+
+function applySectionOrder(sectionOrder) {
+  _pdfSectionOrder = normaliseSavedSectionOrder(sectionOrder);
+}
+
+function updateFormStepNumbering() {
+  const firstSteps = document.querySelectorAll('.form-step-number');
+  firstSteps.forEach((label, index) => { label.textContent = `Step ${index + 1} · `; });
+  const overallEnabled = document.getElementById('showOverallProgress')?.checked === true;
+  const overallLabel = document.getElementById('overallProgressSectionNo');
+  const areasLabel = document.getElementById('areasSectionNo');
+  const signOffLabel = document.getElementById('signOffSectionNo');
+  let nextStep = 4;
+  if (overallLabel) overallLabel.textContent = overallEnabled ? `Step ${nextStep++} · ` : 'Optional · ';
+  if (areasLabel) areasLabel.textContent = `Step ${nextStep++} · `;
+  if (signOffLabel) signOffLabel.textContent = `Step ${nextStep} · `;
+}
+
+function isOverallProgressIncluded() {
+  return document.getElementById('showOverallProgress')?.checked === true;
+}
+
+function syncPendingPDFSectionOrderFromDOM() {
+  const list = document.getElementById('pdfSectionOrderList');
+  if (!list) return;
+  _pendingPDFSectionOrder = [...list.querySelectorAll('.pdf-order-item')]
+    .map(item => item.dataset.sectionKey)
+    .filter(Boolean);
+}
+
+function refreshPDFSectionOrderList() {
+  const list = document.getElementById('pdfSectionOrderList');
+  if (!list) return;
+  const items = [...list.querySelectorAll('.pdf-order-item')];
+  let outputNumber = 0;
+  items.forEach((item, index) => {
+    const key = item.dataset.sectionKey;
+    const disabled = key === 'overall_progress' && !isOverallProgressIncluded();
+    const locked = key === 'report_information';
+    if (!disabled) outputNumber += 1;
+    const number = item.querySelector('.pdf-order-number');
+    if (number) number.textContent = disabled ? '—' : String(outputNumber);
+    item.classList.toggle('is-disabled', disabled);
+    item.classList.toggle('is-locked', locked);
+    item.setAttribute('aria-disabled', String(disabled));
+
+    const handle = item.querySelector('.pdf-order-handle');
+    if (handle) {
+      handle.disabled = locked || disabled;
+      handle.title = locked ? 'Report Information is fixed first'
+        : disabled ? 'Turn Overall Progress ON to include and arrange it' : `Drag ${PDF_SECTION_DEFINITIONS[key].label}`;
+    }
+    const up = item.querySelector('[data-order-action="up"]');
+    const down = item.querySelector('[data-order-action="down"]');
+    if (up) up.disabled = locked || disabled || index <= 1;
+    if (down) down.disabled = locked || disabled || index >= items.length - 1;
+
+    const status = item.querySelector('.pdf-order-status');
+    if (status) {
+      if (locked) {
+        status.textContent = 'Locked first';
+        status.className = 'pdf-order-status badge bg-secondary';
+      } else if (disabled) {
+        status.textContent = 'Not in PDF (OFF)';
+        status.className = 'pdf-order-status badge bg-light text-secondary border';
+      } else {
+        status.textContent = '';
+        status.className = 'pdf-order-status';
+      }
+    }
+  });
+}
+
+function renderPDFSectionOrderList() {
+  const list = document.getElementById('pdfSectionOrderList');
+  if (!list || !_pendingPDFSectionOrder) return;
+  list.innerHTML = '';
+  _pendingPDFSectionOrder.forEach(key => {
+    const definition = PDF_SECTION_DEFINITIONS[key];
+    if (!definition) return;
+    const item = document.createElement('li');
+    item.className = 'pdf-order-item';
+    item.dataset.sectionKey = key;
+    item.innerHTML = `
+      <span class="pdf-order-number" aria-hidden="true"></span>
+      <button type="button" class="pdf-order-handle" aria-label="Drag ${esc(definition.label)}">☰</button>
+      <div class="flex-grow-1" style="min-width:0;">
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <strong style="font-size:.82rem;">${esc(definition.label)}</strong>
+          <span class="pdf-order-status"></span>
+        </div>
+        <div class="text-muted" style="font-size:.7rem;">${esc(definition.description)}</div>
+      </div>
+      <div class="pdf-order-actions">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-order-action="up"
+                aria-label="Move ${esc(definition.label)} up" title="Move up">↑</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-order-action="down"
+                aria-label="Move ${esc(definition.label)} down" title="Move down">↓</button>
+      </div>`;
+    list.appendChild(item);
+  });
+  refreshPDFSectionOrderList();
+}
+
+function movePendingPDFSection(key, direction) {
+  if (_pdfOrderConfirming || !_pendingPDFSectionOrder || key === 'report_information'
+      || (key === 'overall_progress' && !isOverallProgressIncluded())) return;
+  const index = _pendingPDFSectionOrder.indexOf(key);
+  const targetIndex = index + direction;
+  if (index < 0 || targetIndex < 1 || targetIndex >= _pendingPDFSectionOrder.length) return;
+  _pendingPDFSectionOrder.splice(index, 1);
+  _pendingPDFSectionOrder.splice(targetIndex, 0, key);
+  renderPDFSectionOrderList();
+  document.querySelector(`.pdf-order-item[data-section-key="${key}"] .pdf-order-handle`)?.focus();
+}
+
+function resetPendingPDFSectionOrder() {
+  if (_pdfOrderConfirming) return;
+  _pendingPDFSectionOrder = [...DEFAULT_PDF_SECTION_ORDER];
+  renderPDFSectionOrderList();
+  toast('Default PDF order restored. Click Continue to save it.', 'info');
+}
+
+function finishPDFSectionDrag() {
+  if (!_draggedPDFOrderItem) return;
+  if (_draggedPDFOrderHandle && _draggedPDFOrderPointerId !== null
+      && _draggedPDFOrderHandle.hasPointerCapture?.(_draggedPDFOrderPointerId)) {
+    _draggedPDFOrderHandle.releasePointerCapture(_draggedPDFOrderPointerId);
+  }
+  _draggedPDFOrderItem.classList.remove('is-dragging');
+  _draggedPDFOrderHandle?.setAttribute('aria-grabbed', 'false');
+  document.body.classList.remove('pdf-section-reordering');
+  syncPendingPDFSectionOrderFromDOM();
+  refreshPDFSectionOrderList();
+  _draggedPDFOrderItem = null;
+  _draggedPDFOrderHandle = null;
+  _draggedPDFOrderPointerId = null;
+}
+
+function setPDFSectionOrderModalBusy(busy) {
+  const modalElement = document.getElementById('pdfSectionOrderModal');
+  if (modalElement) modalElement.setAttribute('aria-busy', String(busy));
+  if (busy) {
+    modalElement?.querySelectorAll('button').forEach(control => { control.disabled = true; });
+  } else {
+    modalElement?.querySelectorAll('[data-bs-dismiss="modal"], #resetPDFSectionOrderBtn')
+      .forEach(control => { control.disabled = false; });
+    refreshPDFSectionOrderList();
+  }
+  const button = document.getElementById('confirmPDFSectionOrderBtn');
+  if (button) {
+    button.disabled = busy;
+    button.textContent = busy ? 'Saving…' : 'Continue to Preview';
+  }
+}
+
+function initPDFSectionOrderModal() {
+  const modalElement = document.getElementById('pdfSectionOrderModal');
+  const list = document.getElementById('pdfSectionOrderList');
+  if (!modalElement || !list) return;
+
+  modalElement.addEventListener('show.bs.modal', () => { _pdfOrderModalReady = false; });
+  modalElement.addEventListener('shown.bs.modal', () => { _pdfOrderModalReady = true; });
+
+  list.addEventListener('click', event => {
+    const button = event.target.closest('[data-order-action]');
+    if (!button) return;
+    const item = button.closest('.pdf-order-item');
+    movePendingPDFSection(item?.dataset.sectionKey, button.dataset.orderAction === 'up' ? -1 : 1);
+  });
+
+  list.addEventListener('keydown', event => {
+    const handle = event.target.closest('.pdf-order-handle');
+    if (!handle || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
+    event.preventDefault();
+    movePendingPDFSection(handle.closest('.pdf-order-item')?.dataset.sectionKey, event.key === 'ArrowUp' ? -1 : 1);
+  });
+
+  list.addEventListener('pointerdown', event => {
+    const handle = event.target.closest('.pdf-order-handle');
+    if (_pdfOrderConfirming || !handle || handle.disabled || event.button > 0) return;
+    const item = handle.closest('.pdf-order-item');
+    if (!item) return;
+    event.preventDefault();
+    _draggedPDFOrderItem = item;
+    _draggedPDFOrderHandle = handle;
+    _draggedPDFOrderPointerId = event.pointerId;
+    item.classList.add('is-dragging');
+    handle.setAttribute('aria-grabbed', 'true');
+    handle.setPointerCapture?.(event.pointerId);
+    document.body.classList.add('pdf-section-reordering');
+  });
+
+  list.addEventListener('pointermove', event => {
+    if (_pdfOrderConfirming || !_draggedPDFOrderItem || event.pointerId !== _draggedPDFOrderPointerId) return;
+    event.preventDefault();
+    const modalBody = list.closest('.modal-body');
+    if (modalBody) {
+      const bodyRect = modalBody.getBoundingClientRect();
+      if (event.clientY < bodyRect.top + 45) modalBody.scrollBy(0, -12);
+      else if (event.clientY > bodyRect.bottom - 45) modalBody.scrollBy(0, 12);
+    }
+    const candidates = [...list.querySelectorAll('.pdf-order-item')]
+      .filter(item => item !== _draggedPDFOrderItem && item.dataset.sectionKey !== 'report_information');
+    const insertBefore = candidates.find(item => {
+      const rect = item.getBoundingClientRect();
+      return event.clientY < rect.top + (rect.height / 2);
+    });
+    if (insertBefore) list.insertBefore(_draggedPDFOrderItem, insertBefore);
+    else list.appendChild(_draggedPDFOrderItem);
+    syncPendingPDFSectionOrderFromDOM();
+    refreshPDFSectionOrderList();
+  });
+
+  list.addEventListener('pointerup', event => {
+    if (event.pointerId === _draggedPDFOrderPointerId) finishPDFSectionDrag();
+  });
+  list.addEventListener('pointercancel', event => {
+    if (event.pointerId === _draggedPDFOrderPointerId) finishPDFSectionDrag();
+  });
+  modalElement.addEventListener('hidden.bs.modal', () => {
+    _pdfOrderModalReady = false;
+    finishPDFSectionDrag();
+    if (!_pdfOrderConfirming) _pendingPDFSectionOrder = null;
+  });
+}
+
+function openPDFSectionOrderModal() {
+  if (_pdfOrderConfirming) return;
+  _pendingPDFSectionOrder = getSectionOrder();
+  renderPDFSectionOrderList();
+  if (!_pdfSectionOrderModal) {
+    _pdfSectionOrderModal = new bootstrap.Modal(document.getElementById('pdfSectionOrderModal'), {
+      backdrop: 'static',
+      keyboard: false,
+    });
+  }
+  _pdfSectionOrderModal.show();
+}
+
+async function confirmPDFSectionOrder() {
+  if (!_pendingPDFSectionOrder || _pdfOrderConfirming) return;
+  syncPendingPDFSectionOrderFromDOM();
+  const confirmedOrder = normaliseSavedSectionOrder(_pendingPDFSectionOrder);
+  _pdfOrderConfirming = true;
+  setPDFSectionOrderModalBusy(true);
+  applySectionOrder(confirmedOrder);
+  const saved = await saveDraft();
+  if (!saved) toast('PDF order is applied, but the draft could not be saved.', 'warning');
+
+  const modalElement = document.getElementById('pdfSectionOrderModal');
+  const continuePreview = () => {
+    _pdfOrderConfirming = false;
+    _pendingPDFSectionOrder = null;
+    setPDFSectionOrderModalBusy(false);
+    renderPDFPreview();
+  };
+  if (modalElement) {
+    modalElement.addEventListener('hidden.bs.modal', continuePreview, { once:true });
+    const hideOrderModal = () => _pdfSectionOrderModal?.hide();
+    if (_pdfOrderModalReady) hideOrderModal();
+    else modalElement.addEventListener('shown.bs.modal', hideOrderModal, { once:true });
+  } else {
+    continuePreview();
+  }
+}
+
 // ════════════════════════════════════════════════════════════
 // AUTOCOMPLETE
 // ════════════════════════════════════════════════════════════
@@ -1081,15 +1516,10 @@ function syncOverallProgressSection() {
   document.getElementById('addOverallProgressBtn')?.classList.toggle('d-none', !enabled);
   document.getElementById('overallProgressInactiveBadge')?.classList.toggle('d-none', enabled);
 
-  const overallNo = document.getElementById('overallProgressSectionNo');
-  const areasNo = document.getElementById('areasSectionNo');
-  const signOffNo = document.getElementById('signOffSectionNo');
   const toggleLabel = document.getElementById('overallProgressToggleLabel');
-  if (overallNo) overallNo.textContent = enabled ? '4 · ' : '';
-  if (areasNo) areasNo.textContent = enabled ? '5 · ' : '4 · ';
-  if (signOffNo) signOffNo.textContent = enabled ? '6 · ' : '5 · ';
   if (toggleLabel) toggleLabel.textContent = `${enabled ? 'ON' : 'OFF'} · Show in Report`;
   if (toggle) toggle.setAttribute('aria-expanded', String(enabled));
+  updateFormStepNumbering();
 }
 
 function parseProgressNumber(value) {
@@ -1219,7 +1649,11 @@ function addAreaBlock(data={}) {
     </div>
     <div class="card-body p-2">
       <!-- Activities -->
-      <div class="row g-2 mb-2">
+      <div class="area-section-hdr d-flex align-items-center gap-2">
+        <span class="fw-bold" style="font-size:.8rem;">📋 Daily Activities</span>
+        <button class="btn btn-sm btn-outline-secondary acts-swap-btn" style="font-size:.7rem;padding:1px 8px;" onclick="toggleActsSwap(this)" title="Swap column order in PDF">⇄ Today first</button>
+      </div>
+      <div class="row g-2 mb-3">
         <div class="col-md-6">
           <div class="fld-lbl mb-1 fw-bold">Activity Today</div>
           <div class="acts-today"></div>
@@ -1232,13 +1666,12 @@ function addAreaBlock(data={}) {
         </div>
       </div>
       <!-- Direct Manpower -->
-      <div class="d-flex justify-content-between align-items-center mb-1">
-        <span class="fld-lbl mb-0 fw-bold">Direct Manpower</span>
+      <div class="area-section-hdr d-flex justify-content-between align-items-center">
+        <span class="fw-bold" style="font-size:.8rem;">👷 Direct Manpower</span>
         <button class="btn btn-sm btn-outline-primary add-dm-btn" onclick="addDM(this)">+ Add Person</button>
       </div>
       <div class="row g-1 mb-1 px-1" style="font-size:.7rem;color:#888;">
-        <div class="col-3">Name</div><div class="col-2">Position</div>
-        <div class="col-4">Task Today</div><div class="col-2">Hours</div><div class="col-1"></div>
+        <div class="col-4">Name</div><div class="col-4">Role / Position</div><div class="col-3">Working Hours</div><div class="col-1"></div>
       </div>
       <div class="dm-container"></div>
       <!-- Area Indirect Manpower (collapsible) -->
@@ -1290,6 +1723,7 @@ function addAreaBlock(data={}) {
 
   if (data.activities_today)    data.activities_today.forEach(t => addAct(block.querySelector('[onclick*="today"]'), 'today', t));
   if (data.activities_tomorrow) data.activities_tomorrow.forEach(t => addAct(block.querySelector('[onclick*="tomorrow"]'), 'tomorrow', t));
+  if (data.activities_swapped)  { const btn = block.querySelector('.acts-swap-btn'); if (btn) { btn.dataset.swapped='1'; btn.textContent='⇄ Tomorrow first'; btn.classList.replace('btn-outline-secondary','btn-outline-primary'); } }
   if (data.manpower)            data.manpower.forEach(p => addDM(block.querySelector('.add-dm-btn'), p));
   if (data.constraints)         block.querySelector('.area-const').value = data.constraints;
   if (data.remarks)             block.querySelector('.area-rem').value   = data.remarks;
@@ -1350,6 +1784,19 @@ function addAreaIndRow(btn, d={}) {
 // ════════════════════════════════════════════════════════════
 // ACTIVITIES
 // ════════════════════════════════════════════════════════════
+function toggleActsSwap(btn) {
+  const swapped = btn.dataset.swapped === '1';
+  if (swapped) {
+    btn.dataset.swapped = '0';
+    btn.textContent = '⇄ Today first';
+    btn.classList.replace('btn-outline-primary', 'btn-outline-secondary');
+  } else {
+    btn.dataset.swapped = '1';
+    btn.textContent = '⇄ Tomorrow first';
+    btn.classList.replace('btn-outline-secondary', 'btn-outline-primary');
+  }
+}
+
 function addAct(btn, type, text='') {
   const block = btn.closest('[data-ai]');
   const cont  = block.querySelector(type==='today' ? '.acts-today' : '.acts-tmr');
@@ -1370,17 +1817,14 @@ function addDM(btn, d={}) {
   const row   = document.createElement('div');
   row.className = 'row g-1 mb-1 align-items-center dm-row';
   row.innerHTML = `
-    <div class="col-3 ac-wrap">
+    <div class="col-4 ac-wrap">
       <input type="text" class="form-control form-control-sm mp-name" placeholder="Name…" value="${esc(d.name||'')}">
       <div class="ac-drop"></div>
     </div>
-    <div class="col-2">
-      <input type="text" class="form-control form-control-sm mp-role" placeholder="Position" value="${esc(d.role||'')}">
-    </div>
     <div class="col-4">
-      <input type="text" class="form-control form-control-sm mp-task" placeholder="Task today…" value="${esc(d.task||'')}">
+      <input type="text" class="form-control form-control-sm mp-role" placeholder="Role / Position" value="${esc(d.role||'')}">
     </div>
-    <div class="col-2">
+    <div class="col-3">
       <select class="form-select form-select-sm mp-hours">${hoursOpts(d.hours)}</select>
     </div>
     <div class="col-1 text-end">
@@ -1733,7 +2177,6 @@ function collectData() {
       manpower.push({
         name:  row.querySelector('.mp-name').value,
         role:  row.querySelector('.mp-role').value,
-        task:  row.querySelector('.mp-task').value,
         hours: row.querySelector('.mp-hours').value,
       });
     });
@@ -1755,10 +2198,12 @@ function collectData() {
       if (data || filename || desc) photos.push({ img_data: data, photo_filename: filename, desc });
     });
 
+    const swapBtn = block.querySelector('.acts-swap-btn');
     areas.push({
       id: areaId,
       activities_today,
       activities_tomorrow,
+      activities_swapped: swapBtn?.dataset.swapped === '1',
       manpower,
       indirect_manpower: indirect_manpower_area,
       constraints: (block.querySelector('.area-const') || {}).value || '',
@@ -1768,6 +2213,7 @@ function collectData() {
   });
 
   return {
+    section_order:  getSectionOrder(),
     date:           v('f_date'),
     day_no:         v('f_day_no'),
     project_no:     v('f_project_no'),
@@ -1793,6 +2239,7 @@ function collectData() {
 // POPULATE FORM FROM DATA
 // ════════════════════════════════════════════════════════════
 function populateForm(d) {
+  applySectionOrder(d.section_order);
   const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
   set('f_date',          d.date);
   set('f_day_no',        d.day_no);
@@ -1883,6 +2330,8 @@ async function generatePDF() {
       body: JSON.stringify(collectData()),
     });
     const archiveStatus = r.headers.get('X-Report-Archive-Status');
+    const pdfArchiveStatus = r.headers.get('X-Report-Pdf-Archive-Status');
+    const jsonArchiveStatus = r.headers.get('X-Report-Json-Archive-Status');
 
     if (_genTimer) { clearInterval(_genTimer); _genTimer = null; }
 
@@ -1909,8 +2358,12 @@ async function generatePDF() {
 
     _setProgress('✅ PDF ready!', 100);
     setTimeout(_hideProgress, 1500);
-    if (archiveStatus === 'failed') {
+    if (pdfArchiveStatus === 'failed') {
       toast('PDF downloaded, but could not be saved to My Reports.', 'warning');
+    } else if (jsonArchiveStatus === 'failed') {
+      toast('PDF saved, but its Monthly Report JSON could not be archived. Please tell the admin.', 'warning');
+    } else if (archiveStatus === 'failed') {
+      toast('PDF downloaded, but part of the report archive could not be saved.', 'warning');
     } else {
       toast('✅ PDF generated and downloaded!', 'success');
     }
@@ -1957,7 +2410,11 @@ function _animateProgress(from, to, durationMs) {
 }
 
 let _previewModal = null;
-async function previewPDF() {
+function previewPDF() {
+  openPDFSectionOrderModal();
+}
+
+async function renderPDFPreview() {
   if (!_previewModal) _previewModal = new bootstrap.Modal(document.getElementById('previewModal'));
   const frame = document.getElementById('previewFrame');
   const loading = document.getElementById('previewLoading');
@@ -2017,6 +2474,7 @@ function importDraft(input) {
 
 function clearFormConfirm() {
   if (!confirm('Clear the entire form? This cannot be undone.')) return;
+  applySectionOrder(DEFAULT_PDF_SECTION_ORDER);
   document.getElementById('areasContainer').innerHTML = '';
   document.getElementById('indirectContainer').innerHTML = '';
   document.getElementById('overallProgressContainer').innerHTML = '';
@@ -2346,6 +2804,8 @@ function initSignOffDefaults() {
 // ════════════════════════════════════════════════════════════
 // SAVE DRAFT PERIODICALLY + ON UNLOAD
 // ════════════════════════════════════════════════════════════
+let _draftSaveQueue = Promise.resolve(true);
+
 function loadDraftFromServer() {
   fetch('/load_draft')
   .then(r => r.json())
@@ -2353,20 +2813,53 @@ function loadDraftFromServer() {
   .catch(err => alert('Load failed: ' + err.message));
 }
 
-function saveDraft(showToast=false) {
-  const ind = document.getElementById('autosave-indicator');
-  if (ind) ind.textContent = '💾 saving…';
-  fetch('/save_draft', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify(collectData()),
-  })
-  .then(r => r.json())
-  .then(data => {
-    if (ind) ind.textContent = `✓ saved ${data.saved_at||''}`;
-    if (showToast) toast('Draft saved ✓', 'success');
-  })
-  .catch(() => { if (ind) ind.textContent = '⚠ save failed'; });
+let _autosaveStatusHideTimer = null;
+let _autosaveStatusClearTimer = null;
+
+function showAutosaveStatus(message, type='info', autoHide=true) {
+  const indicator = document.getElementById('autosave-indicator');
+  if (!indicator) return;
+  clearTimeout(_autosaveStatusHideTimer);
+  clearTimeout(_autosaveStatusClearTimer);
+  const colors = { success:'#198754', danger:'#dc3545', info:'var(--primary)' };
+  indicator.style.background = colors[type] || colors.info;
+  indicator.textContent = message;
+  indicator.classList.add('show');
+  if (autoHide) {
+    _autosaveStatusHideTimer = setTimeout(() => {
+      indicator.classList.remove('show');
+      _autosaveStatusClearTimer = setTimeout(() => {
+        if (!indicator.classList.contains('show')) indicator.textContent = '';
+      }, 300);
+    }, 2700);
+  }
+}
+
+function saveDraft() {
+  // Capture the payload at invocation time and serialize writes so rapid
+  // saves cannot let an older request overwrite the newest form data.
+  const payload = collectData();
+  const runSave = () => {
+    showAutosaveStatus('💾 Saving…', 'info', false);
+    return fetch('/save_draft', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    })
+    .then(async response => {
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `Server returned ${response.status}`);
+      showAutosaveStatus(`✓ Saved ${data.saved_at||''}`, 'success');
+      return true;
+    })
+    .catch(() => {
+      showAutosaveStatus('⚠ Draft save failed.', 'danger');
+      return false;
+    });
+  };
+
+  _draftSaveQueue = _draftSaveQueue.then(runSave, runSave);
+  return _draftSaveQueue;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -2874,6 +3367,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Build the project selector before applying a draft or fresh defaults.
   renderProjectSelect('', '');
+  initPDFSectionOrderModal();
 
   // Populate form from draft or set defaults
   if (INITIAL_DATA) {
@@ -2882,6 +3376,7 @@ document.addEventListener('DOMContentLoaded', () => {
       initSignOffDefaults();
     }
   } else {
+    applySectionOrder(DEFAULT_PDF_SECTION_ORDER);
     initDefaults();
     initSignOffDefaults();
   }

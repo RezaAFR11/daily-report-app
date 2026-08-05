@@ -3,29 +3,83 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>My Reports — GPA</title>
+<title>Reports — GPA</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <style>
-  :root { --primary:#003366; --accent:#C89010; }
-  body  { background:#f4f6fb; }
-  .topbar { background:var(--primary); color:#fff; padding:.75rem 1.5rem;
-            display:flex; align-items:center; justify-content:space-between; }
-  .topbar h6 { margin:0; font-size:1rem; }
-  .report-card { background:#fff; border-radius:8px; box-shadow:0 1px 6px rgba(0,0,0,.08);
-                 padding:1rem 1.25rem; margin-bottom:.75rem;
-                 display:flex; align-items:center; gap:1rem; flex-wrap:wrap; }
-  .report-meta { flex:1; min-width:180px; }
-  .report-meta .fname { font-weight:600; font-size:.88rem; word-break:break-all; }
-  .report-meta .info  { font-size:.78rem; color:#666; margin-top:.2rem; }
-  .empty { text-align:center; color:#999; padding:4rem 0; }
-  .badge-day { background:var(--accent); color:#fff; border-radius:4px;
-               font-size:.72rem; padding:.15rem .5rem; font-weight:700; }
+  :root { --primary:#003366; --accent:#C89010; --soft:#eef4fb; }
+  body { background:#f4f6fb; color:#17202a; }
+  .topbar {
+    background:var(--primary); color:#fff; padding:.7rem 1.25rem;
+    display:flex; align-items:center; justify-content:space-between;
+    gap:.75rem; flex-wrap:wrap;
+  }
+  .topbar h6 { margin:0; font-size:1rem; white-space:nowrap; }
+  .top-actions { display:flex; gap:.45rem; flex-wrap:wrap; }
+  .page-shell { max-width:1180px; }
+  .report-card {
+    background:#fff; border:1px solid #e3e8ef; border-radius:9px;
+    box-shadow:0 1px 6px rgba(0,0,0,.06); padding:1rem 1.1rem;
+    margin-bottom:.75rem; display:flex; align-items:center; gap:1rem; flex-wrap:wrap;
+  }
+  .report-meta { flex:1; min-width:220px; }
+  .report-meta .fname { font-weight:650; font-size:.88rem; word-break:break-word; }
+  .report-meta .info { font-size:.78rem; color:#667085; margin-top:.25rem; }
+  .empty { text-align:center; color:#98a2b3; padding:3.5rem 0; }
+  .badge-day, .badge-status {
+    background:var(--accent); color:#fff; border-radius:4px;
+    font-size:.7rem; padding:.18rem .5rem; font-weight:700;
+  }
+  .badge-status { background:var(--primary); }
+  .badge-report-type.weekly { background:#0f766e; }
+  .badge-report-type.monthly { background:#52606d; }
+  .report-tabs { border-bottom:1px solid #d9e1ea; }
+  .report-tabs .nav-link { color:#52606d; font-weight:650; border:0; border-bottom:3px solid transparent; }
+  .report-tabs .nav-link.active { color:var(--primary); background:transparent; border-bottom-color:var(--accent); }
+  .panel {
+    background:#fff; border:1px solid #dfe6ee; border-radius:10px;
+    box-shadow:0 1px 5px rgba(0,0,0,.05); padding:1.15rem;
+  }
+  .source-card {
+    border:1px solid #cfd8e3; border-radius:8px; padding:.85rem 1rem;
+    cursor:pointer; height:100%; transition:.15s ease; background:#fff;
+  }
+  .source-card:hover { border-color:#8aa9c8; }
+  .source-card.active { border:2px solid var(--primary); background:var(--soft); }
+  .source-card input { margin-right:.4rem; }
+  .source-card .title { font-weight:700; color:var(--primary); }
+  .source-card .hint { color:#667085; font-size:.8rem; margin-top:.25rem; }
+  .section-label { color:var(--primary); font-weight:700; font-size:.92rem; margin-bottom:.65rem; }
+  .muted-note { color:#667085; font-size:.79rem; }
+  .coverage-card { border:1px solid #dfe6ee; border-radius:8px; padding:.7rem .8rem; background:#fff; }
+  .coverage-card .value { font-size:1.35rem; font-weight:750; color:var(--primary); }
+  .coverage-card .label { font-size:.74rem; color:#667085; }
+  .review-grid textarea { min-height:110px; }
+  .progress-table input { min-width:78px; font-size:.78rem; }
+  .progress-table th { font-size:.74rem; background:#e9eef4; white-space:nowrap; }
+  .progress-table td { vertical-align:middle; }
+  .monthly-history { border-top:1px solid #e4e7ec; padding-top:1rem; }
+  .type-card {
+    border:1px solid #cfd8e3; border-radius:8px; padding:.85rem 1rem;
+    cursor:pointer; height:100%; transition:.15s ease; background:#fff;
+  }
+  .type-card:hover { border-color:#8aa9c8; }
+  .type-card.active { border:2px solid var(--primary); background:var(--soft); }
+  .type-card input { margin-right:.4rem; }
+  .type-card .title { font-weight:700; color:var(--primary); }
+  .type-card .hint { color:#667085; font-size:.8rem; margin-top:.25rem; }
+  #monthly-alert { white-space:pre-line; }
+  .spinner-border-sm { width:.9rem; height:.9rem; }
+  @media (max-width:768px) {
+    .topbar { align-items:flex-start; }
+    .top-actions { width:100%; }
+    .top-actions .btn { flex:1 1 auto; }
+  }
 </style>
 </head>
 <body>
 <div class="topbar">
-  <h6>📄 My Reports &nbsp;<span style="font-size:.78rem;opacity:.7;">{{ username }}</span></h6>
-  <div class="d-flex gap-2">
+  <h6>📄 Reports <span style="font-size:.78rem;opacity:.72;">{{ username }}</span></h6>
+  <div class="top-actions">
     {% if is_admin %}
     <a href="/admin" class="btn btn-sm btn-outline-light">🛡 Admin</a>
     {% endif %}
@@ -35,83 +89,797 @@
   </div>
 </div>
 
-<div class="container-fluid py-4" style="max-width:860px;">
-  <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-    <h5 class="mb-0" style="color:var(--primary);">Report History</h5>
-    <div class="d-flex align-items-center gap-2">
-      <span class="text-muted" style="font-size:.82rem;" id="report-count">{{ reports|length }} report(s)</span>
-      <input type="text" class="form-control form-control-sm" id="report-search"
-        placeholder="🔍 Search..." oninput="filterReports()"
-        style="width:200px;" {% if not reports %}disabled{% endif %}/>
-    </div>
-  </div>
+<div class="container-fluid page-shell py-4">
+  <ul class="nav report-tabs mb-4" role="tablist">
+    <li class="nav-item" role="presentation">
+      <button class="nav-link active" id="daily-tab" data-bs-toggle="tab"
+        data-bs-target="#daily-pane" type="button" role="tab">Daily Reports</button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" id="monthly-tab" data-bs-toggle="tab"
+        data-bs-target="#monthly-pane" type="button" role="tab">Weekly / Monthly Reports</button>
+    </li>
+  </ul>
 
-  {% if reports %}
-    {% for r in reports %}
-    <div class="report-card" id="row-{{ loop.index }}">
-      <div style="font-size:1.6rem;">📑</div>
-      <div class="report-meta">
-        <div class="fname">{{ r.filename }}</div>
-        <div class="info">
-          <span class="badge-day">Day {{ r.day_no }}</span>
-          &nbsp;{{ r.date }}
-          {% if r.project_no %}&nbsp;·&nbsp;{{ r.project_no }}{% endif %}
-          &nbsp;·&nbsp;Generated {{ r.generated_at }}
-          &nbsp;·&nbsp;{{ r.size_kb }} KB
+  <div class="tab-content">
+    <section class="tab-pane fade show active" id="daily-pane" role="tabpanel">
+      <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+        <h5 class="mb-0" style="color:var(--primary);">Daily Report History</h5>
+        <div class="d-flex align-items-center gap-2">
+          <span class="text-muted small" id="report-count">{{ reports|length }} report(s)</span>
+          <input type="text" class="form-control form-control-sm" id="report-search"
+            placeholder="🔍 Search..." oninput="filterReports()" style="width:210px;"
+            {% if not reports %}disabled{% endif %}>
         </div>
       </div>
-      <div class="d-flex gap-2 flex-shrink-0">
-        <a href="/reports/download/{{ r.filename }}"
-           class="btn btn-sm btn-outline-primary">⬇ Download</a>
-        <button class="btn btn-sm btn-outline-danger"
-                onclick="deleteReport('{{ r.filename }}', this)">🗑</button>
+
+      <div id="daily-report-list">
+      {% if reports %}
+        {% for r in reports %}
+        <div class="report-card daily-report-card">
+          <div style="font-size:1.6rem;">📑</div>
+          <div class="report-meta">
+            <div class="fname">{{ r.filename }}</div>
+            <div class="info">
+              <span class="badge-day">Day {{ r.day_no }}</span>
+              &nbsp;{{ r.date }}
+              {% if r.project_no %}&nbsp;·&nbsp;{{ r.project_no }}{% endif %}
+              &nbsp;·&nbsp;Generated {{ r.generated_at }}
+              &nbsp;·&nbsp;{{ r.size_kb }} KB
+              {% if r.json_filename %}&nbsp;·&nbsp;<span class="text-success">JSON archived</span>{% endif %}
+            </div>
+          </div>
+          <div class="d-flex gap-2 flex-shrink-0">
+            <a href="{{ url_for('download_report', filename=r.filename) }}"
+              class="btn btn-sm btn-outline-primary">⬇ Download</a>
+            <button class="btn btn-sm btn-outline-danger"
+              onclick='deleteReport({{ r.filename|tojson }}, this)'>🗑</button>
+          </div>
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty" id="daily-empty">
+          <div style="font-size:3rem;">📭</div>
+          <p class="mt-2">No reports yet. Generate your first PDF from the main app.</p>
+        </div>
+      {% endif %}
       </div>
-    </div>
-    {% endfor %}
-  {% else %}
-    <div class="empty">
-      <div style="font-size:3rem;">📭</div>
-      <p class="mt-2">No reports yet. Generate your first PDF from the main app.</p>
-    </div>
-  {% endif %}
+    </section>
+
+    <section class="tab-pane fade" id="monthly-pane" role="tabpanel">
+      <div class="panel mb-4">
+        <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap mb-3">
+          <div>
+            <h5 class="mb-1" id="create-report-title" style="color:var(--primary);">Create Monthly Report</h5>
+            <div class="muted-note" id="create-report-hint">Compile a full month or Month-to-Date report from final JSON or uploaded legacy PDFs.</div>
+          </div>
+          <span class="badge text-bg-warning">Draft workflow</span>
+        </div>
+
+        <div id="monthly-alert" class="alert d-none" role="alert"></div>
+
+        <div class="section-label">1. Choose report type</div>
+        <div class="row g-3 mb-4">
+          <div class="col-md-6">
+            <label class="type-card d-block" id="type-weekly-card">
+              <input type="radio" name="report-type" value="weekly" onchange="setReportType(this.value)">
+              <span class="title">Weekly Report</span>
+              <div class="hint">Create a Week-to-Date report or a complete Monday-Sunday report, including historical weeks.</div>
+            </label>
+          </div>
+          <div class="col-md-6">
+            <label class="type-card active d-block" id="type-monthly-card">
+              <input type="radio" name="report-type" value="monthly" checked onchange="setReportType(this.value)">
+              <span class="title">Monthly Report</span>
+              <div class="hint">Create a Month-to-Date report or a complete monthly report.</div>
+            </label>
+          </div>
+        </div>
+
+        <div class="section-label">2. Choose data source</div>
+        <div class="row g-3 mb-4">
+          <div class="col-md-6">
+            <label class="source-card active d-block" id="source-json-card">
+              <input type="radio" name="monthly-source" value="stored_json" checked onchange="setMonthlySource(this.value)">
+              <span class="title">Stored JSON — Recommended</span>
+              <div class="hint">Uses final Daily Report JSON saved by the application. Fastest and most accurate.</div>
+            </label>
+          </div>
+          <div class="col-md-6">
+            <label class="source-card d-block" id="source-pdf-card">
+              <input type="radio" name="monthly-source" value="uploaded_pdf" onchange="setMonthlySource(this.value)">
+              <span class="title">Upload Daily Report PDF</span>
+              <div class="hint">For older reports. Uses template parsing, regex, RapidFuzz, and manual review.</div>
+            </label>
+          </div>
+        </div>
+
+        <div class="section-label">3. Project and reporting period</div>
+        <div class="row g-3 mb-3">
+          <div class="col-lg-5">
+            <label class="form-label small">Project</label>
+            <select class="form-select" id="monthly-project" required>
+              <option value="">Select project...</option>
+              {% for project in projects %}
+              <option value="{{ project.project_no }}" data-title="{{ project.title }}">
+                {{ project.title }} — {{ project.project_no }}
+              </option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-sm-6 col-lg-2">
+            <label class="form-label small" id="period-from-label">From</label>
+            <input type="date" class="form-control" id="monthly-date-from" required>
+          </div>
+          <div class="col-sm-6 col-lg-2">
+            <label class="form-label small" id="period-to-label">To / Cutoff</label>
+            <input type="date" class="form-control" id="monthly-date-to" required>
+          </div>
+          <div class="col-lg-3">
+            <label class="form-label small">Report mode</label>
+            <select class="form-select" id="monthly-report-mode">
+              <option value="mtd">Month-to-Date / Partial</option>
+              <option value="draft">Monthly Draft</option>
+              <option value="final">Monthly Final</option>
+            </select>
+          </div>
+        </div>
+        <div class="muted-note mb-3 d-none" id="weekly-period-help">
+          Week-to-Date starts on Monday and may use any cutoff within 7 days. Full Week is automatically aligned to Monday-Sunday.
+        </div>
+
+        <div id="pdf-upload-panel" class="mb-3 d-none">
+          <label class="form-label small">Daily Report PDFs</label>
+          <input type="file" class="form-control" id="monthly-pdf-files" accept="application/pdf,.pdf" multiple>
+          <div class="muted-note mt-1">Upload machine-generated PDFs. Scanned files will be marked as requiring OCR/manual input.</div>
+        </div>
+
+        {% if is_admin %}
+        <div id="stored-scope-panel" class="form-check mb-3">
+          <input class="form-check-input" type="checkbox" id="monthly-all-users" checked>
+          <label class="form-check-label small" for="monthly-all-users">Include matching Daily Reports from all users</label>
+        </div>
+        {% endif %}
+
+        <button class="btn btn-primary" id="compile-monthly-btn" onclick="compileMonthly()">
+          Compile Monthly & Review
+        </button>
+      </div>
+
+      <div class="panel mb-4 d-none" id="monthly-review-panel">
+        <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap mb-3">
+          <div>
+            <h5 class="mb-1" id="review-report-title" style="color:var(--primary);">Review Monthly Draft</h5>
+            <div class="muted-note" id="review-report-hint">Check missing dates and edit monthly-only fields before generating the PDF.</div>
+          </div>
+          <span class="badge-status" id="review-source-badge">Stored JSON</span>
+        </div>
+
+        <div class="row g-2 mb-4" id="coverage-cards">
+          <div class="col-6 col-md-3"><div class="coverage-card"><div class="value" id="coverage-included">0</div><div class="label">Reports included</div></div></div>
+          <div class="col-6 col-md-3"><div class="coverage-card"><div class="value" id="coverage-missing">0</div><div class="label">Missing dates</div></div></div>
+          <div class="col-6 col-md-3"><div class="coverage-card"><div class="value" id="coverage-duplicates">0</div><div class="label">Duplicates resolved</div></div></div>
+          <div class="col-6 col-md-3"><div class="coverage-card"><div class="value" id="coverage-warnings">0</div><div class="label">Warnings</div></div></div>
+        </div>
+        <div class="alert alert-warning py-2 small d-none" id="coverage-detail"></div>
+
+        <div class="mb-4 d-none" id="source-manifest-panel">
+          <div class="section-label">Included Daily Reports</div>
+          <div class="table-responsive">
+            <table class="table table-sm table-bordered align-middle mb-0">
+              <thead class="table-light"><tr>
+                <th>Date</th><th>File / Report ID</th><th>Owner</th><th>Confidence</th><th>Review</th>
+              </tr></thead>
+              <tbody id="source-manifest-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section-label">Executive Summary</div>
+        <textarea class="form-control mb-4" id="review-executive-summary" rows="4"></textarea>
+
+        <div class="d-flex justify-content-between align-items-center mb-2 gap-2 flex-wrap">
+          <div class="section-label mb-0">Progress Summary</div>
+          <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addProgressRow()">+ Add Row</button>
+        </div>
+        <div class="table-responsive mb-4">
+          <table class="table table-sm table-bordered progress-table" id="review-progress-table">
+            <thead><tr>
+              <th>Description</th><th>Weight %</th><th>Previous %</th><th id="progress-current-label">This Month %</th>
+              <th>To-date %</th><th>Plan %</th><th>Variance %</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="section-label">Safety Status</div>
+        <div class="row g-2 mb-4">
+          <div class="col-6 col-md-3"><label class="form-label small">Total Manpower</label><input type="number" min="0" class="form-control" id="review-total-manpower"></div>
+          <div class="col-6 col-md-3"><label class="form-label small">Total Man-hours</label><input type="number" min="0" step="0.1" class="form-control" id="review-man-hours"></div>
+          <div class="col-6 col-md-2"><label class="form-label small">Recordable Cases</label><input type="number" min="0" class="form-control" id="review-recordable"></div>
+          <div class="col-6 col-md-2"><label class="form-label small">Lost Workdays</label><input type="number" min="0" class="form-control" id="review-lost-days"></div>
+          <div class="col-6 col-md-2"><label class="form-label small">LTI</label><input type="number" min="0" class="form-control" id="review-lti"></div>
+        </div>
+
+        <div class="row g-3 review-grid">
+          <div class="col-md-6">
+            <label class="form-label section-label">Engineering Status</label>
+            <textarea class="form-control" id="review-engineering"></textarea>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label section-label">Procurement / Delivery Status</label>
+            <textarea class="form-control" id="review-procurement"></textarea>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label section-label" id="activities-current-label">This Month Activities</label>
+            <textarea class="form-control" id="review-this-month" placeholder="One activity per line"></textarea>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label section-label" id="activities-next-label">Planned Activities Next Month</label>
+            <textarea class="form-control" id="review-next-month" placeholder="One activity per line"></textarea>
+          </div>
+          <div class="col-12">
+            <label class="form-label section-label">Areas of Concern / Corrective Action</label>
+            <textarea class="form-control" id="review-concerns" rows="4" placeholder="Concern | Corrective action (one pair per line)"></textarea>
+          </div>
+        </div>
+
+        <div class="alert alert-warning mt-4 mb-0 d-none" id="final-confirm-panel">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="review-confirm-final">
+            <label class="form-check-label small" id="final-confirm-text" for="review-confirm-final">
+              I have reviewed the source warnings, missing dates, and all monthly values, and approve this report as Final.
+            </label>
+          </div>
+        </div>
+
+        <div class="d-flex gap-2 mt-4 flex-wrap">
+          <button class="btn btn-outline-primary" id="preview-monthly-btn" onclick="previewMonthly()">👁 Preview Monthly PDF</button>
+          <button class="btn btn-success" id="generate-monthly-btn" onclick="generateMonthly()">Generate & Save Monthly PDF</button>
+          <button class="btn btn-outline-secondary" onclick="document.getElementById('monthly-review-panel').classList.add('d-none')">Close Review</button>
+        </div>
+      </div>
+
+      <div class="monthly-history">
+        <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+          <h5 class="mb-0" style="color:var(--primary);">Weekly / Monthly Report History</h5>
+          <span class="text-muted small" id="monthly-report-count">{{ monthly_reports|length }} report(s)</span>
+        </div>
+        <div id="monthly-report-list">
+        {% if monthly_reports %}
+          {% for r in monthly_reports %}
+          <div class="report-card monthly-report-card">
+            <div style="font-size:1.6rem;">🗓️</div>
+            <div class="report-meta">
+              <div class="fname">{{ r.filename }}</div>
+              <div class="info">
+                <span class="badge-status badge-report-type {{ (r.report_type or 'monthly')|lower }}">{{ (r.report_type or 'monthly')|upper }}</span>
+                &nbsp;
+                <span class="badge-status">{{ (r.status or 'draft')|upper }}</span>
+                &nbsp;{{ r.period_start }} → {{ r.period_end }}
+                {% if r.project_no %}&nbsp;·&nbsp;{{ r.project_no }}{% endif %}
+                &nbsp;·&nbsp;Generated {{ r.generated_at }}
+                &nbsp;·&nbsp;{{ r.size_kb }} KB
+              </div>
+            </div>
+            <div class="d-flex gap-2 flex-shrink-0">
+              <a href="{{ url_for('download_monthly_report', filename=r.filename) }}" class="btn btn-sm btn-outline-primary">⬇ Download</a>
+              <button class="btn btn-sm btn-outline-danger" onclick='deleteMonthlyReport({{ r.filename|tojson }}, this)'>🗑</button>
+            </div>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="empty" id="monthly-empty"><div style="font-size:3rem;">🗓️</div><p class="mt-2">No weekly or monthly reports generated yet.</p></div>
+        {% endif %}
+        </div>
+      </div>
+    </section>
+  </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-function deleteReport(filename, btn) {
-  if (!confirm('Delete "' + filename + '"? This cannot be undone.')) return;
-  fetch('/reports/delete', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({filename}),
-  })
-  .then(r => r.json())
-  .then(d => {
-    if (d.ok) {
-      btn.closest('.report-card').remove();
-      updateCount();
+let monthlySource = 'stored_json';
+let monthlyDraftId = '';
+let reportType = 'monthly';
+
+function parseIsoDate(value) {
+  if (!value) return null;
+  const parts = value.split('-').map(Number);
+  if (parts.length !== 3 || parts.some(Number.isNaN)) return null;
+  return new Date(parts[0], parts[1] - 1, parts[2]);
+}
+
+function isoDate(value) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function addDays(value, amount) {
+  const result = new Date(value.getFullYear(), value.getMonth(), value.getDate());
+  result.setDate(result.getDate() + amount);
+  return result;
+}
+
+function mondayFor(value) {
+  const day = value.getDay();
+  return addDays(value, -(day === 0 ? 6 : day - 1));
+}
+
+function inclusiveDays(fromValue, toValue) {
+  const fromUtc = Date.UTC(fromValue.getFullYear(), fromValue.getMonth(), fromValue.getDate());
+  const toUtc = Date.UTC(toValue.getFullYear(), toValue.getMonth(), toValue.getDate());
+  return Math.floor((toUtc - fromUtc) / 86400000) + 1;
+}
+
+function updateReportTypeCopy() {
+  const weekly = reportType === 'weekly';
+  const typeName = weekly ? 'Weekly' : 'Monthly';
+  document.getElementById('create-report-title').textContent = `Create ${typeName} Report`;
+  document.getElementById('create-report-hint').textContent = weekly
+    ? 'Compile a Week-to-Date or full Monday-Sunday report from final JSON or uploaded legacy PDFs.'
+    : 'Compile a selected monthly period from final JSON or uploaded legacy PDFs.';
+  document.getElementById('period-from-label').textContent = weekly ? 'Week starts (Monday)' : 'From';
+  document.getElementById('period-to-label').textContent = weekly ? 'To / Cutoff' : 'To / Cutoff';
+  document.getElementById('weekly-period-help').classList.toggle('d-none', !weekly);
+  document.getElementById('review-report-title').textContent = `Review ${typeName} Draft`;
+  document.getElementById('review-report-hint').textContent = weekly
+    ? 'Check missing dates and edit weekly fields before generating the PDF.'
+    : 'Check missing dates and edit monthly fields before generating the PDF.';
+  document.getElementById('progress-current-label').textContent = weekly ? 'This Week %' : 'This Month %';
+  document.getElementById('activities-current-label').textContent = weekly ? 'This Week Activities' : 'This Month Activities';
+  document.getElementById('activities-next-label').textContent = weekly ? 'Planned Activities Next Week' : 'Planned Activities Next Month';
+  document.getElementById('final-confirm-text').textContent =
+    `I have reviewed the source warnings, missing dates, and all ${reportType} values, and approve this report as Final.`;
+  document.getElementById('compile-monthly-btn').textContent = `Compile ${typeName} & Review`;
+  document.getElementById('preview-monthly-btn').textContent = `Preview ${typeName} PDF`;
+  document.getElementById('generate-monthly-btn').textContent = `Generate & Save ${typeName} PDF`;
+}
+
+function populateReportModes() {
+  const select = document.getElementById('monthly-report-mode');
+  select.innerHTML = reportType === 'weekly'
+    ? '<option value="wtd">Week-to-Date / Partial</option><option value="draft">Full Week - Draft</option><option value="final">Full Week - Final</option>'
+    : '<option value="mtd">Month-to-Date / Partial</option><option value="draft">Monthly Draft</option><option value="final">Monthly Final</option>';
+}
+
+function invalidateCompiledDraft(message='Report setup changed. Compile & Review again before creating the PDF.') {
+  if (!monthlyDraftId) return;
+  monthlyDraftId = '';
+  document.getElementById('monthly-review-panel').classList.add('d-none');
+  showMonthlyAlert(message, 'warning');
+}
+
+function setReportPeriodDefaults() {
+  const today = new Date();
+  const from = document.getElementById('monthly-date-from');
+  const to = document.getElementById('monthly-date-to');
+  if (reportType === 'weekly') {
+    const monday = mondayFor(today);
+    from.value = isoDate(monday);
+    to.value = isoDate(today);
+  } else {
+    from.value = isoDate(new Date(today.getFullYear(), today.getMonth(), 1));
+    to.value = isoDate(today);
+  }
+  updatePeriodLimits();
+}
+
+function updatePeriodLimits() {
+  const fromInput = document.getElementById('monthly-date-from');
+  const toInput = document.getElementById('monthly-date-to');
+  if (reportType !== 'weekly' || !fromInput.value) {
+    toInput.removeAttribute('min');
+    toInput.removeAttribute('max');
+    return;
+  }
+  const start = parseIsoDate(fromInput.value);
+  toInput.min = fromInput.value;
+  toInput.max = isoDate(addDays(start, 6));
+}
+
+function alignWeeklyPeriod() {
+  if (reportType !== 'weekly') return;
+  const fromInput = document.getElementById('monthly-date-from');
+  const toInput = document.getElementById('monthly-date-to');
+  const selected = parseIsoDate(fromInput.value) || new Date();
+  const monday = mondayFor(selected);
+  fromInput.value = isoDate(monday);
+  const mode = document.getElementById('monthly-report-mode').value;
+  if (mode === 'draft' || mode === 'final') {
+    toInput.value = isoDate(addDays(monday, 6));
+  } else {
+    const cutoff = parseIsoDate(toInput.value);
+    if (!cutoff || cutoff < monday || inclusiveDays(monday, cutoff) > 7) {
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      toInput.value = isoDate(today >= monday && today <= addDays(monday, 6) ? today : addDays(monday, 6));
     }
-  })
-  .catch(err => alert('Delete failed: ' + err.message));
+  }
+  updatePeriodLimits();
+}
+
+function handleReportModeChange() {
+  const mode = document.getElementById('monthly-report-mode').value;
+  document.getElementById('monthly-date-to').readOnly =
+    reportType === 'weekly' && (mode === 'draft' || mode === 'final');
+  if (reportType === 'weekly') alignWeeklyPeriod();
+  toggleFinalConfirmation();
+  invalidateCompiledDraft();
+}
+
+function setReportType(value, resetPeriod=true) {
+  reportType = value === 'weekly' ? 'weekly' : 'monthly';
+  document.getElementById('type-weekly-card').classList.toggle('active', reportType === 'weekly');
+  document.getElementById('type-monthly-card').classList.toggle('active', reportType === 'monthly');
+  document.querySelectorAll('input[name="report-type"]').forEach(input => {
+    input.checked = input.value === reportType;
+  });
+  populateReportModes();
+  updateReportTypeCopy();
+  if (resetPeriod) setReportPeriodDefaults();
+  document.getElementById('monthly-date-to').readOnly = false;
+  monthlyDraftId = '';
+  document.getElementById('monthly-review-panel').classList.add('d-none');
+  hideMonthlyAlert();
+  toggleFinalConfirmation();
+}
+
+function setLoading(buttonId, loading, label) {
+  const btn = document.getElementById(buttonId);
+  if (!btn) return;
+  if (loading) {
+    btn.dataset.original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>${label || 'Working...'}`;
+  } else {
+    btn.disabled = false;
+    btn.innerHTML = btn.dataset.original || label || btn.innerHTML;
+  }
+}
+
+function showMonthlyAlert(message, type='danger') {
+  const el = document.getElementById('monthly-alert');
+  el.className = `alert alert-${type}`;
+  el.textContent = message;
+  el.classList.remove('d-none');
+  el.scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+function hideMonthlyAlert() {
+  document.getElementById('monthly-alert').classList.add('d-none');
+}
+
+function setMonthlySource(value) {
+  const sourceChanged = monthlySource !== value;
+  monthlySource = value;
+  document.getElementById('source-json-card').classList.toggle('active', value === 'stored_json');
+  document.getElementById('source-pdf-card').classList.toggle('active', value === 'uploaded_pdf');
+  document.getElementById('pdf-upload-panel').classList.toggle('d-none', value !== 'uploaded_pdf');
+  const scope = document.getElementById('stored-scope-panel');
+  if (scope) scope.classList.toggle('d-none', value !== 'stored_json');
+  if (sourceChanged) invalidateCompiledDraft();
+}
+
+function selectedProject() {
+  const select = document.getElementById('monthly-project');
+  const option = select.options[select.selectedIndex];
+  return {project_no: select.value, project_title: option?.dataset?.title || ''};
+}
+
+function validateMonthlyInput() {
+  const project = selectedProject();
+  const dateFrom = document.getElementById('monthly-date-from').value;
+  const dateTo = document.getElementById('monthly-date-to').value;
+  const mode = document.getElementById('monthly-report-mode').value;
+  if (!project.project_no) throw new Error('Select a project first.');
+  if (!dateFrom || !dateTo) throw new Error('Select the reporting start and cutoff dates.');
+  if (dateFrom > dateTo) throw new Error('The From date cannot be after the To date.');
+  if (reportType === 'weekly') {
+    const from = parseIsoDate(dateFrom);
+    const to = parseIsoDate(dateTo);
+    const days = inclusiveDays(from, to);
+    if (from.getDay() !== 1) throw new Error('A Weekly Report must start on Monday.');
+    if (days < 1 || days > 7) throw new Error('A Weekly Report may cover a maximum of 7 days.');
+    if ((mode === 'draft' || mode === 'final') && (days !== 7 || to.getDay() !== 0)) {
+      throw new Error('A Full Week report must cover Monday through Sunday.');
+    }
+  }
+  return {project, dateFrom, dateTo, mode};
+}
+
+async function compileMonthly() {
+  hideMonthlyAlert();
+  let input;
+  try { input = validateMonthlyInput(); }
+  catch (err) { showMonthlyAlert(err.message, 'warning'); return; }
+
+  setLoading('compile-monthly-btn', true, 'Compiling...');
+  try {
+    let response;
+    if (monthlySource === 'stored_json') {
+      response = await fetch('/monthly/compile/stored', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          project_no:input.project.project_no,
+          project_title:input.project.project_title,
+          date_from:input.dateFrom,
+          date_to:input.dateTo,
+          report_type:reportType,
+          report_mode:input.mode,
+          include_all_users:document.getElementById('monthly-all-users')?.checked === true,
+        }),
+      });
+    } else {
+      const files = document.getElementById('monthly-pdf-files').files;
+      if (!files.length) throw new Error('Choose at least one Daily Report PDF.');
+      const form = new FormData();
+      Array.from(files).forEach(file => form.append('files', file));
+      form.append('project_no', input.project.project_no);
+      form.append('project_title', input.project.project_title);
+      form.append('date_from', input.dateFrom);
+      form.append('date_to', input.dateTo);
+      form.append('report_type', reportType);
+      form.append('report_mode', input.mode);
+      response = await fetch('/monthly/compile/upload', {method:'POST', body:form});
+    }
+
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || `Could not compile ${reportType} report.`);
+    monthlyDraftId = data.draft_id;
+    populateMonthlyReview(data.draft);
+    document.getElementById('monthly-review-panel').classList.remove('d-none');
+    document.getElementById('monthly-review-panel').scrollIntoView({behavior:'smooth'});
+  } catch (err) {
+    showMonthlyAlert(err.message);
+  } finally {
+    setLoading('compile-monthly-btn', false);
+  }
+}
+
+function asList(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.map(item => typeof item === 'string' ? item : (item.text || item.activity || item.description || '')).filter(Boolean);
+  return String(value).split('\n').map(v => v.trim()).filter(Boolean);
+}
+
+function populateMonthlyReview(draft) {
+  const coverage = draft.coverage || {};
+  document.getElementById('coverage-included').textContent = coverage.included_count ?? (draft.source_manifest || []).length;
+  document.getElementById('coverage-missing').textContent = (coverage.missing_dates || []).length;
+  document.getElementById('coverage-duplicates').textContent = coverage.duplicate_count || 0;
+  document.getElementById('coverage-warnings').textContent = (draft.warnings || []).length;
+  document.getElementById('review-source-badge').textContent = draft.source_method === 'uploaded_pdf' ? 'Uploaded PDF' : 'Stored JSON';
+
+  const details = [];
+  if ((coverage.missing_dates || []).length) details.push(`Missing: ${coverage.missing_dates.join(', ')}`);
+  if ((draft.warnings || []).length) details.push(`Warnings: ${draft.warnings.join(' | ')}`);
+  const detail = document.getElementById('coverage-detail');
+  detail.textContent = details.join('\n');
+  detail.classList.toggle('d-none', !details.length);
+  populateSourceManifest(draft.source_manifest || []);
+
+  document.getElementById('review-executive-summary').value = draft.executive_summary || '';
+  document.getElementById('review-total-manpower').value = draft.safety?.total_manpower ?? '';
+  document.getElementById('review-man-hours').value = draft.safety?.total_man_hours ?? '';
+  document.getElementById('review-recordable').value = draft.safety?.recordable_cases ?? 0;
+  document.getElementById('review-lost-days').value = draft.safety?.lost_workdays ?? 0;
+  document.getElementById('review-lti').value = draft.safety?.lost_time_injuries ?? 0;
+  document.getElementById('review-engineering').value = draft.engineering?.summary || draft.engineering_summary || '';
+  document.getElementById('review-procurement').value = draft.procurement?.summary || draft.procurement_summary || '';
+  document.getElementById('review-this-month').value = asList(draft.site?.this_month_activities || draft.this_month_activities).join('\n');
+  document.getElementById('review-next-month').value = asList(draft.site?.next_month_activities || draft.next_month_activities).join('\n');
+  const concerns = draft.site?.concerns || draft.concerns || [];
+  document.getElementById('review-concerns').value = concerns.map(item => {
+    if (typeof item === 'string') return item;
+    return `${item.concern || item.text || ''} | ${item.corrective_action || item.action || ''}`.trim();
+  }).filter(Boolean).join('\n');
+
+  const tbody = document.querySelector('#review-progress-table tbody');
+  tbody.innerHTML = '';
+  const rows = draft.progress?.rows || draft.progress_rows || [];
+  rows.forEach(row => addProgressRow(row));
+  if (!rows.length) addProgressRow();
+  toggleFinalConfirmation();
+}
+
+function populateSourceManifest(rows) {
+  const panel = document.getElementById('source-manifest-panel');
+  const body = document.getElementById('source-manifest-body');
+  body.innerHTML = '';
+  rows.forEach(row => {
+    const tr = document.createElement('tr');
+    const hasConfidence = row.confidence !== null && row.confidence !== undefined && row.confidence !== '';
+    const confidence = Number(row.confidence);
+    const values = [
+      row.report_date || '-',
+      row.filename || row.report_id || '-',
+      row.owner || '-',
+      hasConfidence && Number.isFinite(confidence) ? `${Math.round(confidence * 100)}%` : 'Stored JSON',
+      row.review_required ? 'Required' : 'Verified source',
+    ];
+    values.forEach(value => {
+      const td = document.createElement('td');
+      td.textContent = value;
+      tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+  panel.classList.toggle('d-none', rows.length === 0);
+}
+
+function toggleFinalConfirmation() {
+  const isFinal = document.getElementById('monthly-report-mode').value === 'final';
+  document.getElementById('final-confirm-panel').classList.toggle('d-none', !isFinal);
+  if (!isFinal) document.getElementById('review-confirm-final').checked = false;
+}
+
+function addProgressRow(row={}) {
+  const tbody = document.querySelector('#review-progress-table tbody');
+  const tr = document.createElement('tr');
+  const values = [
+    row.description || '', row.weight ?? row.weight_factor ?? '',
+    row.previous ?? '', row.this_month ?? row.this_period_actual ?? '',
+    row.to_date ?? row.cumulative_to_date_actual ?? '',
+    row.plan ?? row.cumulative_to_date_plan ?? '', row.variance ?? row.deviation ?? '',
+  ];
+  values.forEach((value, idx) => {
+    const td = document.createElement('td');
+    const input = document.createElement('input');
+    input.className = 'form-control form-control-sm';
+    input.type = idx === 0 ? 'text' : 'number';
+    if (idx > 0) input.step = '0.01';
+    if (idx === 4 || idx === 6) {
+      input.readOnly = true;
+      input.classList.add('bg-light');
+      input.title = 'Calculated automatically';
+    }
+    input.value = value === null || value === undefined ? '' : String(value).replace('%','');
+    td.appendChild(input); tr.appendChild(td);
+  });
+  const inputs = tr.querySelectorAll('input');
+  const updateCalculated = () => {
+    const previous = Number(inputs[2].value || 0);
+    const current = Number(inputs[3].value || 0);
+    const plan = Number(inputs[5].value || 0);
+    inputs[4].value = (previous + current).toFixed(2).replace(/\.00$/, '');
+    inputs[6].value = (previous + current - plan).toFixed(2).replace(/\.00$/, '');
+  };
+  [inputs[2], inputs[3], inputs[5]].forEach(input => input.addEventListener('input', updateCalculated));
+  updateCalculated();
+  const action = document.createElement('td');
+  action.innerHTML = '<button type="button" class="btn btn-sm btn-outline-danger">×</button>';
+  action.querySelector('button').onclick = () => tr.remove();
+  tr.appendChild(action); tbody.appendChild(tr);
+}
+
+function lines(id) {
+  return document.getElementById(id).value.split('\n').map(v => v.trim()).filter(Boolean);
+}
+
+function numberOrZero(id) {
+  const value = Number(document.getElementById(id).value);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function collectMonthlyReview() {
+  const progress = Array.from(document.querySelectorAll('#review-progress-table tbody tr')).map(tr => {
+    const values = Array.from(tr.querySelectorAll('input')).map(input => input.value.trim());
+    return {
+      description:values[0], weight:Number(values[1] || 0), previous:Number(values[2] || 0),
+      this_month:Number(values[3] || 0), to_date:Number(values[4] || 0),
+      plan:Number(values[5] || 0), variance:Number(values[6] || 0),
+    };
+  }).filter(row => row.description);
+  const concerns = lines('review-concerns').map(line => {
+    const [concern, ...action] = line.split('|');
+    return {concern:concern.trim(), corrective_action:action.join('|').trim()};
+  });
+  return {
+    report_type:reportType,
+    report_mode:document.getElementById('monthly-report-mode').value,
+    confirm_final:document.getElementById('review-confirm-final').checked,
+    executive_summary:document.getElementById('review-executive-summary').value.trim(),
+    progress:{rows:progress},
+    safety:{
+      total_manpower:numberOrZero('review-total-manpower'), total_man_hours:numberOrZero('review-man-hours'),
+      recordable_cases:numberOrZero('review-recordable'), lost_workdays:numberOrZero('review-lost-days'),
+      lost_time_injuries:numberOrZero('review-lti'),
+    },
+    engineering:{summary:document.getElementById('review-engineering').value.trim()},
+    procurement:{summary:document.getElementById('review-procurement').value.trim()},
+    site:{this_month_activities:lines('review-this-month'), next_month_activities:lines('review-next-month'), concerns},
+  };
+}
+
+async function postMonthlyPdf(endpoint, save) {
+  if (!monthlyDraftId) { showMonthlyAlert(`Compile a ${reportType} draft first.`, 'warning'); return; }
+  const typeName = reportType === 'weekly' ? 'Weekly' : 'Monthly';
+  const previewWindow = save ? null : window.open('about:blank', '_blank');
+  if (previewWindow) previewWindow.document.title = `Preparing ${typeName} Report Preview...`;
+  const btnId = save ? 'generate-monthly-btn' : 'preview-monthly-btn';
+  setLoading(btnId, true, save ? 'Generating...' : 'Preparing preview...');
+  try {
+    const response = await fetch(`${endpoint}/${encodeURIComponent(monthlyDraftId)}`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(collectMonthlyReview()),
+    });
+    if (!response.ok) {
+      const contentType = response.headers.get('content-type') || '';
+      const message = contentType.includes('application/json') ? (await response.json()).error : await response.text();
+      throw new Error(message || `${typeName} PDF generation failed.`);
+    }
+    if (save) {
+      const data = await response.json();
+      showMonthlyAlert(`${typeName} Report generated and saved successfully.`, 'success');
+      setTimeout(() => window.location.reload(), 800);
+    } else {
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      if (previewWindow) previewWindow.location.href = url;
+      else window.open(url, '_blank');
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+  } catch (err) {
+    if (previewWindow) previewWindow.close();
+    showMonthlyAlert(err.message);
+  } finally {
+    setLoading(btnId, false);
+  }
+}
+
+function previewMonthly() { return postMonthlyPdf('/monthly/preview', false); }
+function generateMonthly() { return postMonthlyPdf('/monthly/generate', true); }
+
+function deleteReport(filename, btn) {
+  if (!confirm(`Delete "${filename}"? This cannot be undone.`)) return;
+  fetch('/reports/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({filename})})
+    .then(r => r.json()).then(d => { if (d.ok) { btn.closest('.report-card').remove(); updateCount(); } })
+    .catch(err => alert('Delete failed: ' + err.message));
+}
+
+function deleteMonthlyReport(filename, btn) {
+  if (!confirm(`Delete "${filename}"? This cannot be undone.`)) return;
+  fetch('/monthly/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({filename})})
+    .then(r => r.json()).then(d => { if (d.ok) { btn.closest('.report-card').remove(); updateMonthlyCount(); } })
+    .catch(err => alert('Delete failed: ' + err.message));
 }
 
 function filterReports() {
   const q = document.getElementById('report-search').value.toLowerCase();
-  const cards = document.querySelectorAll('.report-card');
   let visible = 0;
-  cards.forEach(card => {
+  document.querySelectorAll('.daily-report-card').forEach(card => {
     const match = card.textContent.toLowerCase().includes(q);
-    card.style.display = match ? '' : 'none';
-    if (match) visible++;
+    card.style.display = match ? '' : 'none'; if (match) visible++;
   });
-  const cnt = document.getElementById('report-count');
-  if (cnt) cnt.textContent = `${visible} report(s)`;
+  document.getElementById('report-count').textContent = `${visible} report(s)`;
 }
 
 function updateCount() {
-  const cards = document.querySelectorAll('.report-card');
-  const cnt = document.getElementById('report-count');
-  if (cnt) cnt.textContent = `${cards.length} report(s)`;
+  document.getElementById('report-count').textContent = `${document.querySelectorAll('.daily-report-card').length} report(s)`;
 }
+function updateMonthlyCount() {
+  document.getElementById('monthly-report-count').textContent = `${document.querySelectorAll('.monthly-report-card').length} report(s)`;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  setReportType('monthly');
+  document.getElementById('monthly-report-mode').addEventListener('change', handleReportModeChange);
+  document.getElementById('monthly-date-from').addEventListener('change', () => {
+    if (reportType === 'weekly') alignWeeklyPeriod();
+    invalidateCompiledDraft();
+  });
+  document.getElementById('monthly-date-to').addEventListener('change', () => {
+    updatePeriodLimits();
+    invalidateCompiledDraft();
+  });
+  document.getElementById('monthly-project').addEventListener('change', () => invalidateCompiledDraft());
+  document.getElementById('monthly-pdf-files').addEventListener('change', () => invalidateCompiledDraft());
+  document.getElementById('monthly-all-users')?.addEventListener('change', () => invalidateCompiledDraft());
+  toggleFinalConfirmation();
+  if (location.hash === '#monthly') new bootstrap.Tab(document.getElementById('monthly-tab')).show();
+});
 </script>
 </body>
 </html>

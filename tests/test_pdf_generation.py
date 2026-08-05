@@ -14,11 +14,13 @@ from reportlab.lib.units import mm
 from daily_report_app import (
     BUNDLED_HEADER_LOGOS,
     BUNDLED_LOGOS,
+    DAILY_PDF_SECTION_ORDER,
     DEFAULT_CONFIG,
     _NC,
     _coerce_bool,
     _group_report_photos,
     _normalise_overall_progress,
+    _normalise_pdf_section_order,
     _overall_progress_totals,
     _progress_number,
     app,
@@ -55,7 +57,14 @@ class PDFGenerationTests(unittest.TestCase):
     def test_generate_downloads_and_archives_pdf(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             reports_dir = os.path.join(temp_dir, 'reports')
-            with patch('daily_report_app.get_reports_dir', return_value=reports_dir):
+            canonical = {
+                'report_id': '2026-07-28-r1-test',
+                'revision': 1,
+            }
+            with (
+                patch('daily_report_app.get_reports_dir', return_value=reports_dir),
+                patch('daily_report_app.archive_final_daily_record', return_value=canonical) as archive_json,
+            ):
                 response = self.client.post('/generate', json=MINIMAL_REPORT)
 
             self.assertEqual(response.status_code, 200)
@@ -66,12 +75,18 @@ class PDFGenerationTests(unittest.TestCase):
                 index = json.load(index_file)
             self.assertEqual(len(index), 1)
             self.assertEqual(index[0]['date'], '2026-07-28')
+            self.assertEqual(index[0]['canonical_report_id'], canonical['report_id'])
             self.assertTrue(os.path.isfile(os.path.join(reports_dir, index[0]['filename'])))
+            self.assertEqual(archive_json.call_args.args[2], MINIMAL_REPORT)
 
     def test_archive_failure_does_not_block_pdf_download(self):
         fake_pdf = io.BytesIO(b'%PDF-1.4\nvalid test pdf\n%%EOF')
         with (
             patch('daily_report_app.generate_pdf', return_value=fake_pdf),
+            patch(
+                'daily_report_app.archive_final_daily_record',
+                return_value={'report_id': 'test-r1', 'revision': 1},
+            ),
             patch(
                 'daily_report_app.archive_generated_report',
                 side_effect=OSError('volume temporarily unavailable'),
@@ -92,6 +107,32 @@ class PDFGenerationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()['error'], 'Invalid report data')
+
+    def test_daily_report_download_and_delete_reject_path_traversal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reports_dir = os.path.join(temp_dir, 'reports')
+            os.makedirs(reports_dir)
+            allowed_name = 'Daily Report - Allowed.pdf'
+            allowed_path = os.path.join(reports_dir, allowed_name)
+            outside_path = os.path.join(temp_dir, 'secret.pdf')
+            with open(allowed_path, 'wb') as handle:
+                handle.write(b'%PDF allowed')
+            with open(outside_path, 'wb') as handle:
+                handle.write(b'%PDF secret')
+            with open(os.path.join(reports_dir, 'index.json'), 'w', encoding='utf-8') as handle:
+                json.dump([{'filename': allowed_name}], handle)
+
+            with patch('daily_report_app.get_reports_dir', return_value=reports_dir):
+                allowed = self.client.get(f'/reports/download/{allowed_name}')
+                traversal = self.client.get('/reports/download/..%2Fsecret.pdf')
+                deletion = self.client.post('/reports/delete', json={'filename': '../secret.pdf'})
+
+            self.assertEqual(allowed.status_code, 200)
+            allowed.get_data()
+            allowed.close()
+            self.assertEqual(traversal.status_code, 404)
+            self.assertEqual(deletion.status_code, 404)
+            self.assertTrue(os.path.isfile(outside_path))
 
     def test_very_long_photo_caption_does_not_break_pdf_layout(self):
         report = deepcopy(MINIMAL_REPORT)
@@ -310,6 +351,190 @@ class PDFGenerationTests(unittest.TestCase):
         )
         self.assertFalse(any('OVERALL PROGRESS' in text for text in headings))
 
+    def test_pdf_section_order_swaps_weather_and_indirect_manpower(self):
+        report = deepcopy(MINIMAL_REPORT)
+        report['section_order'] = [
+            'report_information',
+            'indirect_manpower',
+            'weather',
+            'overall_progress',
+            'daily_activities',
+            'constraints',
+            'remarks',
+            'sign_off',
+            'photo_documentation',
+        ]
+        paragraph_texts = []
+        original_paragraph = daily_report_app.Paragraph
+
+        def paragraph_spy(text, *args, **kwargs):
+            paragraph_texts.append(str(text))
+            return original_paragraph(text, *args, **kwargs)
+
+        with patch('daily_report_app.Paragraph', side_effect=paragraph_spy):
+            generate_pdf(report, None, deepcopy(DEFAULT_CONFIG))
+
+        headings = [
+            re.sub(r'^\d+\.&#160;&#160;', '', text)
+            for text in paragraph_texts
+            if re.match(r'^\d+\.&#160;&#160;', text)
+        ]
+        heading_numbers = [
+            int(re.match(r'^(\d+)\.', text).group(1))
+            for text in paragraph_texts
+            if re.match(r'^\d+\.&#160;&#160;', text)
+        ]
+        self.assertEqual(heading_numbers, list(range(1, 9)))
+        self.assertEqual(headings[:3], [
+            'REPORT INFORMATION',
+            'INDIRECT MANPOWER',
+            'WEATHER REPORT',
+        ])
+
+    def test_pdf_section_order_is_backward_compatible_and_report_info_stays_first(self):
+        self.assertEqual(
+            _normalise_pdf_section_order(None),
+            list(DAILY_PDF_SECTION_ORDER),
+        )
+        self.assertEqual(
+            _normalise_pdf_section_order(['weather', 'unknown', 'weather']),
+            [
+                'report_information',
+                'weather',
+                'indirect_manpower',
+                'overall_progress',
+                'daily_activities',
+                'constraints',
+                'remarks',
+                'sign_off',
+                'photo_documentation',
+            ],
+        )
+        self.assertEqual(
+            _normalise_pdf_section_order([
+                'photo_documentation', 'weather', 'report_information',
+            ])[:3],
+            ['report_information', 'photo_documentation', 'weather'],
+        )
+        self.assertEqual(
+            _normalise_pdf_section_order([
+                'report_information', 'indirect_manpower', 'daily_activities',
+                'weather', 'sign_off',
+            ])[:7],
+            [
+                'report_information', 'indirect_manpower', 'daily_activities',
+                'constraints', 'remarks', 'weather', 'sign_off',
+            ],
+        )
+        self.assertEqual(
+            _normalise_pdf_section_order([
+                'report_information', 'constraints', 'sign_off',
+                'daily_activities', 'remarks', 'weather',
+            ])[:6],
+            [
+                'report_information', 'constraints', 'sign_off',
+                'daily_activities', 'remarks', 'weather',
+            ],
+        )
+        self.assertEqual(
+            _normalise_pdf_section_order([
+                'report_information', 'sign_off', 'areas', 'weather',
+            ])[:6],
+            [
+                'report_information', 'sign_off', 'daily_activities',
+                'constraints', 'remarks', 'weather',
+            ],
+        )
+
+    def test_pdf_area_sections_and_photos_can_move_independently(self):
+        report = deepcopy(MINIMAL_REPORT)
+        report['section_order'] = [
+            'report_information',
+            'photo_documentation',
+            'remarks',
+            'constraints',
+            'sign_off',
+            'daily_activities',
+            'indirect_manpower',
+            'weather',
+            'overall_progress',
+        ]
+        paragraph_texts = []
+        original_paragraph = daily_report_app.Paragraph
+
+        def paragraph_spy(text, *args, **kwargs):
+            paragraph_texts.append(str(text))
+            return original_paragraph(text, *args, **kwargs)
+
+        with patch('daily_report_app.Paragraph', side_effect=paragraph_spy):
+            generate_pdf(report, None, deepcopy(DEFAULT_CONFIG))
+
+        headings = [
+            re.sub(r'^\d+\.&#160;&#160;', '', text)
+            for text in paragraph_texts
+            if re.match(r'^\d+\.&#160;&#160;', text)
+        ]
+        self.assertEqual(headings, [
+            'REPORT INFORMATION',
+            'PHOTO DOCUMENTATION',
+            'REMARKS',
+            'CONSTRAINTS &amp; ISSUES',
+            'SIGN-OFF',
+            'DAILY ACTIVITIES &amp; MANPOWER BY AREA',
+            'INDIRECT MANPOWER',
+            'WEATHER REPORT',
+        ])
+
+    def test_disabled_progress_keeps_its_saved_position_for_later_reenable(self):
+        requested = [
+            'report_information',
+            'overall_progress',
+            'weather',
+            'indirect_manpower',
+        ]
+
+        self.assertEqual(
+            _normalise_pdf_section_order(requested)[:4],
+            requested,
+        )
+
+    def test_enabled_progress_uses_its_saved_custom_position(self):
+        report = deepcopy(MINIMAL_REPORT)
+        report['show_overall_progress'] = True
+        report['overall_progress'] = [{'description': 'Enabled progress'}]
+        report['section_order'] = [
+            'report_information',
+            'overall_progress',
+            'indirect_manpower',
+            'weather',
+            'daily_activities',
+            'constraints',
+            'remarks',
+            'sign_off',
+            'photo_documentation',
+        ]
+        paragraph_texts = []
+        original_paragraph = daily_report_app.Paragraph
+
+        def paragraph_spy(text, *args, **kwargs):
+            paragraph_texts.append(str(text))
+            return original_paragraph(text, *args, **kwargs)
+
+        with patch('daily_report_app.Paragraph', side_effect=paragraph_spy):
+            generate_pdf(report, None, deepcopy(DEFAULT_CONFIG))
+
+        headings = [
+            re.sub(r'^\d+\.&#160;&#160;', '', text)
+            for text in paragraph_texts
+            if re.match(r'^\d+\.&#160;&#160;', text)
+        ]
+        self.assertEqual(headings[:4], [
+            'REPORT INFORMATION',
+            'OVERALL PROGRESS',
+            'INDIRECT MANPOWER',
+            'WEATHER REPORT',
+        ])
+
     def test_explicitly_enabled_progress_uses_nine_sections(self):
         report = deepcopy(MINIMAL_REPORT)
         report['show_overall_progress'] = True
@@ -371,14 +596,44 @@ class PDFGenerationTests(unittest.TestCase):
         self.assertIn('id="showOverallProgress"', page)
         self.assertIn('aria-expanded="false"', page)
         self.assertIn('class="card-body p-2 d-none" id="overallProgressBody"', page)
-        self.assertIn('id="areasSectionNo">4 · </span>', page)
-        self.assertIn('id="signOffSectionNo">5 · </span>', page)
+        self.assertIn('id="areasSectionNo">Step 4 · </span>', page)
+        self.assertIn('id="signOffSectionNo">Step 5 · </span>', page)
         self.assertIn('function syncOverallProgressSection', page)
         self.assertIn('show_overall_progress:', page)
         self.assertIn('overallProgressToggle.checked = false;', page)
         self.assertIn('id="overallProgressContainer"', page)
         self.assertIn('function addOverallProgressRow', page)
         self.assertIn('id="f_photo_documentation_title"', page)
+        self.assertIn('id="reportSections"', page)
+        self.assertIn('id="pdfSectionOrderModal"', page)
+        self.assertIn('id="pdfSectionOrderList"', page)
+        self.assertIn('id="resetPDFSectionOrderBtn"', page)
+        self.assertIn('id="confirmPDFSectionOrderBtn"', page)
+        self.assertIn("report_information: { label:'Report Information'", page)
+        self.assertIn("photo_documentation: { label:'Photo Documentation'", page)
+        self.assertIn('function openPDFSectionOrderModal()', page)
+        self.assertIn('function confirmPDFSectionOrder()', page)
+        self.assertIn('function renderPDFPreview()', page)
+        self.assertIn("backdrop: 'static'", page)
+        self.assertIn('keyboard: false', page)
+        self.assertIn('section_order:  getSectionOrder()', page)
+        self.assertIn('function initPDFSectionOrderModal()', page)
+        self.assertNotIn('class="section-drag-handle"', page)
+        self.assertNotIn('id="resetSectionOrderBtn"', page)
+        self.assertNotIn('function initSectionReordering()', page)
+        self.assertIn('<nav class="app-navbar">', page)
+        self.assertIn('class="app-navbar-actions"', page)
+        self.assertIn('flex-wrap:nowrap', page)
+        self.assertNotIn('ms-auto flex-wrap align-items-center', page)
+        navbar_html = page[page.index('<nav class="app-navbar">'):page.index('</nav>')]
+        self.assertNotIn('id="autosave-indicator"', navbar_html)
+        self.assertIn(
+            'id="autosave-indicator" role="status" aria-live="polite"',
+            page,
+        )
+        self.assertIn("function showAutosaveStatus(message, type='info', autoHide=true)", page)
+        self.assertIn("showAutosaveStatus(`✓ Saved ${data.saved_at||''}`, 'success');", page)
+        self.assertIn('}, 2700);', page)
 
     def test_long_project_title_wraps_without_truncation(self):
         title = (
