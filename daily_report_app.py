@@ -377,7 +377,8 @@ DAILY_PDF_SECTION_ORDER = (
     'weather',
     'indirect_manpower',
     'overall_progress',
-    'daily_activities',
+    'area_activities',
+    'area_manpower',
     'constraints',
     'remarks',
     'sign_off',
@@ -389,7 +390,8 @@ DAILY_PDF_SECTION_TITLES = {
     'weather': 'WEATHER REPORT',
     'indirect_manpower': 'INDIRECT MANPOWER',
     'overall_progress': 'OVERALL PROGRESS',
-    'daily_activities': 'DAILY ACTIVITIES & MANPOWER BY AREA',
+    'area_activities': 'DAILY ACTIVITIES BY AREA',
+    'area_manpower':   'DIRECT MANPOWER BY AREA',
     'constraints': 'CONSTRAINTS & ISSUES',
     'remarks': 'REMARKS',
     'sign_off': 'SIGN-OFF',
@@ -402,14 +404,14 @@ _DAILY_PDF_SECTION_ALIASES = {
     'weather_report': ('weather',),
     'indirect': ('indirect_manpower',),
     'progress': ('overall_progress',),
-    'area_activities': ('daily_activities',),
-    'activities': ('daily_activities',),
+    # Legacy key expands to both new sections
+    'daily_activities': ('area_activities', 'area_manpower'),
+    'activities': ('area_activities',),
+    'manpower': ('area_manpower',),
     'constraints_issues': ('constraints',),
     'signoff': ('sign_off',),
     'photos': ('photo_documentation',),
-    # Accept a compact six-card order as well as the expanded order currently
-    # emitted by the Daily Report form.
-    'areas': ('daily_activities', 'constraints', 'remarks'),
+    'areas': ('area_activities', 'area_manpower', 'constraints', 'remarks'),
 }
 
 
@@ -433,16 +435,13 @@ def _normalise_pdf_section_order(value):
                 if section_key in DAILY_PDF_SECTION_ORDER and section_key not in requested:
                     requested.append(section_key)
 
-    # Backward compatibility for the former six-card form. It emitted only the
-    # Daily Activities anchor for the Areas card; its two derived sections must
-    # follow it. A list that names either companion explicitly is treated as a
-    # current, independently ordered nine-section list and is left untouched.
-    if (
-        'daily_activities' in requested
-        and 'constraints' not in requested
-        and 'remarks' not in requested
-    ):
-        insert_at = requested.index('daily_activities') + 1
+    # Backward compatibility: old drafts that still carry 'daily_activities'
+    # expand it to the two new sections; insert constraints/remarks after manpower.
+    if 'area_activities' in requested and 'area_manpower' not in requested:
+        insert_at = requested.index('area_activities') + 1
+        requested.insert(insert_at, 'area_manpower')
+    if 'area_manpower' in requested and 'constraints' not in requested and 'remarks' not in requested:
+        insert_at = requested.index('area_manpower') + 1
         requested[insert_at:insert_at] = ['constraints', 'remarks']
 
     ordered = ['report_information']
@@ -882,87 +881,96 @@ def generate_pdf(d, output_path, cfg):
             story.append(Paragraph('No overall progress reported.', st['ital_s']))
         story.append(Spacer(1, SECTION_GAP))
 
-    # Daily activities and manpower by area
-    story += SECTION('daily_activities', [CondPageBreak(32*mm)])
+    def act_cell(lines, label):
+        parts = [Paragraph(label, st['bold_s'])]
+        for j, line in enumerate([l for l in lines if str(l).strip()], 1):
+            parts.append(Paragraph(f'{j}.  {_esc(line)}', st['sm_s']))
+        if not parts[1:]:
+            parts.append(Paragraph('—', st['ital_s']))
+        return parts
+
     areas = d.get('areas', [])
+
+    # Section: Daily Activities by Area
+    story += SECTION('area_activities', [CondPageBreak(32*mm)])
     for area_index, area in enumerate(areas):
-        aid = area.get('id','')
+        aid = area.get('id', '')
         blocks = list(AH(aid))
-
-        def act_cell(lines, label):
-            parts = [Paragraph(label, st['bold_s'])]
-            for j,line in enumerate([l for l in lines if str(l).strip()],1):
-                parts.append(Paragraph(f'{j}.  {_esc(line)}', st['sm_s']))
-            if not parts[1:]:
-                parts.append(Paragraph('—', st['ital_s']))
-            return parts
-
-        at = Table([[act_cell(area.get('activities_today',[]),'Activity Today'),
-                     act_cell(area.get('activities_tomorrow',[]),'Activity Tomorrow')]],
-                   colWidths=[CW*0.55,CW*0.45])
+        if area.get('activities_swapped'):
+            cols = [act_cell(area.get('activities_tomorrow', []), 'Activity Tomorrow'),
+                    act_cell(area.get('activities_today', []), 'Activity Today')]
+        else:
+            cols = [act_cell(area.get('activities_today', []), 'Activity Today'),
+                    act_cell(area.get('activities_tomorrow', []), 'Activity Tomorrow')]
+        at = Table([cols], colWidths=[CW * 0.55, CW * 0.45])
         at.setStyle(TableStyle([
-            ('VALIGN',(0,0),(-1,-1),'TOP'),('BOX',(0,0),(-1,-1),0.5,GREY_LINE),
-            ('INNERGRID',(0,0),(-1,-1),0.4,GREY_LINE),('BACKGROUND',(0,0),(-1,-1),GREY_BG),
-            ('TOPPADDING',(0,0),(-1,-1),3),('BOTTOMPADDING',(0,0),(-1,-1),3),
-            ('LEFTPADDING',(0,0),(-1,-1),4),('RIGHTPADDING',(0,0),(-1,-1),4)]))
-        blocks += [at, Spacer(1,1*mm)]
-
-        mp = area.get('manpower',[])
-        if mp:
-            blocks.append(Paragraph(f'Direct Manpower — {_esc(aid)}', st['sub_s']))
-            mrows = [['No.','Name','Position','Task Today','Hours']]
-            for j,p in enumerate(mp,1):
-                mrows.append([
-                    str(j), TC(p.get('name','')), TC(p.get('role','')),
-                    TC(p.get('task','')), TC(p.get('hours',''), centered=True),
-                ])
-            mt = Table(mrows, colWidths=[8*mm,38*mm,30*mm,74*mm,CW-150*mm])
-            mt.setStyle(base_ts([
-                ('ALIGN',(0,0),(0,-1),'CENTER'),('ALIGN',(4,0),(4,-1),'CENTER'),
-                ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
-            ]))
-            blocks += [mt, Spacer(1,1*mm)]
-
-        # per-area indirect manpower
-        area_ind = area.get('indirect_manpower', [])
-        if area_ind:
-            blocks.append(Paragraph(f'Indirect Manpower — {_esc(aid)}', st['sub_s']))
-            irows_a = [['No.','Name','Role / Position','Working Hours']]
-            for j, p in enumerate(area_ind, 1):
-                irows_a.append([
-                    str(j), TC(p.get('name','')), TC(p.get('role','')),
-                    TC(p.get('hours',''), centered=True),
-                ])
-            it_a = Table(irows_a, colWidths=[9*mm, 70*mm, 55*mm, CW - 134*mm])
-            it_a.setStyle(base_ts([('ALIGN',(0,0),(0,-1),'CENTER'),
-                                    ('ALIGN',(3,0),(3,-1),'CENTER'),
-                                    ('VALIGN',(0,0),(-1,-1),'MIDDLE')]))
-            blocks += [it_a, Spacer(1,1*mm)]
-
-        ct = area.get('constraints','').strip()
-        rm = area.get('remarks','').strip()
-        if ct or rm:
-            cr = []
-            if ct: cr.append([Paragraph('Constraints:',st['bold_s']),Paragraph(_esc(ct),st['body_s'])])
-            if rm: cr.append([Paragraph('Remarks:',st['bold_s']),Paragraph(_esc(rm),st['body_s'])])
-            crt = Table(cr,colWidths=[25*mm,CW-25*mm])
-            crt.setStyle(TableStyle([
-                ('VALIGN',(0,0),(-1,-1),'TOP'),('GRID',(0,0),(-1,-1),0.3,GREY_LINE),
-                ('BACKGROUND',(0,0),(0,-1),colors.HexColor('#FFF8E7')),
-                ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),2),
-                ('LEFTPADDING',(0,0),(-1,-1),4)]))
-            blocks += [crt, Spacer(1,1*mm)]
-
-        # The area-to-area gap is added below so every area ends with the same
-        # amount of whitespace, regardless of which optional tables it has.
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'), ('BOX', (0, 0), (-1, -1), 0.5, GREY_LINE),
+            ('INNERGRID', (0, 0), (-1, -1), 0.4, GREY_LINE), ('BACKGROUND', (0, 0), (-1, -1), GREY_BG),
+            ('TOPPADDING', (0, 0), (-1, -1), 3), ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('LEFTPADDING', (0, 0), (-1, -1), 4), ('RIGHTPADDING', (0, 0), (-1, -1), 4)]))
+        blocks += [at, Spacer(1, 1 * mm)]
         if blocks and isinstance(blocks[-1], Spacer):
             blocks.pop()
         story.append(KeepTogether(blocks[:4]))
         for b in blocks[4:]: story.append(b)
         if area_index < len(areas) - 1:
-            story.append(Spacer(1,2.5*mm))
+            story.append(Spacer(1, 2.5 * mm))
+    story.append(Spacer(1, SECTION_GAP))
 
-    story.append(Spacer(1,SECTION_GAP))
+    # Section: Direct Manpower by Area
+    story += SECTION('area_manpower', [CondPageBreak(32*mm)])
+    for area_index, area in enumerate(areas):
+        aid = area.get('id', '')
+        blocks = list(AH(aid))
+        mp = area.get('manpower', [])
+        if mp:
+            mrows = [['No.', 'Name', 'Role / Position', 'Working Hours']]
+            for j, p in enumerate(mp, 1):
+                mrows.append([
+                    str(j), TC(p.get('name', '')), TC(p.get('role', '')),
+                    TC(p.get('hours', ''), centered=True),
+                ])
+            mt = Table(mrows, colWidths=[9*mm, 70*mm, 55*mm, CW - 134*mm])
+            mt.setStyle(base_ts([
+                ('ALIGN', (0, 0), (0, -1), 'CENTER'),
+                ('ALIGN', (3, 0), (3, -1), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ]))
+            blocks += [mt, Spacer(1, 1 * mm)]
+        area_ind = area.get('indirect_manpower', [])
+        if area_ind:
+            blocks.append(Paragraph(f'Indirect Manpower — {_esc(aid)}', st['sub_s']))
+            irows_a = [['No.', 'Name', 'Role / Position', 'Working Hours']]
+            for j, p in enumerate(area_ind, 1):
+                irows_a.append([
+                    str(j), TC(p.get('name', '')), TC(p.get('role', '')),
+                    TC(p.get('hours', ''), centered=True),
+                ])
+            it_a = Table(irows_a, colWidths=[9*mm, 70*mm, 55*mm, CW - 134*mm])
+            it_a.setStyle(base_ts([('ALIGN', (0, 0), (0, -1), 'CENTER'),
+                                    ('ALIGN', (3, 0), (3, -1), 'CENTER'),
+                                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
+            blocks += [it_a, Spacer(1, 1 * mm)]
+        ct = area.get('constraints', '').strip()
+        rm = area.get('remarks', '').strip()
+        if ct or rm:
+            cr = []
+            if ct: cr.append([Paragraph('Constraints:', st['bold_s']), Paragraph(_esc(ct), st['body_s'])])
+            if rm: cr.append([Paragraph('Remarks:', st['bold_s']), Paragraph(_esc(rm), st['body_s'])])
+            crt = Table(cr, colWidths=[25*mm, CW - 25*mm])
+            crt.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'), ('GRID', (0, 0), (-1, -1), 0.3, GREY_LINE),
+                ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#FFF8E7')),
+                ('TOPPADDING', (0, 0), (-1, -1), 2), ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4)]))
+            blocks += [crt, Spacer(1, 1 * mm)]
+        if blocks and isinstance(blocks[-1], Spacer):
+            blocks.pop()
+        story.append(KeepTogether(blocks[:4]))
+        for b in blocks[4:]: story.append(b)
+        if area_index < len(areas) - 1:
+            story.append(Spacer(1, 2.5 * mm))
+    story.append(Spacer(1, SECTION_GAP))
     # The compact constraints/remarks pair needs about 25 mm. Keeping this
     # threshold precise prevents a taller page header from wasting the rest
     # of page one and pushing the final photo row onto a third page.
