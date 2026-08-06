@@ -939,16 +939,27 @@ def generate_pdf(d, output_path, cfg):
                                     ('VALIGN',(0,0),(-1,-1),'MIDDLE')]))
             blocks += [it_a, Spacer(1,1*mm)]
 
-        rm = area.get('remarks','').strip()
+        # Remarks remain in the per-area Daily Activities section.
+        # Constraints are intentionally omitted here because they are rendered
+        # once in the dedicated "Constraints & Issues" PDF section below.
+        rm = area.get('remarks', '').strip()
         if rm:
-            cr = [[Paragraph('Remarks:',st['bold_s']),Paragraph(_esc(rm),st['body_s'])]]
-            crt = Table(cr,colWidths=[25*mm,CW-25*mm])
-            crt.setStyle(TableStyle([
-                ('VALIGN',(0,0),(-1,-1),'TOP'),('GRID',(0,0),(-1,-1),0.3,GREY_LINE),
-                ('BACKGROUND',(0,0),(0,-1),colors.HexColor('#FFF8E7')),
-                ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),2),
-                ('LEFTPADDING',(0,0),(-1,-1),4)]))
-            blocks += [crt, Spacer(1,1*mm)]
+            remarks_table = Table(
+                [[
+                    Paragraph('Remarks:', st['bold_s']),
+                    Paragraph(_esc(rm), st['body_s']),
+                ]],
+                colWidths=[25*mm, CW-25*mm],
+            )
+            remarks_table.setStyle(TableStyle([
+                ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                ('GRID', (0,0), (-1,-1), 0.3, GREY_LINE),
+                ('BACKGROUND', (0,0), (0,-1), colors.HexColor('#FFF8E7')),
+                ('TOPPADDING', (0,0), (-1,-1), 2),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+                ('LEFTPADDING', (0,0), (-1,-1), 4),
+            ]))
+            blocks += [remarks_table, Spacer(1,1*mm)]
 
         # The area-to-area gap is added below so every area ends with the same
         # amount of whitespace, regardless of which optional tables it has.
