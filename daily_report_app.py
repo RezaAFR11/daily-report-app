@@ -951,11 +951,9 @@ def generate_pdf(d, output_path, cfg):
                                     ('ALIGN', (3, 0), (3, -1), 'CENTER'),
                                     ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
             blocks += [it_a, Spacer(1, 1 * mm)]
-        ct = area.get('constraints', '').strip()
         rm = area.get('remarks', '').strip()
-        if ct or rm:
+        if rm:
             cr = []
-            if ct: cr.append([Paragraph('Constraints:', st['bold_s']), Paragraph(_esc(ct), st['body_s'])])
             if rm: cr.append([Paragraph('Remarks:', st['bold_s']), Paragraph(_esc(rm), st['body_s'])])
             crt = Table(cr, colWidths=[25*mm, CW - 25*mm])
             crt.setStyle(TableStyle([
