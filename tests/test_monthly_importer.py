@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from monthly_report.importer import (
+    DEFAULT_LIMITS,
     ImportLimits,
     PDFDependencyError,
     PDFExtractionError,
@@ -84,6 +85,97 @@ KNOWN_PROJECTS = [
 ]
 
 
+LEGACY_COMBINED_REPORT = "\n".join(
+    [
+        "1. REPORT INFORMATION",
+        "Project No.        PC-LEGACY-001",
+        "Project Name       Legacy Combined Project",
+        "Date               2026-08-10",
+        "Working Day        Day 10",
+        "3. INDIRECT MANPOWER",
+        f"{'No.':<8}{'Name':<38}{'Role / Position':<34}Working Hours",
+        f"{'1':<8}{'Faiz Satria':<38}{'Project Control':<34}07:00 - 17:00",
+        f"{'2':<8}{'Role Empty':<72}07:00 - 17:00",
+        "4. DAILY ACTIVITIES & MANPOWER BY AREA",
+        "\u25a0 Area Legacy",
+        f"{'Activity Today':<44}Activity Tomorrow",
+        f"{'1. Inspect panel':<44}1. Continue testing",
+        "Direct Manpower — Area Legacy",
+        f"{'No.':<8}{'Name':<25}{'Position':<25}{'Task Today':<30}Hours",
+        f"{'1':<8}{'Worker One':<25}{'Technician':<25}{'Inspect panel':<30}07:00 - 17:00",
+        f"{'2':<8}{'Worker Two':<25}{'Helper':<55}07:00 - 17:00",
+        "5. CONSTRAINTS & ISSUES",
+    ]
+)
+
+
+LEGACY_PAGE_BREAK_1 = "\n".join(
+    [
+        "1. REPORT INFORMATION",
+        "Project No.        PC-LEGACY-002",
+        "Project Name       Legacy Page Break Project",
+        "Date               2026-08-11",
+        "Working Day        Day 11",
+        "3. INDIRECT MANPOWER",
+        f"{'No.':<8}{'Name':<38}{'Role / Position':<34}Working Hours",
+        f"{'1':<8}{'Indirect One':<38}{'Administration':<34}07:00 - 17:00",
+        "5. DAILY ACTIVITIES & MANPOWER BY AREA",
+        "\u25a0 Area Continued",
+        f"{'Activity Today':<44}Activity Tomorrow",
+        f"{'1. Start test':<44}1. Finish test",
+        "Direct Manpower — Area Continued",
+        f"{'No.':<8}{'Name':<25}{'Position':<25}{'Task Today':<30}Hours",
+        "Daily Activity Report | footer from page one",
+    ]
+)
+
+
+LEGACY_PAGE_BREAK_2 = "\n".join(
+    [
+        "Daily Activity Report | repeated page header",
+        "Date: 2026-08-11 | Day: 11 | Project: PC-LEGACY-002",
+        f"{'1':<8}{'Page Break Worker':<25}{'Woodward Engineer':<55}07:00 - 17:00",
+        "Constraints: None",
+        "6. CONSTRAINTS & ISSUES",
+    ]
+)
+
+
+CURRENT_SPLIT_PAGE_1 = "\n".join(
+    [
+        "1. REPORT INFORMATION",
+        "Project No.        PC-CURRENT-001",
+        "Project Name       Current Split Project",
+        "Date               2026-08-12",
+        "Working Day        Day 12",
+        "3. INDIRECT MANPOWER",
+        f"{'No.':<8}{'Name':<38}{'Role / Position':<34}Working Hours",
+        "4. DAILY ACTIVITIES BY AREA",
+        "\u25a0 MA-42",
+        f"{'Activity Today':<44}Activity Tomorrow",
+        f"{'1. Install support':<44}1. Align support",
+        "\u25a0 MA-39",
+        f"{'Activity Today':<44}Activity Tomorrow",
+        f"{'1. Pull cable':<44}1. Terminate cable",
+        "5. DIRECT MANPOWER BY AREA",
+        "\u25a0 MA-42",
+        f"{'No.':<8}{'Name':<38}{'Role / Position':<34}Working Hours",
+        f"{'1':<8}{'Worker MA42':<38}{'Foreman':<34}07:00 - 17:00",
+    ]
+)
+
+
+CURRENT_SPLIT_PAGE_2 = "\n".join(
+    [
+        "Daily Activity Report | repeated page header",
+        "\u25a0 MA-39",
+        f"{'No.':<8}{'Name':<38}{'Role / Position':<34}Working Hours",
+        f"{'1':<8}{'Worker MA39':<38}{'Technician':<34}07:00 - 17:00",
+        "6. CONSTRAINTS & ISSUES",
+    ]
+)
+
+
 class MonthlyPDFImporterTests(unittest.TestCase):
     def import_with_pages(self, pages, **kwargs):
         reader = _reader_class(pages)
@@ -142,6 +234,104 @@ class MonthlyPDFImporterTests(unittest.TestCase):
         self.assertTrue(result["confidence"]["critical_complete"])
         self.assertEqual(result["confidence"]["fields"]["date"], 1.0)
 
+    def test_legacy_combined_profile_normalizes_global_and_area_manpower(self):
+        result = parse_daily_report_pages([LEGACY_COMBINED_REPORT])
+
+        self.assertEqual(
+            result["data"]["indirect_manpower"],
+            [
+                {
+                    "name": "Faiz Satria",
+                    "role": "Project Control",
+                    "task": "",
+                    "hours": "07:00 - 17:00",
+                },
+                {
+                    "name": "Role Empty",
+                    "role": "",
+                    "task": "",
+                    "hours": "07:00 - 17:00",
+                },
+            ],
+        )
+        area = result["data"]["areas"][0]
+        self.assertEqual(area["id"], "Area Legacy")
+        self.assertEqual(area["activities_today"], ["Inspect panel"])
+        self.assertEqual(area["activities_tomorrow"], ["Continue testing"])
+        self.assertEqual(
+            area["manpower"],
+            [
+                {
+                    "name": "Worker One",
+                    "role": "Technician",
+                    "task": "Inspect panel",
+                    "hours": "07:00 - 17:00",
+                },
+                {
+                    "name": "Worker Two",
+                    "role": "Helper",
+                    "task": "",
+                    "hours": "07:00 - 17:00",
+                },
+            ],
+        )
+        extraction = result["extraction"]["manpower"]
+        self.assertEqual(extraction["profile"], "combined_activities_manpower")
+        self.assertTrue(extraction["completeness"]["global_indirect"]["complete"])
+        self.assertTrue(extraction["completeness"]["direct_by_area"]["complete"])
+        self.assertTrue(
+            any(row["source_section"] == "daily_activities" for row in extraction["rows"])
+        )
+
+    def test_legacy_combined_table_state_survives_a_page_break(self):
+        result = parse_daily_report_pages(
+            [LEGACY_PAGE_BREAK_1, LEGACY_PAGE_BREAK_2]
+        )
+
+        area = result["data"]["areas"][0]
+        self.assertEqual(
+            area["manpower"],
+            [
+                {
+                    "name": "Page Break Worker",
+                    "role": "Woodward Engineer",
+                    "task": "",
+                    "hours": "07:00 - 17:00",
+                }
+            ],
+        )
+        provenance = result["extraction"]["manpower"]["rows"]
+        direct = next(row for row in provenance if row["category"] == "direct")
+        self.assertEqual(direct["table_schema"], "header")
+        self.assertTrue(direct["task_column"])
+        self.assertNotIn("manpower_rows_require_manual_review", _warning_codes(result))
+
+    def test_current_split_profile_merges_activity_and_manpower_areas(self):
+        result = parse_daily_report_pages(
+            [CURRENT_SPLIT_PAGE_1, CURRENT_SPLIT_PAGE_2]
+        )
+
+        self.assertEqual(result["extraction"]["manpower"]["profile"], "split_sections")
+        self.assertEqual(result["data"]["indirect_manpower"], [])
+        self.assertEqual(
+            [
+                (
+                    area["id"],
+                    area["activities_today"],
+                    [row["name"] for row in area["manpower"]],
+                )
+                for area in result["data"]["areas"]
+            ],
+            [
+                ("MA-42", ["Install support"], ["Worker MA42"]),
+                ("MA-39", ["Pull cable"], ["Worker MA39"]),
+            ],
+        )
+        completeness = result["extraction"]["completeness"]["manpower"]
+        self.assertTrue(completeness["global_indirect"]["complete"])
+        self.assertEqual(completeness["global_indirect"]["rows_extracted"], 0)
+        self.assertEqual(completeness["direct_by_area"]["rows_extracted"], 2)
+
     def test_invalid_magic_header_is_rejected_before_pdf_reader(self):
         with patch("monthly_report.importer._load_pdf_reader") as loader:
             with self.assertRaisesRegex(PDFValidationError, "magic"):
@@ -152,6 +342,18 @@ class MonthlyPDFImporterTests(unittest.TestCase):
         limits = ImportLimits(max_bytes=10, max_pages=2, max_text_chars=100)
         with self.assertRaisesRegex(PDFValidationError, "per-file limit"):
             import_daily_report_pdf(PDF_BYTES, limits=limits)
+
+    def test_default_file_size_limit_is_50_mib_and_boundary_is_inclusive(self):
+        self.assertEqual(DEFAULT_LIMITS.max_bytes, 50 * 1024 * 1024)
+        limits = ImportLimits(
+            max_bytes=len(PDF_BYTES),
+            max_pages=2,
+            max_text_chars=10_000,
+        )
+        reader = _reader_class([LAYOUT_REPORT])
+        with patch("monthly_report.importer._load_pdf_reader", return_value=reader):
+            result = import_daily_report_pdf(PDF_BYTES, limits=limits)
+        self.assertEqual(result["source"]["size_bytes"], len(PDF_BYTES))
 
     def test_page_count_limit_is_enforced(self):
         limits = ImportLimits(max_bytes=1024, max_pages=2, max_text_chars=1000)

@@ -79,10 +79,22 @@ _check_and_install()
 # ============================================================
 import os, json, io, base64, uuid, re, string, copy, math
 from datetime import datetime
+from urllib.parse import quote
 from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for
 from PIL import Image, ImageOps, UnidentifiedImageError
-from monthly_report import archive_final_daily_record
+from monthly_report import archive_final_daily_record, load_canonical_record
+from monthly_report.importer import DEFAULT_LIMITS as MONTHLY_PDF_IMPORT_LIMITS
 from monthly_report.web import get_monthly_reports_index, register_monthly_routes
+from google_drive_integration import (
+    GoogleDriveError,
+    GoogleDriveNotConfigured,
+    GoogleDrivePermissionError,
+    GoogleDriveReauthorizationRequired,
+    GoogleDriveUploadError,
+    ProjectCategoryError,
+    google_drive_is_configured,
+    upload_daily_report_pdf,
+)
 
 # ── PDF engine ────────────────────────────────────────────────────────────────
 from reportlab.lib.pagesizes import A4
@@ -377,7 +389,8 @@ DAILY_PDF_SECTION_ORDER = (
     'weather',
     'indirect_manpower',
     'overall_progress',
-    'daily_activities',
+    'area_activities',
+    'area_manpower',
     'constraints',
     'remarks',
     'sign_off',
@@ -389,7 +402,8 @@ DAILY_PDF_SECTION_TITLES = {
     'weather': 'WEATHER REPORT',
     'indirect_manpower': 'INDIRECT MANPOWER',
     'overall_progress': 'OVERALL PROGRESS',
-    'daily_activities': 'DAILY ACTIVITIES & MANPOWER BY AREA',
+    'area_activities': 'DAILY ACTIVITIES BY AREA',
+    'area_manpower':   'DIRECT MANPOWER BY AREA',
     'constraints': 'CONSTRAINTS & ISSUES',
     'remarks': 'REMARKS',
     'sign_off': 'SIGN-OFF',
@@ -402,14 +416,14 @@ _DAILY_PDF_SECTION_ALIASES = {
     'weather_report': ('weather',),
     'indirect': ('indirect_manpower',),
     'progress': ('overall_progress',),
-    'area_activities': ('daily_activities',),
-    'activities': ('daily_activities',),
+    # Legacy key expands to both new sections
+    'daily_activities': ('area_activities', 'area_manpower'),
+    'activities': ('area_activities',),
+    'manpower': ('area_manpower',),
     'constraints_issues': ('constraints',),
     'signoff': ('sign_off',),
     'photos': ('photo_documentation',),
-    # Accept a compact six-card order as well as the expanded order currently
-    # emitted by the Daily Report form.
-    'areas': ('daily_activities', 'constraints', 'remarks'),
+    'areas': ('area_activities', 'area_manpower', 'constraints', 'remarks'),
 }
 
 
@@ -433,16 +447,13 @@ def _normalise_pdf_section_order(value):
                 if section_key in DAILY_PDF_SECTION_ORDER and section_key not in requested:
                     requested.append(section_key)
 
-    # Backward compatibility for the former six-card form. It emitted only the
-    # Daily Activities anchor for the Areas card; its two derived sections must
-    # follow it. A list that names either companion explicitly is treated as a
-    # current, independently ordered nine-section list and is left untouched.
-    if (
-        'daily_activities' in requested
-        and 'constraints' not in requested
-        and 'remarks' not in requested
-    ):
-        insert_at = requested.index('daily_activities') + 1
+    # Backward compatibility: old drafts that still carry 'daily_activities'
+    # expand it to the two new sections; insert constraints/remarks after manpower.
+    if 'area_activities' in requested and 'area_manpower' not in requested:
+        insert_at = requested.index('area_activities') + 1
+        requested.insert(insert_at, 'area_manpower')
+    if 'area_manpower' in requested and 'constraints' not in requested and 'remarks' not in requested:
+        insert_at = requested.index('area_manpower') + 1
         requested[insert_at:insert_at] = ['constraints', 'remarks']
 
     ordered = ['report_information']
@@ -882,98 +893,93 @@ def generate_pdf(d, output_path, cfg):
             story.append(Paragraph('No overall progress reported.', st['ital_s']))
         story.append(Spacer(1, SECTION_GAP))
 
-    # Daily activities and manpower by area
-    story += SECTION('daily_activities', [CondPageBreak(32*mm)])
+    def act_cell(lines, label):
+        parts = [Paragraph(label, st['bold_s'])]
+        for j, line in enumerate([l for l in lines if str(l).strip()], 1):
+            parts.append(Paragraph(f'{j}.  {_esc(line)}', st['sm_s']))
+        if not parts[1:]:
+            parts.append(Paragraph('—', st['ital_s']))
+        return parts
+
     areas = d.get('areas', [])
+
+    # Section: Daily Activities by Area
+    story += SECTION('area_activities', [CondPageBreak(32*mm)])
     for area_index, area in enumerate(areas):
-        aid = area.get('id','')
+        aid = area.get('id', '')
         blocks = list(AH(aid))
-
-        def act_cell(lines, label):
-            parts = [Paragraph(label, st['bold_s'])]
-            for j,line in enumerate([l for l in lines if str(l).strip()],1):
-                parts.append(Paragraph(f'{j}.  {_esc(line)}', st['sm_s']))
-            if not parts[1:]:
-                parts.append(Paragraph('—', st['ital_s']))
-            return parts
-
-        at = Table([[act_cell(area.get('activities_today',[]),'Activity Today'),
-                     act_cell(area.get('activities_tomorrow',[]),'Activity Tomorrow')]],
-                   colWidths=[CW*0.55,CW*0.45])
+        if area.get('activities_swapped'):
+            cols = [act_cell(area.get('activities_tomorrow', []), 'Activity Tomorrow'),
+                    act_cell(area.get('activities_today', []), 'Activity Today')]
+        else:
+            cols = [act_cell(area.get('activities_today', []), 'Activity Today'),
+                    act_cell(area.get('activities_tomorrow', []), 'Activity Tomorrow')]
+        at = Table([cols], colWidths=[CW * 0.55, CW * 0.45])
         at.setStyle(TableStyle([
-            ('VALIGN',(0,0),(-1,-1),'TOP'),('BOX',(0,0),(-1,-1),0.5,GREY_LINE),
-            ('INNERGRID',(0,0),(-1,-1),0.4,GREY_LINE),('BACKGROUND',(0,0),(-1,-1),GREY_BG),
-            ('TOPPADDING',(0,0),(-1,-1),3),('BOTTOMPADDING',(0,0),(-1,-1),3),
-            ('LEFTPADDING',(0,0),(-1,-1),4),('RIGHTPADDING',(0,0),(-1,-1),4)]))
-        blocks += [at, Spacer(1,1*mm)]
-
-        mp = area.get('manpower',[])
-        if mp:
-            blocks.append(Paragraph(f'Direct Manpower — {_esc(aid)}', st['sub_s']))
-            mrows = [['No.','Name','Position','Task Today','Hours']]
-            for j,p in enumerate(mp,1):
-                mrows.append([
-                    str(j), TC(p.get('name','')), TC(p.get('role','')),
-                    TC(p.get('task','')), TC(p.get('hours',''), centered=True),
-                ])
-            mt = Table(mrows, colWidths=[8*mm,38*mm,30*mm,74*mm,CW-150*mm])
-            mt.setStyle(base_ts([
-                ('ALIGN',(0,0),(0,-1),'CENTER'),('ALIGN',(4,0),(4,-1),'CENTER'),
-                ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
-            ]))
-            blocks += [mt, Spacer(1,1*mm)]
-
-        # per-area indirect manpower
-        area_ind = area.get('indirect_manpower', [])
-        if area_ind:
-            blocks.append(Paragraph(f'Indirect Manpower — {_esc(aid)}', st['sub_s']))
-            irows_a = [['No.','Name','Role / Position','Working Hours']]
-            for j, p in enumerate(area_ind, 1):
-                irows_a.append([
-                    str(j), TC(p.get('name','')), TC(p.get('role','')),
-                    TC(p.get('hours',''), centered=True),
-                ])
-            it_a = Table(irows_a, colWidths=[9*mm, 70*mm, 55*mm, CW - 134*mm])
-            it_a.setStyle(base_ts([('ALIGN',(0,0),(0,-1),'CENTER'),
-                                    ('ALIGN',(3,0),(3,-1),'CENTER'),
-                                    ('VALIGN',(0,0),(-1,-1),'MIDDLE')]))
-            blocks += [it_a, Spacer(1,1*mm)]
-
-        ct = area.get('constraints','').strip()
-        rm = area.get('remarks','').strip()
-        if ct or rm:
-            cr = []
-            if ct: cr.append([Paragraph('Constraints:',st['bold_s']),Paragraph(_esc(ct),st['body_s'])])
-            if rm: cr.append([Paragraph('Remarks:',st['bold_s']),Paragraph(_esc(rm),st['body_s'])])
-            crt = Table(cr,colWidths=[25*mm,CW-25*mm])
-            crt.setStyle(TableStyle([
-                ('VALIGN',(0,0),(-1,-1),'TOP'),('GRID',(0,0),(-1,-1),0.3,GREY_LINE),
-                ('BACKGROUND',(0,0),(0,-1),colors.HexColor('#FFF8E7')),
-                ('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-1),2),
-                ('LEFTPADDING',(0,0),(-1,-1),4)]))
-            blocks += [crt, Spacer(1,1*mm)]
-
-        # The area-to-area gap is added below so every area ends with the same
-        # amount of whitespace, regardless of which optional tables it has.
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'), ('BOX', (0, 0), (-1, -1), 0.5, GREY_LINE),
+            ('INNERGRID', (0, 0), (-1, -1), 0.4, GREY_LINE), ('BACKGROUND', (0, 0), (-1, -1), GREY_BG),
+            ('TOPPADDING', (0, 0), (-1, -1), 3), ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('LEFTPADDING', (0, 0), (-1, -1), 4), ('RIGHTPADDING', (0, 0), (-1, -1), 4)]))
+        blocks += [at, Spacer(1, 1 * mm)]
         if blocks and isinstance(blocks[-1], Spacer):
             blocks.pop()
         story.append(KeepTogether(blocks[:4]))
         for b in blocks[4:]: story.append(b)
         if area_index < len(areas) - 1:
-            story.append(Spacer(1,2.5*mm))
+            story.append(Spacer(1, 2.5 * mm))
+    story.append(Spacer(1, SECTION_GAP))
 
-    story.append(Spacer(1,SECTION_GAP))
+    # Section: Direct Manpower by Area
+    story += SECTION('area_manpower', [CondPageBreak(32*mm)])
+    for area_index, area in enumerate(areas):
+        aid = area.get('id', '')
+        blocks = list(AH(aid))
+        mp = area.get('manpower', [])
+        if mp:
+            mrows = [['No.', 'Name', 'Role / Position', 'Working Hours']]
+            for j, p in enumerate(mp, 1):
+                mrows.append([
+                    str(j), TC(p.get('name', '')), TC(p.get('role', '')),
+                    TC(p.get('hours', ''), centered=True),
+                ])
+            mt = Table(mrows, colWidths=[9*mm, 70*mm, 55*mm, CW - 134*mm])
+            mt.setStyle(base_ts([
+                ('ALIGN', (0, 0), (0, -1), 'CENTER'),
+                ('ALIGN', (3, 0), (3, -1), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ]))
+            blocks += [mt, Spacer(1, 1 * mm)]
+        area_ind = area.get('indirect_manpower', [])
+        if area_ind:
+            blocks.append(Paragraph(f'Indirect Manpower — {_esc(aid)}', st['sub_s']))
+            irows_a = [['No.', 'Name', 'Role / Position', 'Working Hours']]
+            for j, p in enumerate(area_ind, 1):
+                irows_a.append([
+                    str(j), TC(p.get('name', '')), TC(p.get('role', '')),
+                    TC(p.get('hours', ''), centered=True),
+                ])
+            it_a = Table(irows_a, colWidths=[9*mm, 70*mm, 55*mm, CW - 134*mm])
+            it_a.setStyle(base_ts([('ALIGN', (0, 0), (0, -1), 'CENTER'),
+                                    ('ALIGN', (3, 0), (3, -1), 'CENTER'),
+                                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
+            blocks += [it_a, Spacer(1, 1 * mm)]
+        if blocks and isinstance(blocks[-1], Spacer):
+            blocks.pop()
+        story.append(KeepTogether(blocks[:4]))
+        for b in blocks[4:]: story.append(b)
+        if area_index < len(areas) - 1:
+            story.append(Spacer(1, 2.5 * mm))
+    story.append(Spacer(1, SECTION_GAP))
     # The compact constraints/remarks pair needs about 25 mm. Keeping this
     # threshold precise prevents a taller page header from wasting the rest
     # of page one and pushing the final photo row onto a third page.
     # Constraints and issues
     story += SECTION('constraints', [CondPageBreak(25*mm)])
-    any_c = any(a.get('constraints','').strip() for a in d.get('areas',[]))
-    if any_c:
+    if d.get('areas'):
         gcr = [['Area','Constraint / Issue']]
         for a in d.get('areas',[]):
             c = a.get('constraints','').strip()
-            if c: gcr.append([TC(a.get('id','')),TC(c)])
+            gcr.append([TC(a.get('id','')),TC(c or '-')])
         gct = Table(gcr,colWidths=[20*mm,CW-20*mm])
         gct.setStyle(base_ts([('VALIGN',(0,0),(-1,-1),'TOP')]))
         story.append(gct)
@@ -983,8 +989,24 @@ def generate_pdf(d, output_path, cfg):
 
     # Remarks
     story += SECTION('remarks')
+    area_remarks = []
+    for a in d.get('areas', []):
+        rm = a.get('remarks', '').strip()
+        area_remarks.append([TC(a.get('id', '')), TC(rm or '-')])
+
     gr = d.get('global_remarks','').strip()
-    story += [Paragraph(_esc(gr) if gr else '—',st['body_s']),Spacer(1,SECTION_GAP)]
+    if area_remarks:
+        grt = Table(
+            [['Area', 'Remarks']] + area_remarks,
+            colWidths=[20*mm, CW - 20*mm],
+        )
+        grt.setStyle(base_ts([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
+        story.append(grt)
+        if gr:
+            story += [Spacer(1, 1.5*mm), Paragraph(_esc(gr), st['body_s'])]
+    else:
+        story.append(Paragraph(_esc(gr) if gr else '—', st['body_s']))
+    story.append(Spacer(1,SECTION_GAP))
     # Sign-off (dynamic columns)
     story += SECTION('sign_off', [CondPageBreak(42*mm)])
     sign_offs = d.get('sign_offs', [])
@@ -1314,7 +1336,24 @@ _SAFE_USERNAME = re.compile(r'^[a-z0-9][a-z0-9_.-]{1,63}$')
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'gpa-daily-report-s3cr3t-2026')
-app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_UPLOAD_BYTES', 128 * 1024 * 1024))
+_REPORT_PDF_MAX_FILE_BYTES = MONTHLY_PDF_IMPORT_LIMITS.max_bytes
+_REPORT_UPLOAD_REQUEST_BYTES = _REPORT_PDF_MAX_FILE_BYTES + (2 * 1024 * 1024)
+app.config['MAX_CONTENT_LENGTH'] = max(
+    int(os.environ.get('MAX_UPLOAD_BYTES', _REPORT_UPLOAD_REQUEST_BYTES)),
+    _REPORT_UPLOAD_REQUEST_BYTES,
+)
+
+
+@app.errorhandler(413)
+def request_entity_too_large(_error):
+    if request.path.startswith('/monthly/'):
+        return jsonify({
+            'error': (
+                'PDF upload exceeds the request limit. Use the Weekly / Monthly Report page '
+                'to upload PDFs one at a time; each PDF may be up to 50 MB.'
+            )
+        }), 413
+    return jsonify({'error': 'Request is too large.'}), 413
 
 SCRIPT_DIR        = os.path.dirname(os.path.abspath(__file__))
 # Keep mutable data outside the deployed source when DATA_DIR is configured.
@@ -1377,18 +1416,53 @@ def get_reports_index(username):
 def append_report_index(username, entry):
     idx = get_reports_index(username)
     idx.insert(0, entry)
+    _save_reports_index(username, idx)
+
+
+def _save_reports_index(username, rows):
     reports_dir = get_reports_dir(username)
     os.makedirs(reports_dir, exist_ok=True)
     index_path = os.path.join(reports_dir, 'index.json')
     temp_path = f'{index_path}.{uuid.uuid4().hex}.tmp'
     try:
         with open(temp_path, 'w', encoding='utf-8') as f:
-            json.dump(idx, f, ensure_ascii=False, indent=2)
+            json.dump(rows, f, ensure_ascii=False, indent=2)
         os.replace(temp_path, index_path)
     finally:
         if os.path.exists(temp_path):
             try: os.remove(temp_path)
             except OSError: pass
+
+
+def update_report_index_entry(
+    username,
+    *,
+    filename,
+    archive_id='',
+    report_id='',
+    updates=None,
+):
+    """Atomically update the newest matching My Reports row."""
+    rows = get_reports_index(username)
+    updates = dict(updates or {})
+    matched = False
+    for row in rows:
+        if archive_id and row.get('archive_id') == archive_id:
+            row.update(updates)
+            matched = True
+            break
+        if not archive_id and report_id and row.get('canonical_report_id') == report_id:
+            row.update(updates)
+            matched = True
+            break
+        if not archive_id and not report_id and row.get('filename') == filename:
+            row.update(updates)
+            matched = True
+            break
+    if not matched:
+        return False
+    _save_reports_index(username, rows)
+    return True
 
 def _safe_report_filename_part(value, fallback):
     value = str(value or fallback)
@@ -1399,7 +1473,15 @@ def archive_generated_report(username, filename, pdf_bytes, entry):
     """Atomically save a PDF copy, then add it to the My Reports index."""
     reports_dir = get_reports_dir(username)
     os.makedirs(reports_dir, exist_ok=True)
-    report_path = os.path.join(reports_dir, filename)
+    # Keep the user-facing filename unchanged, but store every generated PDF
+    # under a unique internal name.  Reports from two projects can otherwise
+    # share the same date/day filename and silently overwrite each other's
+    # bytes while both rows remain in My Reports.
+    archive_id = str(entry.get('archive_id') or '')
+    if not re.fullmatch(r'[a-f0-9]{32}', archive_id):
+        archive_id = uuid.uuid4().hex
+    storage_filename = f'report-{archive_id}.pdf'
+    report_path = os.path.join(reports_dir, storage_filename)
     temp_path = f'{report_path}.{uuid.uuid4().hex}.tmp'
     try:
         with open(temp_path, 'wb') as f:
@@ -1411,19 +1493,44 @@ def archive_generated_report(username, filename, pdf_bytes, entry):
             except OSError: pass
 
     entry = dict(entry)
+    entry['archive_id'] = archive_id
+    entry['storage_filename'] = storage_filename
     entry['size_kb'] = round(len(pdf_bytes) / 1024, 1)
-    append_report_index(username, entry)
+    try:
+        append_report_index(username, entry)
+    except Exception:
+        # Do not leave an unindexed orphan if the atomic index write fails.
+        try:
+            os.remove(report_path)
+        except OSError:
+            pass
+        raise
 
 
-def get_owned_report_path(username, filename):
+def get_owned_report_path(username, filename, report_id='', archive_id=''):
     """Return a user's indexed Daily PDF path, never an arbitrary path."""
     filename = str(filename or '')
     if not filename or filename != os.path.basename(filename):
         return None
-    if not any(row.get('filename') == filename for row in get_reports_index(username)):
+    report_id = str(report_id or '')
+    archive_id = str(archive_id or '')
+    entry = None
+    for row in get_reports_index(username):
+        if row.get('filename') != filename:
+            continue
+        if archive_id and row.get('archive_id') != archive_id:
+            continue
+        if not archive_id and report_id and row.get('canonical_report_id') != report_id:
+            continue
+        entry = row
+        break
+    if entry is None:
+        return None
+    stored_name = str(entry.get('storage_filename') or filename)
+    if not stored_name or stored_name != os.path.basename(stored_name):
         return None
     reports_dir = os.path.abspath(get_reports_dir(username))
-    candidate = os.path.abspath(os.path.join(reports_dir, filename))
+    candidate = os.path.abspath(os.path.join(reports_dir, stored_name))
     try:
         if os.path.commonpath([reports_dir, candidate]) != reports_dir:
             return None
@@ -1630,7 +1737,12 @@ def admin_user_reports(username):
 def admin_download_report(username, filename):
     if username not in load_users():
         return 'Not found', 404
-    fpath = get_owned_report_path(username, filename)
+    fpath = get_owned_report_path(
+        username,
+        filename,
+        report_id=request.args.get('report_id', '').strip(),
+        archive_id=request.args.get('archive_id', '').strip(),
+    )
     if not fpath or not os.path.isfile(fpath):
         return 'Not found', 404
     return send_file(fpath, as_attachment=True, download_name=os.path.basename(filename))
@@ -1641,18 +1753,36 @@ def admin_delete_report():
     data = request.get_json(silent=True) or {}
     username = (data.get('username') or '').strip()
     filename = (data.get('filename') or '').strip()
+    report_id = (data.get('report_id') or '').strip()
+    archive_id = (data.get('archive_id') or '').strip()
     if not username or not filename:
         return jsonify({'error': 'Missing params'}), 400
     if username not in load_users():
         return jsonify({'error': 'User not found'}), 404
-    fpath = get_owned_report_path(username, filename)
+    fpath = get_owned_report_path(
+        username,
+        filename,
+        report_id=report_id,
+        archive_id=archive_id,
+    )
     if not fpath:
         return jsonify({'error': 'Report not found'}), 404
     if os.path.isfile(fpath):
         os.remove(fpath)
-    idx = [r for r in get_reports_index(username) if r.get('filename') != filename]
-    with open(os.path.join(get_reports_dir(username), 'index.json'), 'w') as f:
-        json.dump(idx, f, indent=2)
+    idx = [
+        r for r in get_reports_index(username)
+        if not (
+            r.get('filename') == filename
+            and (
+                (archive_id and r.get('archive_id') == archive_id)
+                or (
+                    not archive_id
+                    and (not report_id or r.get('canonical_report_id') == report_id)
+                )
+            )
+        )
+    ]
+    _save_reports_index(username, idx)
     return jsonify({'ok': True})
 
 # ── User report history ──────────────────────────────────────────────────────
@@ -1669,13 +1799,212 @@ def my_reports():
         projects=normalize_projects(cfg.get('projects', DEFAULT_PROJECTS)),
         username=username,
         project_start_date=cfg.get('project_start_date',''),
+        pdf_upload_max_bytes=_REPORT_PDF_MAX_FILE_BYTES,
+        google_drive_configured=google_drive_is_configured(),
         is_admin=session.get('is_admin', False))
+
+
+def _report_entry_for_drive(username, filename, archive_id='', report_id=''):
+    for row in get_reports_index(username):
+        if row.get('filename') != filename:
+            continue
+        if archive_id and row.get('archive_id') != archive_id:
+            continue
+        if not archive_id and report_id and row.get('canonical_report_id') != report_id:
+            continue
+        return row
+    return None
+
+
+def _drive_report_metadata(username, entry):
+    project_title = str(entry.get('project_title') or '').strip()
+    project_no = str(entry.get('project_no') or '').strip()
+    report_date = str(entry.get('date') or '').strip()
+    report_id = str(entry.get('canonical_report_id') or '').strip()
+    if report_id and (not project_title or not project_no or not report_date):
+        try:
+            record = load_canonical_record(DATA_DIR, username, report_id)
+            payload = record.get('payload') if isinstance(record.get('payload'), dict) else {}
+            project_title = project_title or str(
+                record.get('project_title') or payload.get('project_title') or ''
+            ).strip()
+            project_no = project_no or str(
+                record.get('project_no') or payload.get('project_no') or ''
+            ).strip()
+            report_date = report_date or str(
+                record.get('date') or payload.get('date') or ''
+            ).strip()
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            pass
+    return project_title, project_no, report_date
+
+
+@app.route('/reports/drive-upload', methods=['POST'])
+@login_required
+def upload_report_to_drive():
+    username = session['username']
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({'error': 'Request body must be a JSON object.'}), 400
+    filename = str(body.get('filename') or '').strip()
+    archive_id = str(body.get('archive_id') or '').strip()
+    report_id = str(body.get('report_id') or '').strip()
+    category_override = str(body.get('category_override') or '').strip()
+    if not filename or filename != os.path.basename(filename):
+        return jsonify({'error': 'Invalid report filename.'}), 400
+
+    entry = _report_entry_for_drive(username, filename, archive_id, report_id)
+    fpath = get_owned_report_path(
+        username,
+        filename,
+        report_id=report_id,
+        archive_id=archive_id,
+    )
+    if entry is None or not fpath or not os.path.isfile(fpath):
+        return jsonify({'error': 'Report not found.'}), 404
+
+    try:
+        attempts = max(0, int(entry.get('drive_attempts') or 0)) + 1
+    except (TypeError, ValueError):
+        attempts = 1
+    project_title, project_no, report_date = _drive_report_metadata(username, entry)
+    try:
+        with open(fpath, 'rb') as handle:
+            pdf_bytes = handle.read()
+        result = upload_daily_report_pdf(
+            pdf_bytes,
+            filename=filename,
+            project_title=project_title,
+            project_no=project_no,
+            report_date=report_date,
+            category_override=category_override,
+        )
+        updates = {
+            'drive_status': result['status'],
+            'drive_file_id': result['file_id'],
+            'drive_web_url': result['web_view_link'],
+            'drive_folder_path': ' / '.join(result['folder_path']),
+            'drive_category': result['category'],
+            'drive_category_override': category_override,
+            'drive_report_key': result['report_key'],
+            'drive_md5_checksum': result['md5_checksum'],
+            'drive_uploaded_at': datetime.now().astimezone().isoformat(timespec='seconds'),
+            'drive_attempts': attempts,
+            'drive_error': '',
+        }
+        update_report_index_entry(
+            username,
+            filename=filename,
+            archive_id=archive_id,
+            report_id=report_id,
+            updates=updates,
+        )
+        log_activity(
+            username,
+            'daily_report_drive_uploaded',
+            f"filename={filename} category={result['category']} status={result['status']}",
+        )
+        return jsonify({'ok': True, **result})
+    except GoogleDriveNotConfigured as exc:
+        return jsonify({'error': str(exc), 'code': 'drive_not_configured'}), 503
+    except ProjectCategoryError as exc:
+        update_report_index_entry(
+            username,
+            filename=filename,
+            archive_id=archive_id,
+            report_id=report_id,
+            updates={
+                'drive_status': 'needs_review',
+                'drive_attempts': attempts,
+                'drive_error': str(exc),
+            },
+        )
+        return jsonify({'error': str(exc), 'code': 'project_needs_review'}), 422
+    except GoogleDriveReauthorizationRequired as exc:
+        update_report_index_entry(
+            username,
+            filename=filename,
+            archive_id=archive_id,
+            report_id=report_id,
+            updates={
+                'drive_status': 'reauth_required',
+                'drive_attempts': attempts,
+                'drive_error': str(exc),
+            },
+        )
+        app.logger.warning(
+            'Google Drive reauthorization required for %s',
+            username,
+            exc_info=True,
+        )
+        return jsonify({'error': str(exc), 'code': 'drive_reauth_required'}), 503
+    except GoogleDrivePermissionError as exc:
+        update_report_index_entry(
+            username,
+            filename=filename,
+            archive_id=archive_id,
+            report_id=report_id,
+            updates={
+                'drive_status': 'permission_denied',
+                'drive_attempts': attempts,
+                'drive_error': str(exc),
+            },
+        )
+        app.logger.warning(
+            'Google Drive permission denied for %s',
+            username,
+            exc_info=True,
+        )
+        return jsonify({'error': str(exc), 'code': 'drive_permission_denied'}), 503
+    except GoogleDriveUploadError as exc:
+        update_report_index_entry(
+            username,
+            filename=filename,
+            archive_id=archive_id,
+            report_id=report_id,
+            updates={
+                'drive_status': 'failed',
+                'drive_attempts': attempts,
+                'drive_error': str(exc),
+            },
+        )
+        app.logger.warning(
+            'Google Drive upload failed for %s: %s',
+            username,
+            exc,
+            exc_info=True,
+        )
+        return jsonify({'error': str(exc), 'code': 'drive_upload_failed'}), 502
+    except GoogleDriveError as exc:
+        return jsonify({'error': str(exc), 'code': 'invalid_drive_report'}), 422
+    except Exception:
+        app.logger.exception('Unexpected Google Drive upload failure for %s', username)
+        update_report_index_entry(
+            username,
+            filename=filename,
+            archive_id=archive_id,
+            report_id=report_id,
+            updates={
+                'drive_status': 'failed',
+                'drive_attempts': attempts,
+                'drive_error': 'Unexpected Google Drive upload failure.',
+            },
+        )
+        return jsonify({
+            'error': 'Google Drive upload failed unexpectedly. Retry later.',
+            'code': 'drive_upload_failed',
+        }), 500
 
 @app.route('/reports/download/<path:filename>')
 @login_required
 def download_report(filename):
     username = session['username']
-    fpath = get_owned_report_path(username, filename)
+    fpath = get_owned_report_path(
+        username,
+        filename,
+        report_id=request.args.get('report_id', '').strip(),
+        archive_id=request.args.get('archive_id', '').strip(),
+    )
     if not fpath or not os.path.isfile(fpath):
         return 'Not found', 404
     return send_file(fpath, as_attachment=True, download_name=os.path.basename(filename))
@@ -1686,14 +2015,32 @@ def delete_report():
     username = session['username']
     data = request.get_json(silent=True) or {}
     filename = (data.get('filename') or '').strip()
-    fpath = get_owned_report_path(username, filename)
+    report_id = (data.get('report_id') or '').strip()
+    archive_id = (data.get('archive_id') or '').strip()
+    fpath = get_owned_report_path(
+        username,
+        filename,
+        report_id=report_id,
+        archive_id=archive_id,
+    )
     if not fpath:
         return jsonify({'error': 'Report not found'}), 404
     if os.path.isfile(fpath):
         os.remove(fpath)
-    idx = [r for r in get_reports_index(username) if r.get('filename') != filename]
-    with open(os.path.join(get_reports_dir(username), 'index.json'), 'w') as f:
-        json.dump(idx, f, indent=2)
+    idx = [
+        r for r in get_reports_index(username)
+        if not (
+            r.get('filename') == filename
+            and (
+                (archive_id and r.get('archive_id') == archive_id)
+                or (
+                    not archive_id
+                    and (not report_id or r.get('canonical_report_id') == report_id)
+                )
+            )
+        )
+    ]
+    _save_reports_index(username, idx)
     return jsonify({'ok': True})
 
 @app.route('/reports/check_date')
@@ -1743,6 +2090,7 @@ def index():
         app_config=cfg,
         initial_data=draft or None,
         username=username,
+        google_drive_configured=google_drive_is_configured(),
         is_admin=session.get('is_admin', False),
     )
 
@@ -1909,6 +2257,7 @@ def generate():
     json_archive_failed = False
     pdf_archive_failed = False
     canonical_record = None
+    pdf_archive_id = ''
     try:
         generated_at = datetime.now().astimezone().isoformat(timespec='seconds')
         photo_paths = {}
@@ -1934,11 +2283,14 @@ def generate():
         app.logger.exception('Could not archive final JSON for user %s', username)
 
     try:
+        pdf_archive_id = uuid.uuid4().hex
         archive_entry = {
+            'archive_id':   pdf_archive_id,
             'filename':     fname,
             'date':         d.get('date',''),
             'day_no':       d.get('day_no',''),
             'project_no':   d.get('project_no',''),
+            'project_title': d.get('project_title',''),
             'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
         }
         if canonical_record:
@@ -1952,6 +2304,7 @@ def generate():
         # A temporary My Reports problem must not block a valid PDF download.
         archive_failed = True
         pdf_archive_failed = True
+        pdf_archive_id = ''
         app.logger.exception('Could not archive generated PDF for user %s', username)
 
     buf.seek(0)
@@ -1964,6 +2317,14 @@ def generate():
     response.headers['X-Report-Archive-Status'] = 'failed' if archive_failed else 'saved'
     response.headers['X-Report-Pdf-Archive-Status'] = 'failed' if pdf_archive_failed else 'saved'
     response.headers['X-Report-Json-Archive-Status'] = 'failed' if json_archive_failed else 'saved'
+    response.headers['X-Report-Filename'] = quote(fname, safe='')
+    response.headers['X-Report-ID'] = (
+        str(canonical_record.get('report_id', '')) if canonical_record else ''
+    )
+    response.headers['X-Report-Archive-ID'] = pdf_archive_id
+    response.headers['X-GDrive-Configured'] = (
+        'true' if google_drive_is_configured() else 'false'
+    )
     return response
 
 @app.route('/save_draft', methods=['POST'])

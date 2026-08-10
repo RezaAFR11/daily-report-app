@@ -26,7 +26,7 @@ from typing import Any, BinaryIO, Iterable, Mapping, Sequence
 
 
 SCHEMA_VERSION = "daily-report-import/1"
-PARSER_VERSION = "monthly-pdf-importer/1.0"
+PARSER_VERSION = "monthly-pdf-importer/1.1"
 
 
 class PDFImportError(Exception):
@@ -49,7 +49,7 @@ class PDFExtractionError(PDFImportError):
 class ImportLimits:
     """Resource bounds applied to every individual PDF import."""
 
-    max_bytes: int = 30 * 1024 * 1024
+    max_bytes: int = 50 * 1024 * 1024
     max_pages: int = 50
     max_text_chars: int = 500_000
 
@@ -78,7 +78,9 @@ _SECTION_LABELS: dict[str, tuple[str, ...]] = {
     "daily_activities": (
         "DAILY ACTIVITIES & MANPOWER BY AREA",
         "DAILY ACTIVITIES AND MANPOWER BY AREA",
+        "DAILY ACTIVITIES BY AREA",
     ),
+    "direct_manpower": ("DIRECT MANPOWER BY AREA",),
     "constraints": ("CONSTRAINTS & ISSUES", "CONSTRAINTS AND ISSUES"),
     "remarks": ("REMARKS",),
     "sign_off": ("SIGN-OFF", "SIGN OFF"),
@@ -685,8 +687,12 @@ def _activity_items_from_segment(segment: str) -> tuple[list[str], list[str]]:
             right_match = _NUMBERED_ITEM.match(right)
             if left_match:
                 today.append(_compact(left_match.group(2)))
+            elif _compact(left).strip("-\u2013\u2014") and today:
+                today[-1] = _compact(f"{today[-1]} {_compact(left)}")
             if right_match:
                 tomorrow.append(_compact(right_match.group(2)))
+            elif _compact(right).strip("-\u2013\u2014") and tomorrow:
+                tomorrow[-1] = _compact(f"{tomorrow[-1]} {_compact(right)}")
         if today or tomorrow:
             return today, tomorrow
 
@@ -711,16 +717,29 @@ def _activity_items_from_segment(segment: str) -> tuple[list[str], list[str]]:
             today.append(_compact(match.group(2)))
         elif match and mode == "tomorrow":
             tomorrow.append(_compact(match.group(2)))
+        elif compact_line.strip("-\u2013\u2014") and mode == "today" and today:
+            today[-1] = _compact(f"{today[-1]} {compact_line}")
+        elif compact_line.strip("-\u2013\u2014") and mode == "tomorrow" and tomorrow:
+            tomorrow[-1] = _compact(f"{tomorrow[-1]} {compact_line}")
     return today, tomorrow
 
 
-def _extract_areas(activity_section: str) -> list[dict[str, Any]]:
-    if not activity_section.strip():
+_MANPOWER_ROW = re.compile(
+    r"^\s*(?P<number>\d{1,4})\s*[.)]?\s+"
+    r"(?P<body>.+?)\s{2,}"
+    r"(?P<hours>\d{1,2}:\d{2}\s*[-\u2013\u2014]\s*\d{1,2}:\d{2})\s*$"
+)
+
+
+def _area_segments(section: str) -> list[tuple[str, list[str]]]:
+    """Split an area-based section while retaining layout-preserving lines."""
+
+    if not section.strip():
         return []
     segments: list[tuple[str, list[str]]] = []
     current_id: str | None = None
     current_lines: list[str] = []
-    for line in activity_section.splitlines():
+    for line in section.splitlines():
         marker = _AREA_MARKER.match(line)
         if marker:
             if current_id is not None or current_lines:
@@ -731,24 +750,314 @@ def _extract_areas(activity_section: str) -> list[dict[str, Any]]:
             current_lines.append(line)
     if current_id is not None or current_lines:
         segments.append((current_id or "Imported PDF", current_lines))
+    return segments
 
-    areas: list[dict[str, Any]] = []
-    for area_id, lines in segments:
-        today, tomorrow = _activity_items_from_segment("\n".join(lines))
-        if not today and not tomorrow:
+
+def _manpower_header(line: str) -> dict[str, Any] | None:
+    normalized = _normalize_section_label(line)
+    if not re.search(r"\bNO\b", normalized) or not re.search(r"\bNAME\b", normalized):
+        return None
+    if not re.search(r"\b(?:WORKING\s+)?HOURS?\b", normalized):
+        return None
+    return {
+        "has_task": bool(re.search(r"\bTASK(?:\s+TODAY)?\b", normalized)),
+        "raw": _compact(line),
+    }
+
+
+def _manpower_kind(line: str) -> str | None:
+    compact_line = _compact(line)
+    if re.search(r"\bDirect\s+Manpower\b", compact_line, re.IGNORECASE):
+        return "direct"
+    if re.search(r"\bIndirect\s+Manpower\b", compact_line, re.IGNORECASE):
+        return "indirect"
+    return None
+
+
+def _parse_manpower_row(
+    line: str,
+    *,
+    has_task: bool,
+) -> tuple[dict[str, str], str] | None:
+    """Parse one layout-text manpower row into the application's row shape.
+
+    PDF table extractors omit empty cells.  Consequently a row containing only
+    ``number, name, hours`` is valid and deliberately retains an empty role.
+    ``Task Today`` is optional in legacy layouts and is always represented in
+    the canonical result so all supported PDF profiles produce the same shape.
+    """
+
+    match = _MANPOWER_ROW.match(line)
+    if not match:
+        return None
+    cells = [
+        _compact(cell)
+        for cell in re.split(r"\s{2,}", match.group("body").strip())
+        if _compact(cell)
+    ]
+    if not cells:
+        return None
+
+    name = cells[0]
+    role = ""
+    task = ""
+    if has_task:
+        if len(cells) >= 2:
+            role = cells[1]
+        if len(cells) >= 3:
+            task = _compact(" ".join(cells[2:]))
+    elif len(cells) >= 2:
+        role = _compact(" ".join(cells[1:]))
+
+    return {
+        "name": name,
+        "role": role,
+        "task": task,
+        "hours": _compact(match.group("hours")),
+    }, match.group("number")
+
+
+def _parse_manpower_lines(
+    lines: Sequence[str],
+    *,
+    default_category: str | None,
+    area_id: str | None,
+    source_section: str,
+) -> tuple[
+    dict[str, list[dict[str, str]]],
+    dict[str, Any],
+    list[dict[str, Any]],
+]:
+    rows: dict[str, list[dict[str, str]]] = {"direct": [], "indirect": []}
+    provenance_rows: list[dict[str, Any]] = []
+    category = default_category
+    header: dict[str, Any] | None = None
+    table_count = 0
+    malformed_count = 0
+
+    for line_index, line in enumerate(lines, start=1):
+        explicit_category = _manpower_kind(line)
+        if explicit_category:
+            category = explicit_category
+            header = None
             continue
-        areas.append(
+
+        detected_header = _manpower_header(line)
+        if detected_header:
+            header = detected_header
+            table_count += 1
+            continue
+
+        # Page headers/footers may occur between a legacy table header and its
+        # continuation rows.  They intentionally do not reset table state.
+        compact_line = _compact(line)
+        if re.match(r"^(?:Constraints|Remarks)\s*:", compact_line, re.IGNORECASE):
+            header = None
+            continue
+
+        rowish = bool(
+            re.match(r"^\s*\d{1,4}\s*[.)]?\s+", line)
+            and re.search(
+                r"\d{1,2}:\d{2}\s*[-\u2013\u2014]\s*\d{1,2}:\d{2}\s*$",
+                line,
+            )
+        )
+        if not rowish or category not in rows:
+            continue
+
+        # If a page begins with continuation rows but the PDF extractor did
+        # not retain the preceding header, use the section's known category
+        # and record that the schema had to be inferred.
+        inferred_header = header is None
+        parsed = _parse_manpower_row(
+            line,
+            has_task=bool(header and header.get("has_task")),
+        )
+        if not parsed:
+            malformed_count += 1
+            continue
+        row, source_row_number = parsed
+        rows[category].append(row)
+        provenance_rows.append(
             {
-                "id": area_id,
-                "activities_today": today,
-                "activities_tomorrow": tomorrow,
-                "manpower": [],
-                "indirect_manpower": [],
-                "constraints": "",
-                "remarks": "",
-                "photos": [],
+                "category": category,
+                "area_id": area_id,
+                "source_section": source_section,
+                "source_line": line_index,
+                "source_row_number": source_row_number,
+                "table_schema": "inferred" if inferred_header else "header",
+                "task_column": bool(header and header.get("has_task")),
             }
         )
+
+    warnings: list[dict[str, Any]] = []
+    if malformed_count:
+        label = f" for area '{area_id}'" if area_id else ""
+        warnings.append(
+            _warning(
+                "manpower_rows_require_manual_review",
+                f"{malformed_count} manpower row(s){label} could not be mapped safely",
+                field="manpower",
+            )
+        )
+    metadata = {
+        "source_section": source_section,
+        "area_id": area_id,
+        "table_count": table_count,
+        "rows_extracted": len(rows["direct"]) + len(rows["indirect"]),
+        "direct_rows": len(rows["direct"]),
+        "indirect_rows": len(rows["indirect"]),
+        "malformed_rows": malformed_count,
+        "complete": table_count > 0 and malformed_count == 0,
+        "row_provenance": provenance_rows,
+    }
+    return rows, metadata, warnings
+
+
+def _area_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", unicodedata.normalize("NFKC", value).casefold())
+
+
+def _empty_area(area_id: str) -> dict[str, Any]:
+    return {
+        "id": area_id,
+        "activities_today": [],
+        "activities_tomorrow": [],
+        "manpower": [],
+        "indirect_manpower": [],
+        "constraints": "",
+        "remarks": "",
+        "photos": [],
+    }
+
+
+def _extract_daily_content(
+    sections: Mapping[str, str],
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, str]],
+    dict[str, Any],
+    list[dict[str, Any]],
+]:
+    """Normalize legacy-combined and current-split daily report layouts."""
+
+    areas: list[dict[str, Any]] = []
+    areas_by_key: dict[str, dict[str, Any]] = {}
+    manpower_metadata: list[dict[str, Any]] = []
+    provenance_rows: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+
+    def ensure_area(area_id: str) -> dict[str, Any]:
+        key = _area_key(area_id)
+        area = areas_by_key.get(key)
+        if area is None:
+            area = _empty_area(area_id)
+            areas_by_key[key] = area
+            areas.append(area)
+        return area
+
+    activity_section = sections.get("daily_activities", "")
+    for area_id, lines in _area_segments(activity_section):
+        today, tomorrow = _activity_items_from_segment("\n".join(lines))
+        parsed_rows, metadata, row_warnings = _parse_manpower_lines(
+            lines,
+            default_category=None,
+            area_id=area_id,
+            source_section="daily_activities",
+        )
+        if today or tomorrow or metadata["rows_extracted"]:
+            area = ensure_area(area_id)
+            area["activities_today"].extend(today)
+            area["activities_tomorrow"].extend(tomorrow)
+            area["manpower"].extend(parsed_rows["direct"])
+            area["indirect_manpower"].extend(parsed_rows["indirect"])
+        manpower_metadata.append(metadata)
+        provenance_rows.extend(metadata.pop("row_provenance"))
+        warnings.extend(row_warnings)
+
+    direct_section = sections.get("direct_manpower", "")
+    for area_id, lines in _area_segments(direct_section):
+        parsed_rows, metadata, row_warnings = _parse_manpower_lines(
+            lines,
+            default_category="direct",
+            area_id=area_id,
+            source_section="direct_manpower",
+        )
+        if metadata["rows_extracted"]:
+            area = ensure_area(area_id)
+            area["manpower"].extend(parsed_rows["direct"])
+            area["indirect_manpower"].extend(parsed_rows["indirect"])
+        manpower_metadata.append(metadata)
+        provenance_rows.extend(metadata.pop("row_provenance"))
+        warnings.extend(row_warnings)
+
+    global_section = sections.get("indirect_manpower", "")
+    global_rows, global_metadata, global_warnings = _parse_manpower_lines(
+        global_section.splitlines(),
+        default_category="indirect",
+        area_id=None,
+        source_section="indirect_manpower",
+    )
+    provenance_rows.extend(global_metadata.pop("row_provenance"))
+    manpower_metadata.append(global_metadata)
+    warnings.extend(global_warnings)
+
+    direct_sources = [
+        item
+        for item in manpower_metadata
+        if item["source_section"] in {"daily_activities", "direct_manpower"}
+    ]
+    direct_tables = sum(item["table_count"] for item in direct_sources)
+    direct_malformed = sum(item["malformed_rows"] for item in direct_sources)
+    direct_rows = sum(item["direct_rows"] for item in direct_sources)
+    if direct_section and direct_tables == 0:
+        warnings.append(
+            _warning(
+                "direct_manpower_table_unrecognized",
+                "Direct manpower section was found but no supported table header was recognized",
+                field="manpower",
+            )
+        )
+    if global_section and global_metadata["table_count"] == 0:
+        warnings.append(
+            _warning(
+                "indirect_manpower_table_unrecognized",
+                "Indirect manpower section was found but no supported table header was recognized",
+                field="indirect_manpower",
+            )
+        )
+
+    profile = "split_sections" if direct_section else "combined_activities_manpower"
+    extraction = {
+        "profile": profile,
+        "rows": provenance_rows,
+        "tables": manpower_metadata,
+        "completeness": {
+            "global_indirect": {
+                "section_found": bool(global_section),
+                "table_found": global_metadata["table_count"] > 0,
+                "rows_extracted": global_metadata["indirect_rows"],
+                "malformed_rows": global_metadata["malformed_rows"],
+                "complete": bool(global_section)
+                and global_metadata["table_count"] > 0
+                and global_metadata["malformed_rows"] == 0,
+            },
+            "direct_by_area": {
+                "section_found": bool(activity_section or direct_section),
+                "table_found": direct_tables > 0,
+                "rows_extracted": direct_rows,
+                "malformed_rows": direct_malformed,
+                "complete": direct_tables > 0 and direct_malformed == 0,
+            },
+        },
+    }
+    return areas, global_rows["indirect"], extraction, warnings
+
+
+def _extract_areas(activity_section: str) -> list[dict[str, Any]]:
+    """Backward-compatible activity-only wrapper used by older callers."""
+
+    areas, _, _, _ = _extract_daily_content({"daily_activities": activity_section})
     return areas
 
 
@@ -965,7 +1274,10 @@ def parse_daily_report_pages(
             )
 
     sections, section_matches = _collect_sections(normalized_pages)
-    areas = _extract_areas(sections.get("daily_activities", ""))
+    areas, indirect_manpower, manpower_extraction, manpower_warnings = (
+        _extract_daily_content(sections)
+    )
+    warnings.extend(manpower_warnings)
     if sections.get("daily_activities") and not areas:
         warnings.append(
             _warning(
@@ -1021,7 +1333,7 @@ def parse_daily_report_pages(
         "approved_by": "",
         "global_remarks": _compact(sections.get("remarks", "")),
         "weather": {},
-        "indirect_manpower": [],
+        "indirect_manpower": indirect_manpower,
         "show_overall_progress": False,
         "overall_progress": [],
         "areas": areas,
@@ -1052,6 +1364,10 @@ def parse_daily_report_pages(
             "sections": sections,
             "section_matches": section_matches,
             "project_match": project_match,
+            "manpower": manpower_extraction,
+            "completeness": {
+                "manpower": manpower_extraction["completeness"],
+            },
         },
     }
 

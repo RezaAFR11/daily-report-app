@@ -8,6 +8,9 @@ venv/
 .env
 .env.*
 !.env.example
+client_secret*.json
+credentials*.json
+token*.json
 
 # Mutable application data (store these in a Railway Volume)
 users/
@@ -19,9 +22,14 @@ logos/
 # Local Railway data copies used only by localhost
 local-data/
 .local-data-staging-*/
+monthly_reports/
 
 # Generated documents and local artifacts
 review_samples/
+.tmp_visual_review/
+remote-draft-check.json
+tmp_*
+*.xlsx
 *.pdf
 *.docx
 *.log

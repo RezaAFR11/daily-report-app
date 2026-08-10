@@ -1,4 +1,6 @@
+import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +8,7 @@ from unittest.mock import patch
 
 from flask import Flask
 
+from monthly_report.importer import DEFAULT_LIMITS, PDFImportError
 from monthly_report.web import (
     _normalize_progress,
     _prepare_draft,
@@ -225,11 +228,102 @@ class MonthlyWebRouteTests(unittest.TestCase):
         loader.assert_called_once_with(
             str(self.data_dir),
             username="reza",
-            project_no=PROJECT_NO,
             date_from="2026-07-01",
             date_to="2026-07-02",
         )
         return response
+
+    def _start_staged_upload(
+        self,
+        file_ids=None,
+        *,
+        report_type="monthly",
+        report_mode="mtd",
+        date_from="2026-07-01",
+        date_to="2026-07-02",
+        size_bytes=1024,
+    ):
+        file_ids = file_ids or ["a" * 32]
+        response = self.client.post(
+            "/monthly/upload-session/start",
+            json={
+                "project_no": PROJECT_NO,
+                "project_title": PROJECT_TITLE,
+                "date_from": date_from,
+                "date_to": date_to,
+                "report_type": report_type,
+                "report_mode": report_mode,
+                "files": [
+                    {
+                        "file_id": file_id,
+                        "filename": f"daily-{index + 1}.pdf",
+                        "size_bytes": size_bytes,
+                    }
+                    for index, file_id in enumerate(file_ids)
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        return response.get_json()["upload_session_id"]
+
+    def _imported_pdf(self, report_date, digest):
+        payload = json.loads(json.dumps(self.records[0]["payload"]))
+        payload["date"] = report_date
+        return {
+            "revision": 1,
+            "status": "ready",
+            "report_date": report_date,
+            "data": payload,
+            "source": {
+                "filename": f"{report_date}.pdf",
+                "sha256": digest,
+                "size_bytes": 1024,
+                "page_count": 5,
+            },
+            "confidence": {"overall": 0.95},
+            "warnings": [],
+        }
+
+    def _upload_staged_file(self, upload_session_id, file_id, filename="daily.pdf"):
+        return self.client.post(
+            f"/monthly/upload-session/{upload_session_id}/file",
+            headers={"X-Upload-File-ID": file_id},
+            data={
+                "file_id": file_id,
+                "file": (io.BytesIO(b"%PDF-1.4 staged test"), filename),
+            },
+            content_type="multipart/form-data",
+        )
+
+    def _apply_source_validation(self, compiled_body, *, decisions=None):
+        draft = compiled_body["draft"]
+        groups = draft["source_validation"]["project_groups"]
+        resolutions = decisions or [
+            {"group_key": group["key"], "decision": "merge"}
+            for group in groups
+        ]
+        duplicate_resolutions = [
+            {
+                "group_key": group["key"],
+                "selected_record_id": group["candidates"][0]["record_id"],
+            }
+            for group in draft["source_validation"].get("duplicate_groups", [])
+        ]
+        response = self.client.post(
+            f"/monthly/validate/{compiled_body['draft_id']}",
+            json={
+                "source_validation": {
+                    "confirmed": True,
+                    "project_no": PROJECT_NO,
+                    "project_title": PROJECT_TITLE,
+                    "notes": "Reviewed in route test",
+                    "project_resolutions": resolutions,
+                    "duplicate_resolutions": duplicate_resolutions,
+                }
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        return response.get_json()
 
     def test_stored_compile_uses_records_and_persists_isolated_draft(self):
         response = self._compile_stored()
@@ -259,10 +353,116 @@ class MonthlyWebRouteTests(unittest.TestCase):
         self.assertTrue(draft_path.is_file())
         self.assertEqual(json.loads(draft_path.read_text(encoding="utf-8"))["owner"], "reza")
 
+    def test_project_ambiguity_requires_validation_and_keep_separate_reaggregates(self):
+        variant = json.loads(json.dumps(self.records[1]))
+        variant["project_no"] = "LEGACY-PC-DAR"
+        variant["project_title"] = "Legacy Project Name"
+        variant["payload"]["project_no"] = "LEGACY-PC-DAR"
+        variant["payload"]["project_title"] = "Legacy Project Name"
+        with patch(
+            "monthly_report.web.list_canonical_records",
+            return_value=[self.records[0], variant],
+        ):
+            compiled = self.client.post(
+                "/monthly/compile/stored",
+                json={
+                    "project_no": PROJECT_NO,
+                    "project_title": PROJECT_TITLE,
+                    "date_from": "2026-07-01",
+                    "date_to": "2026-07-02",
+                    "report_mode": "mtd",
+                },
+            )
+        self.assertEqual(compiled.status_code, 200, compiled.get_data(as_text=True))
+        body = compiled.get_json()
+        self.assertTrue(body["draft"]["source_validation"]["required"])
+        self.assertEqual(body["draft"]["coverage"]["included_count"], 1)
+
+        blocked = self.client.post(
+            f"/monthly/preview/{body['draft_id']}",
+            json={"report_mode": "mtd"},
+        )
+        self.assertEqual(blocked.status_code, 400)
+        self.assertIn("Source Data Validation", blocked.get_json()["error"])
+
+        decisions = []
+        for group in body["draft"]["source_validation"]["project_groups"]:
+            decisions.append({
+                "group_key": group["key"],
+                "decision": "separate" if group["project_no"] == "LEGACY-PC-DAR" else "merge",
+            })
+        validated = self._apply_source_validation(body, decisions=decisions)
+        self.assertEqual(validated["draft"]["coverage"]["included_count"], 1)
+        self.assertEqual(
+            validated["draft"]["source_validation"]["excluded_record_count"],
+            1,
+        )
+        self.assertTrue(validated["draft"]["source_validation"]["applied"])
+
+        merged = self._apply_source_validation(validated)
+        self.assertEqual(merged["draft"]["coverage"]["included_count"], 2)
+        self.assertFalse(any(
+            "kept separate and excluded" in warning
+            for warning in merged["draft"].get("warnings", [])
+        ))
+
+    def test_same_date_duplicate_is_selected_explicitly_before_generation(self):
+        first = json.loads(json.dumps(self.records[0]))
+        second = json.loads(json.dumps(self.records[1]))
+        second["date"] = first["date"]
+        second["payload"]["date"] = first["date"]
+        second["report_id"] = "report-explicit-second"
+        with patch(
+            "monthly_report.web.list_canonical_records",
+            return_value=[first, second],
+        ):
+            compiled = self.client.post(
+                "/monthly/compile/stored",
+                json={
+                    "project_no": PROJECT_NO,
+                    "project_title": PROJECT_TITLE,
+                    "date_from": "2026-07-01",
+                    "date_to": "2026-07-01",
+                    "report_mode": "mtd",
+                },
+            )
+        self.assertEqual(compiled.status_code, 200, compiled.get_data(as_text=True))
+        body = compiled.get_json()
+        duplicate = body["draft"]["source_validation"]["duplicate_groups"][0]
+        chosen_id = duplicate["candidates"][0]["record_id"]
+        validation = body["draft"]["source_validation"]
+        response = self.client.post(
+            f"/monthly/validate/{body['draft_id']}",
+            json={
+                "source_validation": {
+                    "confirmed": True,
+                    "project_no": PROJECT_NO,
+                    "project_title": PROJECT_TITLE,
+                    "project_resolutions": [
+                        {"group_key": group["key"], "decision": "merge"}
+                        for group in validation["project_groups"]
+                    ],
+                    "duplicate_resolutions": [{
+                        "group_key": duplicate["key"],
+                        "selected_record_id": chosen_id,
+                    }],
+                }
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        validated = response.get_json()["draft"]
+        self.assertEqual(validated["coverage"]["included_count"], 1)
+        self.assertEqual(validated["source_manifest"][0]["report_id"], chosen_id)
+        self.assertEqual(
+            validated["source_validation"]["duplicate_excluded_record_count"],
+            1,
+        )
+
     def test_final_requires_confirmation_then_archives_and_downloads_pdf(self):
         compile_response = self._compile_stored(report_mode="final")
         self.assertEqual(compile_response.status_code, 200, compile_response.get_data(as_text=True))
-        draft_id = compile_response.get_json()["draft_id"]
+        validated = self._apply_source_validation(compile_response.get_json())
+        draft_id = validated["draft_id"]
 
         rejected = self.client.post(
             f"/monthly/generate/{draft_id}",
@@ -306,6 +506,262 @@ class MonthlyWebRouteTests(unittest.TestCase):
         self.assertEqual(download.mimetype, "application/pdf")
         self.assertEqual(download.data, pdf_path.read_bytes())
         download.close()
+
+    def test_staged_upload_processes_files_separately_and_finalize_is_idempotent(self):
+        file_ids = ["a" * 32, "b" * 32]
+        upload_session_id = self._start_staged_upload(file_ids)
+        imported = [
+            self._imported_pdf("2026-07-01", "1" * 64),
+            self._imported_pdf("2026-07-02", "2" * 64),
+        ]
+
+        with patch("monthly_report.web.import_daily_report_pdf", side_effect=imported) as importer:
+            first = self._upload_staged_file(upload_session_id, file_ids[0], "day-1.pdf")
+            second = self._upload_staged_file(upload_session_id, file_ids[1], "day-2.pdf")
+
+        self.assertEqual(first.status_code, 200, first.get_data(as_text=True))
+        self.assertEqual(second.status_code, 200, second.get_data(as_text=True))
+        self.assertTrue(first.get_json()["item"]["included"])
+        self.assertTrue(second.get_json()["item"]["included"])
+        self.assertEqual(importer.call_count, 2)
+
+        compiled = self.client.post(f"/monthly/upload-session/{upload_session_id}/compile")
+        self.assertEqual(compiled.status_code, 200, compiled.get_data(as_text=True))
+        first_body = compiled.get_json()
+        self.assertEqual(first_body["draft"]["coverage"]["included_count"], 2)
+
+        compiled_again = self.client.post(f"/monthly/upload-session/{upload_session_id}/compile")
+        self.assertEqual(compiled_again.status_code, 200, compiled_again.get_data(as_text=True))
+        second_body = compiled_again.get_json()
+        self.assertTrue(second_body["cached"])
+        self.assertEqual(second_body["draft_id"], first_body["draft_id"])
+
+        drafts = list(
+            (self.data_dir / "monthly_reports" / "reza" / "drafts").glob("*.json")
+        )
+        self.assertEqual(len(drafts), 1)
+        upload_dir = (
+            self.data_dir
+            / "monthly_reports"
+            / "reza"
+            / "upload_sessions"
+            / upload_session_id
+        )
+        self.assertTrue((upload_dir / "result.json").is_file())
+        self.assertFalse((upload_dir / "items").exists())
+        self.assertEqual(list(upload_dir.rglob("*.pdf")), [])
+
+    def test_staged_weekly_compile_anchors_to_earliest_valid_pdf_date(self):
+        file_ids = ["a" * 32, "b" * 32, "c" * 32]
+        upload_session_id = self._start_staged_upload(
+            file_ids,
+            report_type="weekly",
+            report_mode="wtd",
+            date_from="2026-08-03",
+            date_to="2026-08-09",
+        )
+        later = self._imported_pdf("2026-08-14", "a" * 64)
+        earliest = self._imported_pdf("2026-08-10", "b" * 64)
+        earliest["data"]["project_no"] = "LEGACY-PROJECT-NO"
+        earliest["data"]["project_title"] = "Legacy Project Name"
+        outside = self._imported_pdf("2026-08-18", "c" * 64)
+
+        with patch(
+            "monthly_report.web.import_daily_report_pdf",
+            side_effect=[later, earliest, outside],
+        ):
+            for index, file_id in enumerate(file_ids):
+                response = self._upload_staged_file(
+                    upload_session_id,
+                    file_id,
+                    f"weekly-{index + 1}.pdf",
+                )
+                self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+
+        compiled = self.client.post(f"/monthly/upload-session/{upload_session_id}/compile")
+
+        self.assertEqual(compiled.status_code, 200, compiled.get_data(as_text=True))
+        draft = compiled.get_json()["draft"]
+        self.assertEqual(draft["period"]["start"], "2026-08-10")
+        self.assertEqual(draft["period"]["end"], "2026-08-16")
+        self.assertEqual(draft["coverage"]["included_count"], 1)
+        self.assertTrue(any("2026-08-18" in warning for warning in draft["warnings"]))
+        validated = self._apply_source_validation(compiled.get_json())
+        self.assertEqual(validated["draft"]["coverage"]["included_count"], 2)
+        source_projects = {
+            row.get("source_project_no") for row in validated["draft"]["source_manifest"]
+        }
+        self.assertIn("LEGACY-PROJECT-NO", source_projects)
+
+    def test_staged_upload_metadata_accepts_exact_file_limit_and_rejects_one_byte_over(self):
+        exact = self.client.post(
+            "/monthly/upload-session/start",
+            json={
+                "project_no": PROJECT_NO,
+                "project_title": PROJECT_TITLE,
+                "date_from": "2026-07-01",
+                "date_to": "2026-07-02",
+                "report_type": "monthly",
+                "report_mode": "mtd",
+                "files": [{
+                    "file_id": "d" * 32,
+                    "filename": "exact-limit.pdf",
+                    "size_bytes": DEFAULT_LIMITS.max_bytes,
+                }],
+            },
+        )
+        self.assertEqual(exact.status_code, 200, exact.get_data(as_text=True))
+
+        over = self.client.post(
+            "/monthly/upload-session/start",
+            json={
+                "project_no": PROJECT_NO,
+                "project_title": PROJECT_TITLE,
+                "date_from": "2026-07-01",
+                "date_to": "2026-07-02",
+                "report_type": "monthly",
+                "report_mode": "mtd",
+                "files": [{
+                    "file_id": "e" * 32,
+                    "filename": "over-limit.pdf",
+                    "size_bytes": DEFAULT_LIMITS.max_bytes + 1,
+                }],
+            },
+        )
+        self.assertEqual(over.status_code, 413)
+        self.assertIn("per-file limit", over.get_json()["error"])
+
+    def test_staged_upload_retry_returns_cached_item_without_reparsing(self):
+        file_id = "c" * 32
+        upload_session_id = self._start_staged_upload([file_id])
+        imported = self._imported_pdf("2026-07-01", "3" * 64)
+
+        with patch("monthly_report.web.import_daily_report_pdf", return_value=imported) as importer:
+            first = self._upload_staged_file(upload_session_id, file_id)
+            retry = self._upload_staged_file(upload_session_id, file_id)
+
+        self.assertEqual(first.status_code, 200)
+        self.assertFalse(first.get_json()["cached"])
+        self.assertEqual(retry.status_code, 200)
+        self.assertTrue(retry.get_json()["cached"])
+        self.assertEqual(importer.call_count, 1)
+
+    def test_staged_upload_start_is_idempotent_with_client_session_id(self):
+        upload_session_id = "6" * 32
+        payload = {
+            "upload_session_id": upload_session_id,
+            "project_no": PROJECT_NO,
+            "project_title": PROJECT_TITLE,
+            "date_from": "2026-07-01",
+            "date_to": "2026-07-02",
+            "report_type": "monthly",
+            "report_mode": "mtd",
+            "files": [{
+                "file_id": "5" * 32,
+                "filename": "daily.pdf",
+                "size_bytes": 1024,
+            }],
+        }
+
+        first = self.client.post("/monthly/upload-session/start", json=payload)
+        retry = self.client.post("/monthly/upload-session/start", json=payload)
+
+        self.assertEqual(first.status_code, 200, first.get_data(as_text=True))
+        self.assertFalse(first.get_json()["cached"])
+        self.assertEqual(retry.status_code, 200, retry.get_data(as_text=True))
+        self.assertTrue(retry.get_json()["cached"])
+        self.assertEqual(retry.get_json()["upload_session_id"], upload_session_id)
+        session_root = self.data_dir / "monthly_reports" / "reza" / "upload_sessions"
+        self.assertEqual([path.name for path in session_root.iterdir()], [upload_session_id])
+
+    def test_staged_file_request_has_its_own_size_cap(self):
+        file_id = "4" * 32
+        upload_session_id = self._start_staged_upload([file_id])
+
+        with patch("monthly_report.web._MAX_STAGED_REQUEST_BYTES", 10):
+            response = self._upload_staged_file(upload_session_id, file_id)
+
+        self.assertEqual(response.status_code, 413)
+        self.assertIn("per-file limit", response.get_json()["error"])
+
+    def test_staged_upload_failure_does_not_discard_a_later_valid_file(self):
+        file_ids = ["d" * 32, "e" * 32]
+        upload_session_id = self._start_staged_upload(file_ids)
+        valid = self._imported_pdf("2026-07-02", "4" * 64)
+
+        with patch(
+            "monthly_report.web.import_daily_report_pdf",
+            side_effect=[PDFImportError("encrypted PDF"), valid],
+        ):
+            rejected = self._upload_staged_file(upload_session_id, file_ids[0], "encrypted.pdf")
+            accepted = self._upload_staged_file(upload_session_id, file_ids[1], "valid.pdf")
+
+        self.assertEqual(rejected.status_code, 200)
+        self.assertFalse(rejected.get_json()["item"]["included"])
+        self.assertEqual(accepted.status_code, 200)
+        self.assertTrue(accepted.get_json()["item"]["included"])
+
+        compiled = self.client.post(f"/monthly/upload-session/{upload_session_id}/compile")
+        self.assertEqual(compiled.status_code, 200, compiled.get_data(as_text=True))
+        body = compiled.get_json()
+        self.assertEqual(body["draft"]["coverage"]["included_count"], 1)
+        self.assertTrue(any("encrypted PDF" in warning for warning in body["draft"]["warnings"]))
+
+    def test_staged_finalize_waits_for_every_planned_file(self):
+        file_ids = ["f" * 32, "1" * 32]
+        upload_session_id = self._start_staged_upload(file_ids)
+        imported = self._imported_pdf("2026-07-01", "5" * 64)
+        with patch("monthly_report.web.import_daily_report_pdf", return_value=imported):
+            uploaded = self._upload_staged_file(upload_session_id, file_ids[0])
+        self.assertEqual(uploaded.status_code, 200)
+
+        compiled = self.client.post(f"/monthly/upload-session/{upload_session_id}/compile")
+        self.assertEqual(compiled.status_code, 409)
+        self.assertIn(file_ids[1], compiled.get_json()["pending_file_ids"])
+
+    def test_staged_upload_session_is_scoped_to_logged_in_user(self):
+        file_id = "9" * 32
+        upload_session_id = self._start_staged_upload([file_id])
+        with self.client.session_transaction() as flask_session:
+            flask_session["username"] = "other-user"
+
+        response = self._upload_staged_file(upload_session_id, file_id)
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_stale_upload_cleanup_never_touches_existing_reports(self):
+        upload_session_id = self._start_staged_upload(["8" * 32])
+        user_root = self.data_dir / "monthly_reports" / "reza"
+        stale_dir = user_root / "upload_sessions" / upload_session_id
+        report_path = user_root / "reports" / "existing-report.pdf"
+        report_path.write_bytes(b"%PDF-existing-report")
+        os.utime(stale_dir, (1, 1))
+
+        self._start_staged_upload(["7" * 32])
+
+        self.assertFalse(stale_dir.exists())
+        self.assertEqual(report_path.read_bytes(), b"%PDF-existing-report")
+
+    def test_delete_waits_for_active_operation_and_recovers_stale_lock(self):
+        upload_session_id = self._start_staged_upload(["3" * 32])
+        session_dir = (
+            self.data_dir
+            / "monthly_reports"
+            / "reza"
+            / "upload_sessions"
+            / upload_session_id
+        )
+        lock_dir = session_dir / ".operation.lock"
+        lock_dir.mkdir()
+
+        busy = self.client.delete(f"/monthly/upload-session/{upload_session_id}")
+        self.assertEqual(busy.status_code, 409)
+        self.assertTrue(session_dir.is_dir())
+
+        os.utime(lock_dir, (1, 1))
+        deleted = self.client.delete(f"/monthly/upload-session/{upload_session_id}")
+        self.assertEqual(deleted.status_code, 200, deleted.get_data(as_text=True))
+        self.assertFalse(session_dir.exists())
 
 
 if __name__ == "__main__":

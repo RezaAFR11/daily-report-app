@@ -68,6 +68,21 @@
   .type-card .title { font-weight:700; color:var(--primary); }
   .type-card .hint { color:#667085; font-size:.8rem; margin-top:.25rem; }
   #monthly-alert { white-space:pre-line; }
+  .upload-progress-panel { border:1px solid #d9e2ec; border-radius:8px; background:#f8fafc; padding:.8rem; }
+  .upload-file-list { display:grid; gap:.45rem; margin-top:.65rem; }
+  .upload-file-row {
+    display:flex; align-items:center; gap:.65rem; background:#fff; border:1px solid #e1e7ef;
+    border-radius:7px; padding:.55rem .65rem;
+  }
+  .upload-file-row .upload-file-info { flex:1; min-width:0; }
+  .upload-file-row .upload-file-name { font-size:.8rem; font-weight:650; overflow-wrap:anywhere; }
+  .upload-file-row .upload-file-detail { color:#667085; font-size:.72rem; overflow-wrap:anywhere; }
+  .upload-state { min-width:5.2rem; text-align:center; font-size:.7rem; font-weight:700; border-radius:999px; padding:.2rem .45rem; }
+  .upload-state.pending { background:#eef2f6; color:#52606d; }
+  .upload-state.uploading { background:#e7f1ff; color:#0756a3; }
+  .upload-state.uploaded { background:#e8f7ee; color:#18794e; }
+  .upload-state.skipped { background:#fff3cd; color:#7a5b00; }
+  .upload-state.error { background:#fdecec; color:#b42318; }
   .spinner-border-sm { width:.9rem; height:.9rem; }
   @media (max-width:768px) {
     .topbar { align-items:flex-start; }
@@ -127,13 +142,33 @@
               &nbsp;·&nbsp;Generated {{ r.generated_at }}
               &nbsp;·&nbsp;{{ r.size_kb }} KB
               {% if r.json_filename %}&nbsp;·&nbsp;<span class="text-success">JSON archived</span>{% endif %}
+              {% if r.drive_web_url %}
+                &nbsp;·&nbsp;<span class="text-success">Google Drive</span>
+              {% elif r.drive_status == 'failed' %}
+                &nbsp;·&nbsp;<span class="text-danger">Drive upload failed</span>
+              {% elif r.drive_status == 'needs_review' %}
+                &nbsp;·&nbsp;<span class="text-warning">Drive mapping review</span>
+              {% elif r.drive_status == 'reauth_required' %}
+                &nbsp;·&nbsp;<span class="text-danger">Drive reconnect required</span>
+              {% elif r.drive_status == 'permission_denied' %}
+                &nbsp;·&nbsp;<span class="text-danger">Drive permission denied</span>
+              {% endif %}
             </div>
           </div>
           <div class="d-flex gap-2 flex-shrink-0">
-            <a href="{{ url_for('download_report', filename=r.filename) }}"
+            {% if r.drive_web_url %}
+            <a href="{{ r.drive_web_url }}" target="_blank" rel="noopener"
+              class="btn btn-sm btn-outline-success">☁ Open Drive</a>
+            {% elif google_drive_configured %}
+            <button class="btn btn-sm btn-outline-success"
+              onclick='uploadDailyReportToDrive({{ r.filename|tojson }}, {{ (r.archive_id or "")|tojson }}, {{ (r.canonical_report_id or "")|tojson }}, this)'>
+              ☁ {% if r.drive_status == 'needs_review' %}Choose Drive Folder{% elif r.drive_status in ['failed', 'reauth_required', 'permission_denied'] %}Retry Drive{% else %}Upload to Drive{% endif %}
+            </button>
+            {% endif %}
+            <a href="{{ url_for('download_report', filename=r.filename, archive_id=(r.archive_id or ''), report_id=(r.canonical_report_id or '')) }}"
               class="btn btn-sm btn-outline-primary">⬇ Download</a>
             <button class="btn btn-sm btn-outline-danger"
-              onclick='deleteReport({{ r.filename|tojson }}, this)'>🗑</button>
+              onclick='deleteReport({{ r.filename|tojson }}, {{ (r.archive_id or "")|tojson }}, {{ (r.canonical_report_id or "")|tojson }}, this)'>🗑</button>
           </div>
         </div>
         {% endfor %}
@@ -164,7 +199,7 @@
             <label class="type-card d-block" id="type-weekly-card">
               <input type="radio" name="report-type" value="weekly" onchange="setReportType(this.value)">
               <span class="title">Weekly Report</span>
-              <div class="hint">Create a Week-to-Date report or a complete Monday-Sunday report, including historical weeks.</div>
+              <div class="hint">Create a partial or full rolling 7-day report from any start date.</div>
             </label>
           </div>
           <div class="col-md-6">
@@ -225,13 +260,25 @@
           </div>
         </div>
         <div class="muted-note mb-3 d-none" id="weekly-period-help">
-          Week-to-Date starts on Monday and may use any cutoff within 7 days. Full Week is automatically aligned to Monday-Sunday.
+          Uploaded PDFs use the earliest valid report date as Day 1. A full period ends automatically on Day 7; partial reports may cover 1-7 days.
         </div>
 
         <div id="pdf-upload-panel" class="mb-3 d-none">
           <label class="form-label small">Daily Report PDFs</label>
           <input type="file" class="form-control" id="monthly-pdf-files" accept="application/pdf,.pdf" multiple>
-          <div class="muted-note mt-1">Upload machine-generated PDFs. Scanned files will be marked as requiring OCR/manual input.</div>
+          <div class="muted-note mt-1">
+            Select all files at once. They will be uploaded automatically one by one; scanned files require OCR/manual input.
+          </div>
+          <div class="upload-progress-panel mt-3 d-none" id="monthly-upload-progress">
+            <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+              <span class="small fw-semibold" id="monthly-upload-summary">Waiting to upload</span>
+              <span class="muted-note" id="monthly-upload-count">0 / 0</span>
+            </div>
+            <div class="progress" role="progressbar" aria-label="PDF upload progress" style="height:7px;">
+              <div class="progress-bar" id="monthly-upload-bar" style="width:0%"></div>
+            </div>
+            <div class="upload-file-list" id="monthly-upload-file-list"></div>
+          </div>
         </div>
 
         {% if is_admin %}
@@ -262,6 +309,75 @@
           <div class="col-6 col-md-3"><div class="coverage-card"><div class="value" id="coverage-warnings">0</div><div class="label">Warnings</div></div></div>
         </div>
         <div class="alert alert-warning py-2 small d-none" id="coverage-detail"></div>
+
+        <div class="border rounded-3 p-3 mb-4" id="source-validation-panel">
+          <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap mb-3">
+            <div>
+              <div class="section-label mb-1">Source Data Validation</div>
+              <div class="muted-note">
+                Verify the reporting period, project identity, parser warnings, and editable totals before Preview or Generate.
+              </div>
+            </div>
+            <span class="badge text-bg-secondary" id="validation-status-badge">Pending review</span>
+          </div>
+
+          <div class="row g-3 mb-3">
+            <div class="col-md-6">
+              <label class="form-label small">Report Project Title</label>
+              <input type="text" class="form-control" id="review-project-title" maxlength="500">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small">Report Project No.</label>
+              <input type="text" class="form-control" id="review-project-no" maxlength="250">
+            </div>
+            <div class="col-md-2">
+              <label class="form-label small">Final Period</label>
+              <div class="form-control bg-light small" id="review-period-display">-</div>
+            </div>
+          </div>
+
+          <div class="alert alert-info py-2 small d-none" id="project-resolution-help">
+            Different source project identities were detected. Choose <strong>Merge</strong> to include a group in this report,
+            or <strong>Keep separate</strong> to exclude it and compile that group in another report later.
+          </div>
+          <div class="table-responsive d-none mb-3" id="project-resolution-panel">
+            <table class="table table-sm table-bordered align-middle mb-0">
+              <thead class="table-light"><tr>
+                <th>Source Project Title</th><th>Source Project No.</th><th>Files / Dates</th>
+                <th>Title Match</th><th style="min-width:180px;">Decision</th>
+              </tr></thead>
+              <tbody id="project-resolution-body"></tbody>
+            </table>
+          </div>
+
+          <div class="alert alert-info py-2 small d-none" id="duplicate-resolution-help">
+            More than one Daily Report was found for the same date. Select the source that should be used;
+            the other candidate(s) will remain stored but will be excluded from this report.
+          </div>
+          <div class="table-responsive d-none mb-3" id="duplicate-resolution-panel">
+            <table class="table table-sm table-bordered align-middle mb-0">
+              <thead class="table-light"><tr>
+                <th>Date</th><th style="min-width:360px;">Daily Report source to use</th>
+              </tr></thead>
+              <tbody id="duplicate-resolution-body"></tbody>
+            </table>
+          </div>
+
+          <div class="alert alert-warning py-2 small d-none mb-3" id="source-validation-issues"></div>
+          <div class="mb-3">
+            <label class="form-label small">Validation / correction notes</label>
+            <textarea class="form-control" id="review-validation-notes" rows="2" maxlength="4000"
+              placeholder="Optional notes about project mapping or manual corrections"></textarea>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="review-confirm-validation">
+            <label class="form-check-label small" for="review-confirm-validation">
+              I have checked the source identities, period, warnings, manpower, man-hours, and all manual corrections.
+            </label>
+          </div>
+          <button type="button" class="btn btn-sm btn-primary mt-3" id="apply-source-validation-btn"
+            onclick="applySourceValidation()">Apply Validation &amp; Recompile</button>
+        </div>
 
         <div class="mb-4 d-none" id="source-manifest-panel">
           <div class="section-label">Included Daily Reports</div>
@@ -382,6 +498,182 @@
 let monthlySource = 'stored_json';
 let monthlyDraftId = '';
 let reportType = 'monthly';
+let monthlyUploadSessionId = '';
+let monthlyUploadSessionReady = false;
+let monthlyUploadQueue = [];
+let monthlyUploadGeneration = 0;
+let monthlyUploadBusy = false;
+let monthlyUploadController = null;
+let monthlyProjectValidationGroups = [];
+let monthlyDuplicateValidationGroups = [];
+let monthlySourceValidationApplied = false;
+const MAX_MONTHLY_UPLOAD_FILES = 35;
+const MAX_MONTHLY_PDF_BYTES = {{ pdf_upload_max_bytes|default(52428800)|int }};
+const MONTHLY_UPLOAD_CLEANUP_KEY = 'gpa-report-upload-cleanup';
+
+function createUploadFileId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID().replaceAll('-', '');
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024 * 1024) return `${Math.max(0, bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function responsePayload(response, fallback) {
+  const contentType = response.headers.get('content-type') || '';
+  let data = null;
+  if (contentType.includes('application/json')) {
+    try { data = await response.json(); }
+    catch (_) { data = null; }
+  } else {
+    const text = await response.text();
+    data = text ? {error:text} : null;
+  }
+  if (!response.ok) {
+    const error = new Error(data?.error || fallback || `Request failed (${response.status}).`);
+    error.status = response.status;
+    throw error;
+  }
+  return data || {};
+}
+
+function uploadStateLabel(status) {
+  return {
+    pending:'Waiting', uploading:'Uploading', uploaded:'Included',
+    skipped:'Excluded', error:'Failed',
+  }[status] || status;
+}
+
+function rememberedUploadSessions() {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(MONTHLY_UPLOAD_CLEANUP_KEY) || '[]');
+    return Array.isArray(value) ? value.filter(id => /^[a-f0-9]{32}$/.test(id)) : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function rememberUploadSession(uploadSessionId) {
+  if (!/^[a-f0-9]{32}$/.test(uploadSessionId || '')) return;
+  const ids = new Set(rememberedUploadSessions());
+  ids.add(uploadSessionId);
+  sessionStorage.setItem(MONTHLY_UPLOAD_CLEANUP_KEY, JSON.stringify(Array.from(ids)));
+}
+
+function forgetUploadSession(uploadSessionId) {
+  const ids = rememberedUploadSessions().filter(id => id !== uploadSessionId);
+  if (ids.length) sessionStorage.setItem(MONTHLY_UPLOAD_CLEANUP_KEY, JSON.stringify(ids));
+  else sessionStorage.removeItem(MONTHLY_UPLOAD_CLEANUP_KEY);
+}
+
+function requestUploadSessionCleanup(uploadSessionId, attempt=0) {
+  if (!/^[a-f0-9]{32}$/.test(uploadSessionId || '')) return;
+  fetch(`/monthly/upload-session/${encodeURIComponent(uploadSessionId)}`, {
+    method:'DELETE', keepalive:true,
+  }).then(response => {
+    if (response.ok || response.status === 404) {
+      forgetUploadSession(uploadSessionId);
+    } else if (response.status === 409 && attempt < 2) {
+      setTimeout(() => requestUploadSessionCleanup(uploadSessionId, attempt + 1), (attempt + 1) * 5000);
+    }
+  }).catch(() => {});
+}
+
+function renderMonthlyUploadQueue() {
+  const panel = document.getElementById('monthly-upload-progress');
+  const list = document.getElementById('monthly-upload-file-list');
+  if (!panel || !list) return;
+  const visible = monthlySource === 'uploaded_pdf' && monthlyUploadQueue.length > 0;
+  panel.classList.toggle('d-none', !visible);
+  list.replaceChildren();
+  if (!visible) return;
+
+  const included = monthlyUploadQueue.filter(item => item.status === 'uploaded').length;
+  const excluded = monthlyUploadQueue.filter(item => item.status === 'skipped').length;
+  const completed = included + excluded;
+  const failed = monthlyUploadQueue.filter(item => item.status === 'error').length;
+  const attempted = completed + failed;
+  const percent = Math.round((attempted / monthlyUploadQueue.length) * 100);
+  document.getElementById('monthly-upload-count').textContent = `${attempted} / ${monthlyUploadQueue.length}`;
+  document.getElementById('monthly-upload-bar').style.width = `${percent}%`;
+  document.getElementById('monthly-upload-summary').textContent = failed
+    ? `${failed} file(s) failed. Retry only the failed file(s).`
+    : completed === monthlyUploadQueue.length
+      ? `${included} included${excluded ? `, ${excluded} excluded` : ''}. Preparing report review.`
+      : `Uploading files one by one (${completed} completed)`;
+
+  monthlyUploadQueue.forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'upload-file-row';
+    const info = document.createElement('div');
+    info.className = 'upload-file-info';
+    const name = document.createElement('div');
+    name.className = 'upload-file-name';
+    name.textContent = item.file.name;
+    const detail = document.createElement('div');
+    detail.className = 'upload-file-detail';
+    const details = [formatBytes(item.file.size)];
+    if (item.reportDate) details.push(item.reportDate);
+    if (item.message) details.push(item.message);
+    detail.textContent = details.join(' · ');
+    info.append(name, detail);
+
+    const state = document.createElement('span');
+    state.className = `upload-state ${item.status}`;
+    state.textContent = uploadStateLabel(item.status);
+    row.append(info, state);
+    if (item.status === 'error') {
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'btn btn-sm btn-outline-primary';
+      retry.textContent = 'Retry';
+      retry.disabled = monthlyUploadBusy;
+      retry.addEventListener('click', () => retryMonthlyUpload(item.fileId));
+      row.appendChild(retry);
+    }
+    list.appendChild(row);
+  });
+}
+
+function discardMonthlyUploadSession({keepQueue=false} = {}) {
+  const wasUploadBusy = monthlyUploadBusy;
+  monthlyUploadGeneration += 1;
+  monthlyUploadController?.abort();
+  monthlyUploadController = null;
+  const staleSessionId = monthlyUploadSessionId;
+  monthlyUploadSessionId = '';
+  monthlyUploadSessionReady = false;
+  monthlyUploadBusy = false;
+  const compileButton = document.getElementById('compile-monthly-btn');
+  if (wasUploadBusy && compileButton?.disabled) setLoading('compile-monthly-btn', false);
+  if (staleSessionId) {
+    rememberUploadSession(staleSessionId);
+    requestUploadSessionCleanup(staleSessionId);
+  }
+  if (keepQueue) {
+    monthlyUploadQueue.forEach(item => {
+      item.status = 'pending';
+      item.message = '';
+      item.reportDate = '';
+    });
+  } else {
+    monthlyUploadQueue = [];
+  }
+  renderMonthlyUploadQueue();
+}
+
+function setMonthlyUploadFiles(fileList) {
+  discardMonthlyUploadSession();
+  monthlyUploadQueue = Array.from(fileList || []).map(file => ({
+    fileId:createUploadFileId(), file, status:'pending', message:'', reportDate:'',
+  }));
+  renderMonthlyUploadQueue();
+}
 
 function parseIsoDate(value) {
   if (!value) return null;
@@ -403,11 +695,6 @@ function addDays(value, amount) {
   return result;
 }
 
-function mondayFor(value) {
-  const day = value.getDay();
-  return addDays(value, -(day === 0 ? 6 : day - 1));
-}
-
 function inclusiveDays(fromValue, toValue) {
   const fromUtc = Date.UTC(fromValue.getFullYear(), fromValue.getMonth(), fromValue.getDate());
   const toUtc = Date.UTC(toValue.getFullYear(), toValue.getMonth(), toValue.getDate());
@@ -419,9 +706,9 @@ function updateReportTypeCopy() {
   const typeName = weekly ? 'Weekly' : 'Monthly';
   document.getElementById('create-report-title').textContent = `Create ${typeName} Report`;
   document.getElementById('create-report-hint').textContent = weekly
-    ? 'Compile a Week-to-Date or full Monday-Sunday report from final JSON or uploaded legacy PDFs.'
+    ? 'Compile a partial or full rolling 7-day report from final JSON or uploaded legacy PDFs.'
     : 'Compile a selected monthly period from final JSON or uploaded legacy PDFs.';
-  document.getElementById('period-from-label').textContent = weekly ? 'Week starts (Monday)' : 'From';
+  document.getElementById('period-from-label').textContent = weekly ? 'Day 1 / Start' : 'From';
   document.getElementById('period-to-label').textContent = weekly ? 'To / Cutoff' : 'To / Cutoff';
   document.getElementById('weekly-period-help').classList.toggle('d-none', !weekly);
   document.getElementById('review-report-title').textContent = `Review ${typeName} Draft`;
@@ -440,9 +727,14 @@ function updateReportTypeCopy() {
 
 function populateReportModes() {
   const select = document.getElementById('monthly-report-mode');
+  const current = select.value;
+  const partialWeeklyLabel = monthlySource === 'uploaded_pdf'
+    ? 'Rolling 7 Days - Partial Data'
+    : 'Rolling Period / Partial (1-7 Days)';
   select.innerHTML = reportType === 'weekly'
-    ? '<option value="wtd">Week-to-Date / Partial</option><option value="draft">Full Week - Draft</option><option value="final">Full Week - Final</option>'
+    ? `<option value="wtd">${partialWeeklyLabel}</option><option value="draft">Rolling 7 Days - Draft</option><option value="final">Rolling 7 Days - Final</option>`
     : '<option value="mtd">Month-to-Date / Partial</option><option value="draft">Monthly Draft</option><option value="final">Monthly Final</option>';
+  if (Array.from(select.options).some(option => option.value === current)) select.value = current;
 }
 
 function invalidateCompiledDraft(message='Report setup changed. Compile & Review again before creating the PDF.') {
@@ -457,8 +749,7 @@ function setReportPeriodDefaults() {
   const from = document.getElementById('monthly-date-from');
   const to = document.getElementById('monthly-date-to');
   if (reportType === 'weekly') {
-    const monday = mondayFor(today);
-    from.value = isoDate(monday);
+    from.value = isoDate(today);
     to.value = isoDate(today);
   } else {
     from.value = isoDate(new Date(today.getFullYear(), today.getMonth(), 1));
@@ -485,17 +776,16 @@ function alignWeeklyPeriod() {
   const fromInput = document.getElementById('monthly-date-from');
   const toInput = document.getElementById('monthly-date-to');
   const selected = parseIsoDate(fromInput.value) || new Date();
-  const monday = mondayFor(selected);
-  fromInput.value = isoDate(monday);
+  fromInput.value = isoDate(selected);
   const mode = document.getElementById('monthly-report-mode').value;
   if (mode === 'draft' || mode === 'final') {
-    toInput.value = isoDate(addDays(monday, 6));
+    toInput.value = isoDate(addDays(selected, 6));
   } else {
     const cutoff = parseIsoDate(toInput.value);
-    if (!cutoff || cutoff < monday || inclusiveDays(monday, cutoff) > 7) {
+    if (!cutoff || cutoff < selected || inclusiveDays(selected, cutoff) > 7) {
       const now = new Date();
       const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      toInput.value = isoDate(today >= monday && today <= addDays(monday, 6) ? today : addDays(monday, 6));
+      toInput.value = isoDate(today >= selected && today <= addDays(selected, 6) ? today : addDays(selected, 6));
     }
   }
   updatePeriodLimits();
@@ -508,9 +798,11 @@ function handleReportModeChange() {
   if (reportType === 'weekly') alignWeeklyPeriod();
   toggleFinalConfirmation();
   invalidateCompiledDraft();
+  discardMonthlyUploadSession({keepQueue:true});
 }
 
 function setReportType(value, resetPeriod=true) {
+  discardMonthlyUploadSession({keepQueue:true});
   reportType = value === 'weekly' ? 'weekly' : 'monthly';
   document.getElementById('type-weekly-card').classList.toggle('active', reportType === 'weekly');
   document.getElementById('type-monthly-card').classList.toggle('active', reportType === 'monthly');
@@ -531,12 +823,13 @@ function setLoading(buttonId, loading, label) {
   const btn = document.getElementById(buttonId);
   if (!btn) return;
   if (loading) {
-    btn.dataset.original = btn.innerHTML;
+    if (!btn.disabled) btn.dataset.original = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>${label || 'Working...'}`;
   } else {
     btn.disabled = false;
     btn.innerHTML = btn.dataset.original || label || btn.innerHTML;
+    delete btn.dataset.original;
   }
 }
 
@@ -555,12 +848,17 @@ function hideMonthlyAlert() {
 function setMonthlySource(value) {
   const sourceChanged = monthlySource !== value;
   monthlySource = value;
+  populateReportModes();
   document.getElementById('source-json-card').classList.toggle('active', value === 'stored_json');
   document.getElementById('source-pdf-card').classList.toggle('active', value === 'uploaded_pdf');
   document.getElementById('pdf-upload-panel').classList.toggle('d-none', value !== 'uploaded_pdf');
   const scope = document.getElementById('stored-scope-panel');
   if (scope) scope.classList.toggle('d-none', value !== 'stored_json');
-  if (sourceChanged) invalidateCompiledDraft();
+  if (sourceChanged) {
+    invalidateCompiledDraft();
+    discardMonthlyUploadSession({keepQueue:true});
+  }
+  renderMonthlyUploadQueue();
 }
 
 function selectedProject() {
@@ -581,13 +879,209 @@ function validateMonthlyInput() {
     const from = parseIsoDate(dateFrom);
     const to = parseIsoDate(dateTo);
     const days = inclusiveDays(from, to);
-    if (from.getDay() !== 1) throw new Error('A Weekly Report must start on Monday.');
     if (days < 1 || days > 7) throw new Error('A Weekly Report may cover a maximum of 7 days.');
-    if ((mode === 'draft' || mode === 'final') && (days !== 7 || to.getDay() !== 0)) {
-      throw new Error('A Full Week report must cover Monday through Sunday.');
+    if ((mode === 'draft' || mode === 'final') && days !== 7) {
+      throw new Error('A full rolling Weekly Report must cover exactly 7 days.');
     }
   }
   return {project, dateFrom, dateTo, mode};
+}
+
+function validateMonthlyUploadQueue() {
+  if (!monthlyUploadQueue.length) throw new Error('Choose at least one Daily Report PDF.');
+  if (monthlyUploadQueue.length > MAX_MONTHLY_UPLOAD_FILES) {
+    throw new Error(`Choose no more than ${MAX_MONTHLY_UPLOAD_FILES} PDF files.`);
+  }
+  const nonPdf = monthlyUploadQueue.find(item => !item.file.name.toLowerCase().endsWith('.pdf'));
+  if (nonPdf) throw new Error(`${nonPdf.file.name} is not a PDF file.`);
+  const oversized = monthlyUploadQueue.find(item => item.file.size > MAX_MONTHLY_PDF_BYTES);
+  if (oversized) {
+    throw new Error(`${oversized.file.name} exceeds the 50 MB per-file limit. Compress it and choose the files again.`);
+  }
+}
+
+function applyCompiledMonthlyDraft(data) {
+  monthlyDraftId = data.draft_id;
+  populateMonthlyReview(data.draft);
+  document.getElementById('monthly-review-panel').classList.remove('d-none');
+  document.getElementById('monthly-review-panel').scrollIntoView({behavior:'smooth'});
+}
+
+function assertCurrentUpload(generation) {
+  if (generation !== monthlyUploadGeneration) {
+    throw new DOMException('Upload selection changed.', 'AbortError');
+  }
+}
+
+async function startMonthlyUploadSession(input, generation) {
+  if (!monthlyUploadSessionId) {
+    monthlyUploadSessionId = createUploadFileId();
+    rememberUploadSession(monthlyUploadSessionId);
+  }
+  const response = await fetch('/monthly/upload-session/start', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    signal:monthlyUploadController.signal,
+    body:JSON.stringify({
+      project_no:input.project.project_no,
+      project_title:input.project.project_title,
+      date_from:input.dateFrom,
+      date_to:input.dateTo,
+      report_type:reportType,
+      report_mode:input.mode,
+      upload_session_id:monthlyUploadSessionId,
+      files:monthlyUploadQueue.map(item => ({
+        file_id:item.fileId,
+        filename:item.file.name,
+        size_bytes:item.file.size,
+      })),
+    }),
+  });
+  const data = await responsePayload(response, 'Could not start the PDF upload.');
+  assertCurrentUpload(generation);
+  monthlyUploadSessionId = data.upload_session_id;
+  monthlyUploadSessionReady = true;
+}
+
+async function uploadMonthlyQueueItem(item, generation) {
+  assertCurrentUpload(generation);
+  item.status = 'uploading';
+  item.message = '';
+  renderMonthlyUploadQueue();
+  try {
+    const form = new FormData();
+    form.append('file_id', item.fileId);
+    form.append('file', item.file, item.file.name);
+    const response = await fetch(
+      `/monthly/upload-session/${encodeURIComponent(monthlyUploadSessionId)}/file`,
+      {
+        method:'POST',
+        headers:{'X-Upload-File-ID':item.fileId},
+        body:form,
+        signal:monthlyUploadController.signal,
+      },
+    );
+    const data = await responsePayload(response, `${item.file.name} could not be uploaded.`);
+    assertCurrentUpload(generation);
+    const result = data.item || {};
+    item.status = result.included ? 'uploaded' : 'skipped';
+    item.reportDate = result.report_date || '';
+    item.message = Array.isArray(result.warnings) && result.warnings.length
+      ? result.warnings[0]
+      : (result.included ? 'Ready for compilation' : 'File was not included');
+    renderMonthlyUploadQueue();
+    return true;
+  } catch (err) {
+    if (err.name === 'AbortError') throw err;
+    if ([401, 404, 410].includes(err.status)) {
+      err.uploadSessionInvalid = true;
+      throw err;
+    }
+    item.status = 'error';
+    item.message = err.message || 'Connection interrupted';
+    renderMonthlyUploadQueue();
+    return false;
+  }
+}
+
+async function finalizeMonthlyUploadSession(generation) {
+  assertCurrentUpload(generation);
+  setLoading('compile-monthly-btn', true, 'Compiling report...');
+  const response = await fetch(
+    `/monthly/upload-session/${encodeURIComponent(monthlyUploadSessionId)}/compile`,
+    {method:'POST', signal:monthlyUploadController.signal},
+  );
+  let data;
+  try {
+    data = await responsePayload(response, `Could not compile ${reportType} report.`);
+  } catch (err) {
+    if ([401, 404, 410].includes(err.status)) err.uploadSessionInvalid = true;
+    throw err;
+  }
+  assertCurrentUpload(generation);
+  if (!data.ok) throw new Error(data.error || `Could not compile ${reportType} report.`);
+  applyCompiledMonthlyDraft(data);
+}
+
+async function compileUploadedMonthly(input) {
+  validateMonthlyUploadQueue();
+  if (monthlyUploadBusy) return;
+  monthlyUploadBusy = true;
+  const generation = monthlyUploadGeneration;
+  monthlyUploadController = new AbortController();
+  setLoading('compile-monthly-btn', true, `Uploading 0/${monthlyUploadQueue.length}...`);
+  renderMonthlyUploadQueue();
+  try {
+    if (!monthlyUploadSessionReady) await startMonthlyUploadSession(input, generation);
+    for (let index = 0; index < monthlyUploadQueue.length; index += 1) {
+      const item = monthlyUploadQueue[index];
+      if (!['pending', 'error'].includes(item.status)) continue;
+      setLoading('compile-monthly-btn', true, `Uploading ${index + 1}/${monthlyUploadQueue.length}...`);
+      await uploadMonthlyQueueItem(item, generation);
+    }
+    assertCurrentUpload(generation);
+    const failed = monthlyUploadQueue.filter(item => item.status === 'error');
+    if (failed.length) {
+      showMonthlyAlert(
+        `${failed.length} PDF file(s) failed to upload. Click Retry on the failed file, or click Compile again to retry all failed files.`,
+        'warning',
+      );
+      return;
+    }
+    await finalizeMonthlyUploadSession(generation);
+  } catch (err) {
+    if (err.uploadSessionInvalid) {
+      const message = err.message || 'The upload session expired.';
+      discardMonthlyUploadSession({keepQueue:true});
+      showMonthlyAlert(`${message} Click Compile again to restart the upload.`, 'warning');
+    } else if (err.name !== 'AbortError') {
+      showMonthlyAlert(err.message || 'PDF upload failed.');
+    }
+  } finally {
+    if (generation === monthlyUploadGeneration) {
+      monthlyUploadBusy = false;
+      monthlyUploadController = null;
+      setLoading('compile-monthly-btn', false);
+      renderMonthlyUploadQueue();
+    }
+  }
+}
+
+async function retryMonthlyUpload(fileId) {
+  if (monthlyUploadBusy) return;
+  const item = monthlyUploadQueue.find(row => row.fileId === fileId);
+  if (!item) return;
+  if (!monthlyUploadSessionReady) {
+    await compileMonthly();
+    return;
+  }
+  hideMonthlyAlert();
+  monthlyUploadBusy = true;
+  const generation = monthlyUploadGeneration;
+  monthlyUploadController = new AbortController();
+  setLoading('compile-monthly-btn', true, 'Retrying upload...');
+  renderMonthlyUploadQueue();
+  try {
+    await uploadMonthlyQueueItem(item, generation);
+    const remaining = monthlyUploadQueue.filter(row => ['pending', 'error'].includes(row.status));
+    if (!remaining.length) await finalizeMonthlyUploadSession(generation);
+    else showMonthlyAlert(`${remaining.length} PDF file(s) still need to be uploaded or retried.`, 'warning');
+  } catch (err) {
+    if (err.uploadSessionInvalid) {
+      const message = err.message || 'The upload session expired.';
+      discardMonthlyUploadSession({keepQueue:true});
+      showMonthlyAlert(`${message} Click Compile again to restart the upload.`, 'warning');
+    } else if (err.name !== 'AbortError') {
+      showMonthlyAlert(err.message || 'PDF retry failed.');
+    }
+  } finally {
+    if (generation === monthlyUploadGeneration) {
+      monthlyUploadBusy = false;
+      monthlyUploadController = null;
+      setLoading('compile-monthly-btn', false);
+      renderMonthlyUploadQueue();
+    }
+  }
 }
 
 async function compileMonthly() {
@@ -596,42 +1090,29 @@ async function compileMonthly() {
   try { input = validateMonthlyInput(); }
   catch (err) { showMonthlyAlert(err.message, 'warning'); return; }
 
+  if (monthlySource === 'uploaded_pdf') {
+    try { await compileUploadedMonthly(input); }
+    catch (err) { showMonthlyAlert(err.message, 'warning'); }
+    return;
+  }
+
   setLoading('compile-monthly-btn', true, 'Compiling...');
   try {
-    let response;
-    if (monthlySource === 'stored_json') {
-      response = await fetch('/monthly/compile/stored', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
-          project_no:input.project.project_no,
-          project_title:input.project.project_title,
-          date_from:input.dateFrom,
-          date_to:input.dateTo,
-          report_type:reportType,
-          report_mode:input.mode,
-          include_all_users:document.getElementById('monthly-all-users')?.checked === true,
-        }),
-      });
-    } else {
-      const files = document.getElementById('monthly-pdf-files').files;
-      if (!files.length) throw new Error('Choose at least one Daily Report PDF.');
-      const form = new FormData();
-      Array.from(files).forEach(file => form.append('files', file));
-      form.append('project_no', input.project.project_no);
-      form.append('project_title', input.project.project_title);
-      form.append('date_from', input.dateFrom);
-      form.append('date_to', input.dateTo);
-      form.append('report_type', reportType);
-      form.append('report_mode', input.mode);
-      response = await fetch('/monthly/compile/upload', {method:'POST', body:form});
-    }
-
-    const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || `Could not compile ${reportType} report.`);
-    monthlyDraftId = data.draft_id;
-    populateMonthlyReview(data.draft);
-    document.getElementById('monthly-review-panel').classList.remove('d-none');
-    document.getElementById('monthly-review-panel').scrollIntoView({behavior:'smooth'});
+    const response = await fetch('/monthly/compile/stored', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        project_no:input.project.project_no,
+        project_title:input.project.project_title,
+        date_from:input.dateFrom,
+        date_to:input.dateTo,
+        report_type:reportType,
+        report_mode:input.mode,
+        include_all_users:document.getElementById('monthly-all-users')?.checked === true,
+      }),
+    });
+    const data = await responsePayload(response, `Could not compile ${reportType} report.`);
+    if (!data.ok) throw new Error(data.error || `Could not compile ${reportType} report.`);
+    applyCompiledMonthlyDraft(data);
   } catch (err) {
     showMonthlyAlert(err.message);
   } finally {
@@ -660,6 +1141,7 @@ function populateMonthlyReview(draft) {
   detail.textContent = details.join('\n');
   detail.classList.toggle('d-none', !details.length);
   populateSourceManifest(draft.source_manifest || []);
+  populateSourceValidation(draft);
 
   document.getElementById('review-executive-summary').value = draft.executive_summary || '';
   document.getElementById('review-total-manpower').value = draft.safety?.total_manpower ?? '';
@@ -683,6 +1165,239 @@ function populateMonthlyReview(draft) {
   rows.forEach(row => addProgressRow(row));
   if (!rows.length) addProgressRow();
   toggleFinalConfirmation();
+}
+
+function validationIssueText(issue) {
+  if (typeof issue === 'string') return issue.trim();
+  if (!issue || typeof issue !== 'object') return '';
+  const prefix = [issue.filename, issue.field].filter(Boolean).join(' / ');
+  const message = issue.message || issue.code || 'Source data requires review';
+  return prefix ? `${prefix}: ${message}` : String(message);
+}
+
+function populateSourceValidation(draft) {
+  const validation = draft.source_validation || draft.validation || {};
+  monthlySourceValidationApplied = validation.applied === true;
+  const groups = Array.isArray(validation.project_groups) ? validation.project_groups : [];
+  monthlyProjectValidationGroups = groups.map((group, index) => ({
+    ...group,
+    key:String(group.key || group.group_key || `project-${index}`),
+  }));
+  const duplicateGroups = Array.isArray(validation.duplicate_groups) ? validation.duplicate_groups : [];
+  monthlyDuplicateValidationGroups = duplicateGroups.map((group, index) => ({
+    ...group,
+    key:String(group.key || group.group_key || `duplicate-${index}`),
+  }));
+
+  document.getElementById('review-project-title').value = draft.project_title || draft.project_name || '';
+  document.getElementById('review-project-no').value = draft.project_no || draft.vendor_project_no || '';
+  const periodStart = draft.period?.start || '';
+  const periodEnd = draft.period?.end || '';
+  document.getElementById('review-period-display').textContent = periodStart && periodEnd
+    ? `${periodStart} - ${periodEnd}`
+    : '-';
+  if (periodStart) document.getElementById('monthly-date-from').value = periodStart;
+  if (periodEnd) document.getElementById('monthly-date-to').value = periodEnd;
+
+  const body = document.getElementById('project-resolution-body');
+  body.replaceChildren();
+  monthlyProjectValidationGroups.forEach(group => {
+    const tr = document.createElement('tr');
+    const dates = Array.isArray(group.dates) ? group.dates : [];
+    const filenames = Array.isArray(group.filenames) ? group.filenames : [];
+    const similarity = Number(group.title_similarity);
+    const matchLabel = group.matches_selected === true
+      ? 'Exact identity'
+      : (Number.isFinite(similarity) ? `${similarity.toFixed(1)}%` : 'Different');
+    const fileLabel = filenames.length ? filenames.join(', ') : `${group.file_count || 0} source(s)`;
+    const values = [
+      group.project_title || group.source_project_title || '(blank)',
+      group.project_no || group.source_project_no || '(blank)',
+      `${fileLabel}${dates.length ? ` / ${dates.join(', ')}` : ''}`,
+      matchLabel,
+    ];
+    values.forEach(value => {
+      const td = document.createElement('td');
+      td.textContent = value;
+      tr.appendChild(td);
+    });
+    const actionCell = document.createElement('td');
+    const select = document.createElement('select');
+    select.className = 'form-select form-select-sm project-resolution-select';
+    select.dataset.groupKey = group.key;
+    const options = [
+      ['', 'Choose...'],
+      ['merge', 'Merge into this report'],
+      ['separate', 'Keep separate / exclude'],
+    ];
+    options.forEach(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      select.appendChild(option);
+    });
+    if (group.decision) select.value = group.decision;
+    else if (group.matches_selected === true && !group.requires_confirmation) select.value = 'merge';
+    select.addEventListener('change', markSourceValidationDirty);
+    actionCell.appendChild(select);
+    tr.appendChild(actionCell);
+    body.appendChild(tr);
+  });
+  const hasGroups = monthlyProjectValidationGroups.length > 0;
+  document.getElementById('project-resolution-panel').classList.toggle('d-none', !hasGroups);
+  document.getElementById('project-resolution-help').classList.toggle(
+    'd-none',
+    !hasGroups || (!validation.required && monthlyProjectValidationGroups.length <= 1),
+  );
+
+  const duplicateBody = document.getElementById('duplicate-resolution-body');
+  duplicateBody.replaceChildren();
+  monthlyDuplicateValidationGroups.forEach(group => {
+    const tr = document.createElement('tr');
+    const dateCell = document.createElement('td');
+    dateCell.textContent = group.report_date || '-';
+    const sourceCell = document.createElement('td');
+    const select = document.createElement('select');
+    select.className = 'form-select form-select-sm duplicate-resolution-select';
+    select.dataset.groupKey = group.key;
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = 'Choose Daily Report source...';
+    select.appendChild(blank);
+    (Array.isArray(group.candidates) ? group.candidates : []).forEach(candidate => {
+      const option = document.createElement('option');
+      option.value = String(candidate.record_id || '');
+      const identity = [candidate.project_title, candidate.project_no].filter(Boolean).join(' / ');
+      const revision = Number(candidate.revision || 0) > 0 ? `R${candidate.revision}` : '';
+      option.textContent = [candidate.filename || candidate.record_id || 'Daily Report', identity, revision]
+        .filter(Boolean).join(' — ');
+      select.appendChild(option);
+    });
+    if (group.selected_record_id) select.value = String(group.selected_record_id);
+    select.addEventListener('change', markSourceValidationDirty);
+    sourceCell.appendChild(select);
+    tr.append(dateCell, sourceCell);
+    duplicateBody.appendChild(tr);
+  });
+  const hasDuplicates = monthlyDuplicateValidationGroups.length > 0;
+  document.getElementById('duplicate-resolution-panel').classList.toggle('d-none', !hasDuplicates);
+  document.getElementById('duplicate-resolution-help').classList.toggle('d-none', !hasDuplicates);
+
+  const issues = [
+    ...(Array.isArray(validation.issues) ? validation.issues : []),
+    ...(Array.isArray(draft.warnings) ? draft.warnings : []),
+  ].map(validationIssueText).filter(Boolean);
+  const uniqueIssues = Array.from(new Set(issues));
+  const issueBox = document.getElementById('source-validation-issues');
+  issueBox.textContent = uniqueIssues.length
+    ? `Please review:\n- ${uniqueIssues.join('\n- ')}`
+    : '';
+  issueBox.classList.toggle('d-none', uniqueIssues.length === 0);
+  document.getElementById('review-validation-notes').value = validation.notes || '';
+  document.getElementById('review-confirm-validation').checked = validation.confirmed === true;
+  updateValidationStatus();
+}
+
+function collectProjectResolutions() {
+  return Array.from(document.querySelectorAll('.project-resolution-select')).map(select => ({
+    group_key:select.dataset.groupKey,
+    decision:select.value,
+  }));
+}
+
+function collectDuplicateResolutions() {
+  return Array.from(document.querySelectorAll('.duplicate-resolution-select')).map(select => ({
+    group_key:select.dataset.groupKey,
+    selected_record_id:select.value,
+  }));
+}
+
+function updateValidationStatus() {
+  const badge = document.getElementById('validation-status-badge');
+  const unresolvedProjects = collectProjectResolutions().some(item => !item.decision);
+  const unresolvedDuplicates = collectDuplicateResolutions().some(item => !item.selected_record_id);
+  const unresolved = unresolvedProjects || unresolvedDuplicates;
+  const confirmed = document.getElementById('review-confirm-validation').checked;
+  const readyToApply = !unresolved && confirmed;
+  const ready = readyToApply && monthlySourceValidationApplied;
+  badge.className = `badge ${ready ? 'text-bg-success' : 'text-bg-warning'}`;
+  badge.textContent = ready
+    ? 'Validated'
+    : (unresolved ? 'Source decision required' : (!confirmed ? 'Confirmation required' : 'Ready to apply'));
+}
+
+function markSourceValidationDirty() {
+  monthlySourceValidationApplied = false;
+  updateValidationStatus();
+}
+
+function validateSourceReview() {
+  const projectTitle = document.getElementById('review-project-title').value.trim();
+  const projectNo = document.getElementById('review-project-no').value.trim();
+  if (!projectTitle || !projectNo) throw new Error('Complete the Report Project Title and Project No. in Source Data Validation.');
+  if (collectProjectResolutions().some(item => !item.decision)) {
+    throw new Error('Choose Merge or Keep separate for every detected project identity.');
+  }
+  if (collectDuplicateResolutions().some(item => !item.selected_record_id)) {
+    throw new Error('Choose which Daily Report to use for every duplicate date.');
+  }
+  if (!document.getElementById('review-confirm-validation').checked) {
+    throw new Error('Confirm Source Data Validation before Preview or Generate.');
+  }
+  if (!monthlySourceValidationApplied) {
+    throw new Error('Click Apply Validation & Recompile before Preview or Generate.');
+  }
+}
+
+function sourceValidationPayload() {
+  return {
+    confirmed:document.getElementById('review-confirm-validation').checked,
+    project_title:document.getElementById('review-project-title').value.trim(),
+    project_no:document.getElementById('review-project-no').value.trim(),
+    notes:document.getElementById('review-validation-notes').value.trim(),
+    project_resolutions:collectProjectResolutions(),
+    duplicate_resolutions:collectDuplicateResolutions(),
+  };
+}
+
+async function applySourceValidation() {
+  if (!monthlyDraftId) {
+    showMonthlyAlert(`Compile a ${reportType} draft first.`, 'warning');
+    return;
+  }
+  const payload = sourceValidationPayload();
+  if (!payload.project_title || !payload.project_no) {
+    showMonthlyAlert('Complete the Report Project Title and Project No. before applying validation.', 'warning');
+    return;
+  }
+  if (payload.project_resolutions.some(item => !item.decision)) {
+    showMonthlyAlert('Choose Merge or Keep separate for every detected project identity.', 'warning');
+    return;
+  }
+  if (payload.duplicate_resolutions.some(item => !item.selected_record_id)) {
+    showMonthlyAlert('Choose which Daily Report to use for every duplicate date.', 'warning');
+    return;
+  }
+  if (!payload.confirmed) {
+    showMonthlyAlert('Confirm Source Data Validation before applying it.', 'warning');
+    return;
+  }
+  setLoading('apply-source-validation-btn', true, 'Applying...');
+  try {
+    const response = await fetch(`/monthly/validate/${encodeURIComponent(monthlyDraftId)}`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({source_validation:payload}),
+    });
+    const data = await responsePayload(response, 'Source validation could not be applied.');
+    if (!data.ok) throw new Error(data.error || 'Source validation could not be applied.');
+    applyCompiledMonthlyDraft(data);
+    showMonthlyAlert('Source validation applied. Review the refreshed totals before Preview or Generate.', 'success');
+  } catch (err) {
+    showMonthlyAlert(err.message || 'Source validation could not be applied.');
+  } finally {
+    setLoading('apply-source-validation-btn', false);
+  }
 }
 
 function populateSourceManifest(rows) {
@@ -781,6 +1496,7 @@ function collectMonthlyReview() {
     report_type:reportType,
     report_mode:document.getElementById('monthly-report-mode').value,
     confirm_final:document.getElementById('review-confirm-final').checked,
+    source_validation:sourceValidationPayload(),
     executive_summary:document.getElementById('review-executive-summary').value.trim(),
     progress:{rows:progress},
     safety:{
@@ -797,6 +1513,8 @@ function collectMonthlyReview() {
 async function postMonthlyPdf(endpoint, save) {
   if (!monthlyDraftId) { showMonthlyAlert(`Compile a ${reportType} draft first.`, 'warning'); return; }
   const typeName = reportType === 'weekly' ? 'Weekly' : 'Monthly';
+  try { validateSourceReview(); }
+  catch (err) { showMonthlyAlert(err.message, 'warning'); return; }
   const previewWindow = save ? null : window.open('about:blank', '_blank');
   if (previewWindow) previewWindow.document.title = `Preparing ${typeName} Report Preview...`;
   const btnId = save ? 'generate-monthly-btn' : 'preview-monthly-btn';
@@ -832,9 +1550,71 @@ async function postMonthlyPdf(endpoint, save) {
 function previewMonthly() { return postMonthlyPdf('/monthly/preview', false); }
 function generateMonthly() { return postMonthlyPdf('/monthly/generate', true); }
 
-function deleteReport(filename, btn) {
+async function uploadDailyReportToDrive(
+  filename,
+  archiveId,
+  reportId,
+  button,
+  categoryOverride=''
+) {
+  const original = button.innerHTML;
+  button.disabled = true;
+  button.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Uploading...';
+  try {
+    const response = await fetch('/reports/drive-upload', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        filename,
+        archive_id:archiveId || '',
+        report_id:reportId || '',
+        category_override:categoryOverride || '',
+      }),
+    });
+    let payload = {};
+    try { payload = await response.json(); } catch (_) {}
+    if (!response.ok) {
+      const error = new Error(payload.error || `Drive upload failed (${response.status}).`);
+      error.code = payload.code || 'drive_upload_failed';
+      throw error;
+    }
+    button.innerHTML = '☁ Open Drive';
+    button.onclick = () => window.open(payload.web_view_link, '_blank', 'noopener');
+    button.disabled = false;
+  } catch (error) {
+    button.disabled = false;
+    button.innerHTML = original;
+    if (error.code === 'project_needs_review' && !categoryOverride) {
+      const choice = window.prompt(
+        'Project belum dapat dipetakan otomatis. Pilih folder Drive:\n' +
+        '1 = Electrical\n2 = Control Valve\n3 = Turbine & Generator'
+      );
+      const categories = {
+        '1':'electrical',
+        '2':'control_valve',
+        '3':'turbine_generator',
+      };
+      if (categories[choice]) {
+        return uploadDailyReportToDrive(
+          filename,
+          archiveId,
+          reportId,
+          button,
+          categories[choice]
+        );
+      }
+    }
+    alert('Google Drive upload failed: ' + error.message);
+  }
+}
+
+function deleteReport(filename, archiveId, reportId, btn) {
   if (!confirm(`Delete "${filename}"? This cannot be undone.`)) return;
-  fetch('/reports/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({filename})})
+  fetch('/reports/delete', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({filename, archive_id:archiveId || '', report_id:reportId || ''}),
+  })
     .then(r => r.json()).then(d => { if (d.ok) { btn.closest('.report-card').remove(); updateCount(); } })
     .catch(err => alert('Delete failed: ' + err.message));
 }
@@ -864,18 +1644,31 @@ function updateMonthlyCount() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  rememberedUploadSessions().forEach(uploadSessionId => requestUploadSessionCleanup(uploadSessionId));
   setReportType('monthly');
   document.getElementById('monthly-report-mode').addEventListener('change', handleReportModeChange);
   document.getElementById('monthly-date-from').addEventListener('change', () => {
     if (reportType === 'weekly') alignWeeklyPeriod();
     invalidateCompiledDraft();
+    discardMonthlyUploadSession({keepQueue:true});
   });
   document.getElementById('monthly-date-to').addEventListener('change', () => {
     updatePeriodLimits();
     invalidateCompiledDraft();
+    discardMonthlyUploadSession({keepQueue:true});
   });
-  document.getElementById('monthly-project').addEventListener('change', () => invalidateCompiledDraft());
-  document.getElementById('monthly-pdf-files').addEventListener('change', () => invalidateCompiledDraft());
+  document.getElementById('monthly-project').addEventListener('change', () => {
+    invalidateCompiledDraft();
+    discardMonthlyUploadSession({keepQueue:true});
+  });
+  document.getElementById('monthly-pdf-files').addEventListener('change', event => {
+    invalidateCompiledDraft();
+    setMonthlyUploadFiles(event.target.files);
+  });
+  document.getElementById('review-confirm-validation').addEventListener('change', markSourceValidationDirty);
+  ['review-project-title', 'review-project-no', 'review-validation-notes'].forEach(id => {
+    document.getElementById(id).addEventListener('input', markSourceValidationDirty);
+  });
   document.getElementById('monthly-all-users')?.addEventListener('change', () => invalidateCompiledDraft());
   toggleFinalConfirmation();
   if (location.hash === '#monthly') new bootstrap.Tab(document.getElementById('monthly-tab')).show();

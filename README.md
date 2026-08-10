@@ -40,6 +40,14 @@ Select one project and a date range within the same calendar month, click **Comp
 
 The service intentionally uses one Gunicorn worker because the current application stores records in JSON files. Runtime data is excluded from Git and must be stored on the mounted Volume.
 
+### Optional Google Drive upload
+
+Final Daily Report PDFs can be downloaded and uploaded automatically to a
+structured Google Drive folder. This requires one-time Google OAuth setup and
+Railway environment variables; a normal My Drive browser link alone does not
+grant API access. Follow [GOOGLE_DRIVE_SETUP.md](GOOGLE_DRIVE_SETUP.md). Preview
+PDFs are never uploaded, and a Drive failure does not remove the Railway copy.
+
 ## Migrating existing data
 
 Upload these items to the root of the mounted `/data` Volume:

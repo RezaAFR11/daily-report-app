@@ -211,20 +211,25 @@ function viewReports(username) {
             &nbsp;·&nbsp; ${r.size_kb} KB
           </span>
         </div>
-        <a href="/admin/download/${username}/${r.filename}"
+        <a href="/admin/download/${encodeURIComponent(username)}/${encodeURIComponent(r.filename)}?archive_id=${encodeURIComponent(r.archive_id || '')}&report_id=${encodeURIComponent(r.canonical_report_id || '')}"
            class="btn btn-sm btn-outline-primary">⬇</a>
         <button class="btn btn-sm btn-outline-danger"
-                onclick="adminDelete('${username}','${r.filename}',this)">🗑</button>
+                onclick="adminDelete('${username}','${r.filename}','${r.archive_id || ''}','${r.canonical_report_id || ''}',this)">🗑</button>
       </div>`).join('');
   })
   .catch(() => { list.innerHTML = '<p class="text-danger">Failed to load.</p>'; });
 }
 
-function adminDelete(username, filename, btn) {
+function adminDelete(username, filename, archiveId, reportId, btn) {
   if (!confirm('Delete "' + filename + '"?')) return;
   fetch('/admin/delete_report', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({username, filename}),
+    body: JSON.stringify({
+      username,
+      filename,
+      archive_id:archiveId || '',
+      report_id:reportId || '',
+    }),
   })
   .then(r => r.json())
   .then(d => { if (d.ok) btn.closest('.report-row').remove(); else alert(d.error); });

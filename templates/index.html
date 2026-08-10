@@ -208,7 +208,7 @@
     <div class="nav-group">
       <button class="btn btn-sm btn-outline-info" onclick="previewPDF()" title="Preview PDF in browser">👁 Preview</button>
       <button class="btn btn-sm btn-outline-warning" data-bs-toggle="modal" data-bs-target="#settingsModal">⚙️ Settings</button>
-      <button class="btn btn-sm fw-bold text-white" style="background:var(--accent);border-color:var(--accent);" onclick="generatePDF()">📄 Generate PDF</button>
+      <button class="btn btn-sm fw-bold text-white" style="background:var(--accent);border-color:var(--accent);" onclick="generatePDF()">📄 {% if google_drive_configured %}Generate PDF + Drive{% else %}Generate PDF{% endif %}</button>
     </div>
     <div class="nav-divider"></div>
     <!-- User controls -->
@@ -466,7 +466,7 @@
 <div class="d-flex gap-3 justify-content-end mb-5 flex-wrap">
   <button class="btn btn-outline-secondary px-4" onclick="saveDraft()">💾 Save Draft</button>
   <button class="btn btn-outline-info px-4" onclick="previewPDF()">👁 Preview PDF</button>
-  <button class="btn fw-bold text-white px-5 py-2" style="background:var(--accent);border-color:var(--accent);font-size:1rem;" onclick="generatePDF()">📄 Generate PDF</button>
+  <button class="btn fw-bold text-white px-5 py-2" style="background:var(--accent);border-color:var(--accent);font-size:1rem;" onclick="generatePDF()">📄 {% if google_drive_configured %}Generate PDF + Drive{% else %}Generate PDF{% endif %}</button>
 </div>
 
 </div><!-- /container -->
@@ -539,7 +539,9 @@
       <div class="modal-header py-2" style="background:var(--primary);">
         <h5 class="modal-title text-white fs-6">👁 PDF Preview</h5>
         <div class="d-flex gap-2 ms-2">
-          <button class="btn btn-sm btn-outline-light" onclick="generatePDF()">⬇ Download PDF</button>
+          <button class="btn btn-sm btn-outline-light" onclick="generatePDF()">
+            {% if google_drive_configured %}⬇ Download PDF + Drive{% else %}⬇ Download PDF{% endif %}
+          </button>
           <button class="btn btn-sm btn-outline-success" id="waShareBtn" onclick="shareReportWA()" style="display:none" title="Share to WhatsApp">📤 WhatsApp</button>
         </div>
         <button type="button" class="btn-close btn-close-white ms-auto" data-bs-dismiss="modal"></button>
@@ -2265,8 +2267,28 @@ function populateForm(d) {
 // ════════════════════════════════════════════════════════════
 // GENERATE PDF
 // ════════════════════════════════════════════════════════════
+async function uploadArchivedPdfToDrive(filename, archiveId='', reportId='') {
+  const response = await fetch('/reports/drive-upload', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({filename, archive_id:archiveId, report_id:reportId}),
+  });
+  let payload = {};
+  try { payload = await response.json(); } catch (_) {}
+  if (!response.ok) {
+    const error = new Error(payload.error || `Google Drive upload failed (${response.status}).`);
+    error.code = payload.code || 'drive_upload_failed';
+    throw error;
+  }
+  return payload;
+}
+
+let _pdfGenerationInFlight = false;
+
 async function generatePDF() {
+  if (_pdfGenerationInFlight) return;
   if (!validateForm()) return;
+  _pdfGenerationInFlight = true;
 
   // Check for duplicate report date
   const reportDate = (document.getElementById('f_date') || {}).value;
@@ -2277,15 +2299,23 @@ async function generatePDF() {
         const chkData = await chk.json();
         if (chkData.exists) {
           const go = confirm(`⚠ A report for ${reportDate} already exists (${chkData.filename}).\n\nGenerate a new one anyway?`);
-          if (!go) return;
+          if (!go) {
+            _pdfGenerationInFlight = false;
+            return;
+          }
         }
       }
     } catch(e) { /* non-fatal — proceed if check fails */ }
   }
 
-  const btn = document.querySelector('[onclick="generatePDF()"]');
-  const orig = btn ? btn.innerHTML : '';
-  if (btn) { btn.innerHTML = '⏳ Generating…'; btn.disabled = true; }
+  const generateButtons = Array.from(
+    document.querySelectorAll('[onclick="generatePDF()"]')
+  );
+  const originalButtonHtml = generateButtons.map(button => button.innerHTML);
+  generateButtons.forEach(button => {
+    button.innerHTML = '⏳ Generating…';
+    button.disabled = true;
+  });
 
   try {
     // Step 1 — wait for any in-flight photo uploads to finish
@@ -2310,6 +2340,9 @@ async function generatePDF() {
     const archiveStatus = r.headers.get('X-Report-Archive-Status');
     const pdfArchiveStatus = r.headers.get('X-Report-Pdf-Archive-Status');
     const jsonArchiveStatus = r.headers.get('X-Report-Json-Archive-Status');
+    const archiveId = r.headers.get('X-Report-Archive-ID') || '';
+    const reportId = r.headers.get('X-Report-ID') || '';
+    const driveConfigured = r.headers.get('X-GDrive-Configured') === 'true';
 
     if (_genTimer) { clearInterval(_genTimer); _genTimer = null; }
 
@@ -2326,13 +2359,29 @@ async function generatePDF() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     const d = collectData();
-    const fname = `Daily Report - PT GPA - KN - ${d.date||'Report'} (Day ${d.day_no||''}).pdf`;
+    const fallbackName = `Daily Report - PT GPA - KN - ${d.date||'Report'} (Day ${d.day_no||''}).pdf`;
+    let fname = fallbackName;
+    const encodedFilename = r.headers.get('X-Report-Filename');
+    if (encodedFilename) {
+      try { fname = decodeURIComponent(encodedFilename); } catch (_) {}
+    }
     a.href = url;
     a.download = fname;
     a.click();
     URL.revokeObjectURL(url);
 
     _storeLastPdf(blob, fname, d.date, d.day_no);
+
+    let driveResult = null;
+    let driveError = null;
+    if (driveConfigured && pdfArchiveStatus !== 'failed') {
+      _setProgress('☁ Uploading PDF to Google Drive…', 97);
+      try {
+        driveResult = await uploadArchivedPdfToDrive(fname, archiveId, reportId);
+      } catch (err) {
+        driveError = err;
+      }
+    }
 
     _setProgress('✅ PDF ready!', 100);
     setTimeout(_hideProgress, 1500);
@@ -2342,6 +2391,10 @@ async function generatePDF() {
       toast('PDF saved, but its Monthly Report JSON could not be archived. Please tell the admin.', 'warning');
     } else if (archiveStatus === 'failed') {
       toast('PDF downloaded, but part of the report archive could not be saved.', 'warning');
+    } else if (driveError) {
+      toast('PDF downloaded, but Google Drive upload failed: ' + driveError.message, 'warning');
+    } else if (driveResult) {
+      toast('✅ PDF downloaded and uploaded to Google Drive!', 'success');
     } else {
       toast('✅ PDF generated and downloaded!', 'success');
     }
@@ -2350,7 +2403,11 @@ async function generatePDF() {
     _hideProgress();
     toast('❌ Error generating PDF: ' + err.message, 'danger');
   } finally {
-    if (btn) { btn.innerHTML = orig; btn.disabled = false; }
+    generateButtons.forEach((button, index) => {
+      button.innerHTML = originalButtonHtml[index];
+      button.disabled = false;
+    });
+    _pdfGenerationInFlight = false;
   }
 }
 

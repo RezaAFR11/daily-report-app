@@ -1,0 +1,369 @@
+"""Review-first source identity validation for periodic reports.
+
+The resolver intentionally does not persist project aliases or rewrite archived
+Daily Report JSON.  It groups the raw identities found in a compile batch and
+requires an explicit per-draft decision whenever those identities differ from
+the selected report project.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import re
+import unicodedata
+from collections.abc import Iterable, Mapping
+from typing import Any
+
+
+def _clean(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _normalise(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", _clean(value)).casefold().replace("&", " and ")
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
+
+
+def _integer(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _payload(record: Mapping[str, Any]) -> Mapping[str, Any]:
+    payload = record.get("payload", record.get("data", {}))
+    return payload if isinstance(payload, Mapping) else {}
+
+
+def _metadata(record: Mapping[str, Any], key: str) -> str:
+    source_identity = record.get("source_identity")
+    if isinstance(source_identity, Mapping) and source_identity.get(key) not in (None, ""):
+        return _clean(source_identity.get(key))
+    if record.get(key) not in (None, ""):
+        return _clean(record.get(key))
+    return _clean(_payload(record).get(key))
+
+
+def _record_date(record: Mapping[str, Any]) -> str:
+    for key in ("report_date", "date"):
+        if record.get(key):
+            return _clean(record.get(key))
+    return _clean(_payload(record).get("date"))
+
+
+def _record_id(record: Mapping[str, Any], index: int) -> str:
+    source = record.get("source") if isinstance(record.get("source"), Mapping) else {}
+    source_identity = (
+        record.get("source_identity")
+        if isinstance(record.get("source_identity"), Mapping)
+        else {}
+    )
+    return _clean(
+        record.get("report_id")
+        or source.get("sha256")
+        or source_identity.get("record_id")
+        or f"record-{index}"
+    )
+
+
+def _group_key(project_title: str, project_no: str) -> str:
+    identity = f"{_normalise(project_title)}\0{_normalise(project_no)}".encode("utf-8")
+    return hashlib.sha256(identity).hexdigest()[:24]
+
+
+def _record_group_key(
+    record: Mapping[str, Any],
+    index: int,
+    project_title: str,
+    project_no: str,
+) -> str:
+    """Keep unidentified files independently reviewable instead of merging blanks."""
+
+    if _normalise(project_title) or _normalise(project_no):
+        return _group_key(project_title, project_no)
+    record_identity = _record_id(record, index)
+    return hashlib.sha256(f"missing-project\0{record_identity}".encode("utf-8")).hexdigest()[:24]
+
+
+def _duplicate_group_key(report_date: str, record_ids: Iterable[str]) -> str:
+    identity = f"{report_date}\0{'|'.join(sorted(record_ids))}".encode("utf-8")
+    return hashlib.sha256(identity).hexdigest()[:24]
+
+
+def _title_similarity(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    if _normalise(left) == _normalise(right):
+        return 100.0
+    try:
+        from rapidfuzz import fuzz
+    except ImportError:  # pragma: no cover - dependency is optional at import time
+        return 0.0
+    return round(float(fuzz.WRatio(left, right)), 2)
+
+
+def build_source_validation(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    selected_project_no: str,
+    selected_project_title: str,
+    issues: Iterable[Any] = (),
+) -> dict[str, Any]:
+    """Describe source project variants without silently merging them."""
+
+    selected_no_norm = _normalise(selected_project_no)
+    selected_title_norm = _normalise(selected_project_title)
+    grouped: dict[str, dict[str, Any]] = {}
+    dated_records: dict[str, list[dict[str, Any]]] = {}
+
+    for index, record in enumerate(records):
+        if not isinstance(record, Mapping):
+            continue
+        project_no = _metadata(record, "project_no")
+        project_title = _metadata(record, "project_title")
+        record_id = _record_id(record, index)
+        key = _record_group_key(record, index, project_title, project_no)
+        group = grouped.setdefault(
+            key,
+            {
+                "key": key,
+                "project_no": project_no,
+                "project_title": project_title,
+                "record_ids": [],
+                "filenames": [],
+                "dates": [],
+                "file_count": 0,
+            },
+        )
+        group["record_ids"].append(record_id)
+        source = record.get("source") if isinstance(record.get("source"), Mapping) else {}
+        filename = _clean(source.get("filename"))
+        report_date = _record_date(record)
+        if filename and filename not in group["filenames"]:
+            group["filenames"].append(filename)
+        if report_date and report_date not in group["dates"]:
+            group["dates"].append(report_date)
+        group["file_count"] += 1
+        if report_date:
+            dated_records.setdefault(report_date, []).append({
+                "record_id": record_id,
+                "filename": filename,
+                "project_no": project_no,
+                "project_title": project_title,
+                "revision": _integer(record.get("revision")),
+                "generated_at": _clean(record.get("generated_at")),
+            })
+
+    project_groups = []
+    for group in grouped.values():
+        number_match = bool(selected_no_norm and _normalise(group["project_no"]) == selected_no_norm)
+        title_match = bool(
+            selected_title_norm and _normalise(group["project_title"]) == selected_title_norm
+        )
+        requires_confirmation = not (number_match and title_match)
+        group.update(
+            {
+                "matches_selected": number_match and title_match,
+                "number_matches_selected": number_match,
+                "title_matches_selected": title_match,
+                "title_similarity": _title_similarity(group["project_title"], selected_project_title),
+                "requires_confirmation": requires_confirmation,
+                "decision": "" if requires_confirmation else "merge",
+                "dates": sorted(group["dates"]),
+                "filenames": sorted(group["filenames"]),
+            }
+        )
+        project_groups.append(group)
+
+    project_groups.sort(
+        key=lambda group: (
+            group["dates"][0] if group["dates"] else "",
+            _normalise(group["project_title"]),
+            _normalise(group["project_no"]),
+        )
+    )
+    issue_rows = []
+    for issue in issues:
+        if isinstance(issue, Mapping):
+            message = _clean(issue.get("message") or issue.get("code"))
+            if message:
+                issue_rows.append({
+                    "code": _clean(issue.get("code")),
+                    "severity": _clean(issue.get("severity") or "warning"),
+                    "field": _clean(issue.get("field")),
+                    "filename": _clean(issue.get("filename")),
+                    "message": message,
+                })
+        else:
+            message = _clean(issue)
+            if message:
+                issue_rows.append({"severity": "warning", "message": message})
+
+    duplicate_groups = []
+    for report_date, candidates in sorted(dated_records.items()):
+        if len(candidates) < 2:
+            continue
+        record_ids = [str(candidate["record_id"]) for candidate in candidates]
+        duplicate_groups.append({
+            "key": _duplicate_group_key(report_date, record_ids),
+            "report_date": report_date,
+            "candidates": candidates,
+            "selected_record_id": "",
+            "requires_confirmation": True,
+        })
+
+    required = len(project_groups) > 1 or any(
+        group["requires_confirmation"] for group in project_groups
+    ) or bool(duplicate_groups) or bool(issue_rows)
+    return {
+        "schema_version": "source-validation/1",
+        "required": required,
+        "applied": False,
+        "confirmed": False,
+        "selected_project_no": _clean(selected_project_no),
+        "selected_project_title": _clean(selected_project_title),
+        "project_groups": project_groups,
+        "duplicate_groups": duplicate_groups,
+        "issues": issue_rows,
+        "notes": "",
+    }
+
+
+def resolve_project_records(
+    records: Iterable[Mapping[str, Any]],
+    validation: Mapping[str, Any],
+    *,
+    project_no: str,
+    project_title: str,
+    resolutions: Iterable[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Apply explicit merge/separate decisions to a draft-local record batch."""
+
+    project_no = _clean(project_no)
+    project_title = _clean(project_title)
+    if not project_no or not project_title:
+        raise ValueError("Report Project Title and Project No. are required.")
+
+    groups = validation.get("project_groups") if isinstance(validation, Mapping) else []
+    groups = groups if isinstance(groups, list) else []
+    known = {
+        str(group.get("key")): group
+        for group in groups
+        if isinstance(group, Mapping) and group.get("key")
+    }
+    decisions: dict[str, str] = {}
+    for row in resolutions:
+        if not isinstance(row, Mapping):
+            continue
+        key = str(row.get("group_key") or "")
+        decision = str(row.get("decision") or "")
+        if key not in known:
+            raise ValueError("Source validation contains an unknown project group.")
+        if decision not in {"merge", "separate"}:
+            raise ValueError("Choose Merge or Keep separate for every project identity.")
+        decisions[key] = decision
+
+    for key, group in known.items():
+        if key not in decisions:
+            default = str(group.get("decision") or "")
+            if default == "merge" and not group.get("requires_confirmation"):
+                decisions[key] = default
+            else:
+                raise ValueError("Choose Merge or Keep separate for every project identity.")
+
+    included: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    for index, source_record in enumerate(records):
+        if not isinstance(source_record, Mapping):
+            continue
+        record = copy.deepcopy(dict(source_record))
+        source_title = _metadata(record, "project_title")
+        source_no = _metadata(record, "project_no")
+        key = _record_group_key(record, index, source_title, source_no)
+        if key not in decisions:
+            raise ValueError("A source project identity changed after validation. Compile again.")
+        if decisions[key] == "separate":
+            excluded.append(record)
+            continue
+
+        record["source_identity"] = {
+            "project_no": source_no,
+            "project_title": source_title,
+            "validation_group_key": key,
+            "record_id": _record_id(record, index),
+        }
+        record["project_no"] = project_no
+        record["project_title"] = project_title
+        payload = copy.deepcopy(dict(_payload(record)))
+        payload["project_no"] = project_no
+        payload["project_title"] = project_title
+        record["payload"] = payload
+        included.append(record)
+
+    if not included:
+        raise ValueError("At least one project group must be merged into this report.")
+    return included, excluded
+
+
+def resolve_duplicate_records(
+    records: Iterable[Mapping[str, Any]],
+    validation: Mapping[str, Any],
+    *,
+    resolutions: Iterable[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Apply explicit same-date source choices after project decisions."""
+
+    records = [copy.deepcopy(dict(record)) for record in records if isinstance(record, Mapping)]
+    groups = validation.get("duplicate_groups") if isinstance(validation, Mapping) else []
+    groups = groups if isinstance(groups, list) else []
+    known = {
+        str(group.get("key")): group
+        for group in groups
+        if isinstance(group, Mapping) and group.get("key")
+    }
+    selections: dict[str, str] = {}
+    for row in resolutions:
+        if not isinstance(row, Mapping):
+            continue
+        key = str(row.get("group_key") or "")
+        selected_record_id = _clean(row.get("selected_record_id"))
+        if key not in known:
+            raise ValueError("Source validation contains an unknown duplicate group.")
+        candidate_ids = {
+            _clean(candidate.get("record_id"))
+            for candidate in known[key].get("candidates", [])
+            if isinstance(candidate, Mapping)
+        }
+        if selected_record_id not in candidate_ids:
+            raise ValueError("Choose a valid source for every duplicate report date.")
+        selections[key] = selected_record_id
+
+    by_id = {
+        _record_id(record, index): record
+        for index, record in enumerate(records)
+    }
+    excluded_ids: set[str] = set()
+    for key, group in known.items():
+        candidate_ids = [
+            _clean(candidate.get("record_id"))
+            for candidate in group.get("candidates", [])
+            if isinstance(candidate, Mapping)
+        ]
+        available = [record_id for record_id in candidate_ids if record_id in by_id]
+        selected = selections.get(key)
+        if available and selected and selected not in available:
+            raise ValueError(
+                "A selected duplicate source was excluded by the project decision. "
+                "Choose a source that is merged into this report."
+            )
+        if len(available) <= 1:
+            continue
+        if not selected or selected not in available:
+            raise ValueError("Choose which Daily Report to use for every duplicate date.")
+        excluded_ids.update(record_id for record_id in available if record_id != selected)
+
+    included = [record for record_id, record in by_id.items() if record_id not in excluded_ids]
+    excluded = [record for record_id, record in by_id.items() if record_id in excluded_ids]
+    return included, excluded

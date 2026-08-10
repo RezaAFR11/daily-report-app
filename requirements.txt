@@ -6,3 +6,7 @@ python-docx>=1.2,<2
 anthropic>=0.64,<1
 pypdf>=5,<7
 rapidfuzz>=3.10,<4
+google-api-python-client>=2.170,<3
+google-auth>=2.40,<3
+google-auth-httplib2>=0.2,<1
+google-auth-oauthlib>=1.2,<2

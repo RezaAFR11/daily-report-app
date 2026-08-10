@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from copy import deepcopy
 from unittest.mock import patch
+from urllib.parse import unquote
 
 import daily_report_app
 from reportlab.lib.pagesizes import A4
@@ -64,11 +65,19 @@ class PDFGenerationTests(unittest.TestCase):
             with (
                 patch('daily_report_app.get_reports_dir', return_value=reports_dir),
                 patch('daily_report_app.archive_final_daily_record', return_value=canonical) as archive_json,
+                patch('daily_report_app.google_drive_is_configured', return_value=False),
             ):
                 response = self.client.post('/generate', json=MINIMAL_REPORT)
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers['X-Report-Archive-Status'], 'saved')
+            self.assertEqual(response.headers['X-Report-ID'], canonical['report_id'])
+            self.assertRegex(response.headers['X-Report-Archive-ID'], r'^[a-f0-9]{32}$')
+            self.assertEqual(response.headers['X-GDrive-Configured'], 'false')
+            self.assertEqual(
+                unquote(response.headers['X-Report-Filename']),
+                'Daily Report - PT GPA - KN - 2026-07-28 (Day 47).pdf',
+            )
             self.assertTrue(response.data.startswith(b'%PDF'))
 
             with open(os.path.join(reports_dir, 'index.json'), encoding='utf-8') as index_file:
@@ -76,7 +85,14 @@ class PDFGenerationTests(unittest.TestCase):
             self.assertEqual(len(index), 1)
             self.assertEqual(index[0]['date'], '2026-07-28')
             self.assertEqual(index[0]['canonical_report_id'], canonical['report_id'])
-            self.assertTrue(os.path.isfile(os.path.join(reports_dir, index[0]['filename'])))
+            self.assertEqual(index[0]['project_title'], MINIMAL_REPORT['project_title'])
+            self.assertEqual(
+                index[0]['archive_id'],
+                response.headers['X-Report-Archive-ID'],
+            )
+            self.assertTrue(
+                os.path.isfile(os.path.join(reports_dir, index[0]['storage_filename']))
+            )
             self.assertEqual(archive_json.call_args.args[2], MINIMAL_REPORT)
 
     def test_archive_failure_does_not_block_pdf_download(self):
@@ -325,8 +341,9 @@ class PDFGenerationTests(unittest.TestCase):
             for text in paragraph_texts
             if re.match(r'^\d+\.&#160;&#160;', text)
         ]
-        self.assertEqual(heading_numbers, list(range(1, 9)))
-        self.assertEqual(headings[3], 'DAILY ACTIVITIES &amp; MANPOWER BY AREA')
+        self.assertEqual(heading_numbers, list(range(1, 10)))
+        self.assertEqual(headings[3], 'DAILY ACTIVITIES BY AREA')
+        self.assertEqual(headings[4], 'DIRECT MANPOWER BY AREA')
         self.assertEqual(headings[-1], 'PHOTO DOCUMENTATION')
         self.assertNotIn('OVERALL PROGRESS', headings)
         self.assertFalse(any('PROGRESS-SENTINEL' in text for text in paragraph_texts))
@@ -347,7 +364,7 @@ class PDFGenerationTests(unittest.TestCase):
         ]
         self.assertEqual(
             [int(re.match(r'^(\d+)\.', text).group(1)) for text in headings],
-            list(range(1, 9)),
+            list(range(1, 10)),
         )
         self.assertFalse(any('OVERALL PROGRESS' in text for text in headings))
 
@@ -384,7 +401,7 @@ class PDFGenerationTests(unittest.TestCase):
             for text in paragraph_texts
             if re.match(r'^\d+\.&#160;&#160;', text)
         ]
-        self.assertEqual(heading_numbers, list(range(1, 9)))
+        self.assertEqual(heading_numbers, list(range(1, 10)))
         self.assertEqual(headings[:3], [
             'REPORT INFORMATION',
             'INDIRECT MANPOWER',
@@ -403,7 +420,8 @@ class PDFGenerationTests(unittest.TestCase):
                 'weather',
                 'indirect_manpower',
                 'overall_progress',
-                'daily_activities',
+                'area_activities',
+                'area_manpower',
                 'constraints',
                 'remarks',
                 'sign_off',
@@ -420,29 +438,29 @@ class PDFGenerationTests(unittest.TestCase):
             _normalise_pdf_section_order([
                 'report_information', 'indirect_manpower', 'daily_activities',
                 'weather', 'sign_off',
-            ])[:7],
+            ])[:8],
             [
-                'report_information', 'indirect_manpower', 'daily_activities',
-                'constraints', 'remarks', 'weather', 'sign_off',
+                'report_information', 'indirect_manpower', 'area_activities',
+                'area_manpower', 'constraints', 'remarks', 'weather', 'sign_off',
             ],
         )
         self.assertEqual(
             _normalise_pdf_section_order([
                 'report_information', 'constraints', 'sign_off',
                 'daily_activities', 'remarks', 'weather',
-            ])[:6],
+            ])[:7],
             [
                 'report_information', 'constraints', 'sign_off',
-                'daily_activities', 'remarks', 'weather',
+                'area_activities', 'area_manpower', 'remarks', 'weather',
             ],
         )
         self.assertEqual(
             _normalise_pdf_section_order([
                 'report_information', 'sign_off', 'areas', 'weather',
-            ])[:6],
+            ])[:7],
             [
-                'report_information', 'sign_off', 'daily_activities',
-                'constraints', 'remarks', 'weather',
+                'report_information', 'sign_off', 'area_activities',
+                'area_manpower', 'constraints', 'remarks', 'weather',
             ],
         )
 
@@ -480,7 +498,8 @@ class PDFGenerationTests(unittest.TestCase):
             'REMARKS',
             'CONSTRAINTS &amp; ISSUES',
             'SIGN-OFF',
-            'DAILY ACTIVITIES &amp; MANPOWER BY AREA',
+            'DAILY ACTIVITIES BY AREA',
+            'DIRECT MANPOWER BY AREA',
             'INDIRECT MANPOWER',
             'WEATHER REPORT',
         ])
@@ -554,7 +573,7 @@ class PDFGenerationTests(unittest.TestCase):
         ]
         self.assertEqual(
             [int(re.match(r'^(\d+)\.', text).group(1)) for text in headings],
-            list(range(1, 10)),
+            list(range(1, 11)),
         )
         self.assertTrue(any('OVERALL PROGRESS' in text for text in headings))
 

@@ -268,6 +268,134 @@ class MonthlyAggregationTests(unittest.TestCase):
         self.assertEqual(day["total_man_hours"], 42.0)
         self.assertEqual(result["manpower"]["totals"]["total_person_days"], 4)
 
+    def test_manpower_normalises_legacy_role_and_hours_aliases(self):
+        payload = {
+            "date": "2026-08-10",
+            "project_no": "P-001",
+            "project_title": "Reactivation",
+            "indirect_manpower": [
+                {
+                    "name": "Admin",
+                    "position": "Project Admin",
+                    "working_hours": "07:00-17:00",
+                },
+            ],
+            "areas": [
+                {
+                    "id": "Unit 1",
+                    "manpower": [
+                        {
+                            "name": "Engineer",
+                            "role_position": "Woodward Engineer",
+                            "work_hours": "07:00 – 17:00",
+                        },
+                        {
+                            "name": "Specialist",
+                            "position": "Specialist",
+                            "hours": "07:00-17:00",
+                            "man_hours": 8,
+                        },
+                        {
+                            "name": "Standby",
+                            "role": "Helper",
+                            "hours": "07:00-17:00",
+                            "man_hours": 0,
+                        },
+                    ],
+                },
+            ],
+        }
+
+        result = aggregate_monthly_records(
+            [canonical_record(payload, report_id="legacy-aliases")],
+            project_no="P-001",
+            date_from="2026-08-10",
+            date_to="2026-08-10",
+        )
+
+        day = result["manpower"]["daily"][0]
+        self.assertEqual(day["direct_headcount"], 3)
+        self.assertEqual(day["indirect_headcount"], 1)
+        self.assertEqual(day["total_man_hours"], 28.0)
+        self.assertEqual(day["parsed_hours_count"], 4)
+        self.assertEqual(day["zero_hours_count"], 1)
+        roles = {row["role"]: row for row in result["manpower"]["roles"]}
+        self.assertEqual(roles["Project Admin"]["man_hours"], 10.0)
+        self.assertEqual(roles["Woodward Engineer"]["man_hours"], 10.0)
+        self.assertEqual(roles["Specialist"]["man_hours"], 8.0)
+
+    def test_explicit_man_hours_remains_authoritative_when_person_is_duplicated(self):
+        payload = {
+            "date": "2026-08-11",
+            "project_no": "P-001",
+            "project_title": "Reactivation",
+            "areas": [
+                {
+                    "id": "Unit 1",
+                    "manpower": [
+                        {"name": "Same Person", "position": "Technician", "hours": "07:00-17:00"},
+                    ],
+                },
+                {
+                    "id": "Unit 2",
+                    "manpower": [
+                        {"name": " same  person ", "role": "Technician", "man_hours": "8"},
+                    ],
+                },
+            ],
+        }
+
+        result = aggregate_monthly_records(
+            [canonical_record(payload, report_id="explicit-hours")],
+            project_no="P-001",
+            date_from="2026-08-11",
+            date_to="2026-08-11",
+        )
+
+        day = result["manpower"]["daily"][0]
+        self.assertEqual(day["direct_headcount"], 1)
+        self.assertEqual(day["direct_man_hours"], 8.0)
+        self.assertEqual(result["manpower"]["totals"]["total_person_days"], 1)
+
+    def test_hours_completeness_distinguishes_zero_missing_and_invalid(self):
+        payload = {
+            "date": "2026-08-12",
+            "project_no": "P-001",
+            "project_title": "Reactivation",
+            "areas": [
+                {
+                    "id": "Unit 1",
+                    "manpower": [
+                        {"name": "Valid", "role": "Foreman", "hours": "07:00-17:00"},
+                        {"name": "Zero", "role": "Standby", "man_hours": 0},
+                        {"name": "Invalid", "role": "Helper", "working_hours": "unknown"},
+                        {"name": "Missing", "role": "Technician"},
+                    ],
+                },
+            ],
+        }
+
+        result = aggregate_monthly_records(
+            [canonical_record(payload, report_id="completeness")],
+            project_no="P-001",
+            date_from="2026-08-12",
+            date_to="2026-08-12",
+        )
+
+        day = result["manpower"]["daily"][0]
+        self.assertEqual(day["total_man_hours"], 10.0)
+        self.assertEqual(day["parsed_hours_count"], 2)
+        self.assertEqual(day["zero_hours_count"], 1)
+        self.assertEqual(day["missing_hours_count"], 1)
+        self.assertEqual(day["invalid_hours_count"], 1)
+        self.assertEqual(day["unparsed_hours_count"], 2)
+        self.assertFalse(day["hours_complete"])
+        totals = result["manpower"]["totals"]
+        self.assertEqual(totals["zero_hours_count"], 1)
+        self.assertEqual(totals["missing_hours_count"], 1)
+        self.assertEqual(totals["invalid_hours_count"], 1)
+        self.assertFalse(totals["hours_complete"])
+
     def test_progress_uses_deltas_and_never_sums_cumulative_values(self):
         first = canonical_record(
             {

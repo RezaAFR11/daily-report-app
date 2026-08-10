@@ -11,9 +11,11 @@ from typing import Any
 
 
 _TIME_RANGE = re.compile(
-    r"(?P<start_h>\d{1,2}):(?P<start_m>\d{2})\s*[-–—]\s*"
+    r"(?P<start_h>\d{1,2}):(?P<start_m>\d{2})\s*(?:-|\u2013|\u2014|\u2212)\s*"
     r"(?P<end_h>\d{1,2}):(?P<end_m>\d{2})"
 )
+_ROLE_FIELDS = ("role", "position", "role_position")
+_HOURS_FIELDS = ("hours", "working_hours", "work_hours")
 _PROGRESS_NUMERIC_FIELDS = (
     "weight_factor",
     "cumulative_previous_plan",
@@ -158,6 +160,71 @@ def _hours_value(value: Any) -> float | None:
     return number if math.isfinite(number) and number >= 0 else None
 
 
+def _has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    return not isinstance(value, str) or bool(value.strip())
+
+
+def _numeric_man_hours(value: Any) -> float | None:
+    """Return an explicit man-hour value without treating it as a shift range."""
+
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if math.isfinite(number) and number >= 0 else None
+
+    text = str(value).strip().replace(" ", "")
+    if not text:
+        return None
+    if "," in text and "." not in text:
+        text = text.replace(",", ".")
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _person_role(row: Mapping[str, Any]) -> str:
+    for field in _ROLE_FIELDS:
+        value = _clean_text(row.get(field))
+        if value:
+            return value
+    return ""
+
+
+def _person_hours(row: Mapping[str, Any]) -> tuple[float | None, str, str, int]:
+    """Normalise legacy hour fields and retain their completeness state.
+
+    A valid explicit ``man_hours`` value is authoritative, including zero. If
+    it is absent or invalid, known shift aliases are tried in order. Priority
+    allows deduplication to retain explicit man-hours over a derived range.
+    """
+
+    explicit_present = _has_value(row.get("man_hours"))
+    if explicit_present:
+        explicit = _numeric_man_hours(row.get("man_hours"))
+        if explicit is not None:
+            return explicit, "parsed", "man_hours", 2
+
+    supplied_aliases: list[str] = []
+    for field in _HOURS_FIELDS:
+        value = row.get(field)
+        if not _has_value(value):
+            continue
+        supplied_aliases.append(field)
+        parsed = _hours_value(value)
+        if parsed is not None:
+            return parsed, "parsed", field, 1
+
+    if explicit_present or supplied_aliases:
+        source = "man_hours" if explicit_present else supplied_aliases[0]
+        return None, "invalid", source, 0
+    return None, "missing", "", 0
+
+
 def _person_key(row: Mapping[str, Any], category: str, index: int) -> tuple[str, str]:
     name = _normalise_text(row.get("name"))
     if name:
@@ -166,29 +233,75 @@ def _person_key(row: Mapping[str, Any], category: str, index: int) -> tuple[str,
     return ("anonymous", f"{category}:{index}")
 
 
+def _merge_person(existing: dict[str, Any], incoming: Mapping[str, Any]) -> None:
+    if not existing["role"] and incoming.get("role"):
+        existing["role"] = incoming["role"]
+
+    incoming_hours = incoming.get("hours")
+    existing_hours = existing.get("hours")
+    incoming_priority = int(incoming.get("hours_priority", 0))
+    existing_priority = int(existing.get("hours_priority", 0))
+    should_replace = False
+    if incoming_hours is not None:
+        if existing_hours is None or incoming_priority > existing_priority:
+            should_replace = True
+        elif incoming_priority == existing_priority and float(incoming_hours) > float(existing_hours):
+            should_replace = True
+    elif existing_hours is None:
+        state_rank = {"missing": 0, "invalid": 1, "parsed": 2}
+        should_replace = state_rank.get(str(incoming.get("hours_state")), 0) > state_rank.get(
+            str(existing.get("hours_state")), 0
+        )
+
+    if should_replace:
+        existing["hours"] = incoming_hours
+        existing["hours_state"] = incoming.get("hours_state", "missing")
+        existing["hours_source"] = incoming.get("hours_source", "")
+        existing["hours_priority"] = incoming_priority
+
+
 def _dedupe_people(rows: list[Mapping[str, Any]], category: str) -> dict[tuple[str, str], dict[str, Any]]:
     people: dict[tuple[str, str], dict[str, Any]] = {}
     for index, row in enumerate(rows):
         if not isinstance(row, Mapping):
             continue
-        if not any(_clean_text(row.get(key)) for key in ("name", "role", "hours")):
+        relevant_fields = ("name", "man_hours", *_ROLE_FIELDS, *_HOURS_FIELDS)
+        if not any(_has_value(row.get(key)) for key in relevant_fields):
             continue
         key = _person_key(row, category, index)
-        hours = _hours_value(row.get("hours"))
+        hours, hours_state, hours_source, hours_priority = _person_hours(row)
+        incoming = {
+            "name": _clean_text(row.get("name")),
+            "role": _person_role(row),
+            "hours": hours,
+            "hours_state": hours_state,
+            "hours_source": hours_source,
+            "hours_priority": hours_priority,
+        }
         existing = people.get(key)
         if existing is None:
-            people[key] = {
-                "name": _clean_text(row.get("name")),
-                "role": _clean_text(row.get("role")),
-                "hours": hours,
-            }
+            people[key] = incoming
             continue
-        if not existing["role"]:
-            existing["role"] = _clean_text(row.get("role"))
-        if hours is not None and (existing["hours"] is None or hours > existing["hours"]):
-            # Duplicate area assignments count once; retain the longest stated shift.
-            existing["hours"] = hours
+        _merge_person(existing, incoming)
     return people
+
+
+def _hours_completeness(people: Mapping[Any, Mapping[str, Any]]) -> dict[str, Any]:
+    parsed = sum(person.get("hours") is not None for person in people.values())
+    zero = sum(person.get("hours") == 0 for person in people.values())
+    missing = sum(person.get("hours_state") == "missing" for person in people.values())
+    invalid = sum(person.get("hours_state") == "invalid" for person in people.values())
+    unresolved = missing + invalid
+    return {
+        "person_count": len(people),
+        "parsed_hours_count": parsed,
+        "zero_hours_count": zero,
+        "missing_hours_count": missing,
+        "invalid_hours_count": invalid,
+        # Retain the combined unresolved count expected by existing consumers.
+        "unparsed_hours_count": unresolved,
+        "hours_complete": unresolved == 0,
+    }
 
 
 def _daily_manpower(payload: Mapping[str, Any], report_date: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -217,16 +330,14 @@ def _daily_manpower(payload: Mapping[str, Any], report_date: str) -> tuple[dict[
         if key not in combined:
             combined[key] = dict(person)
             continue
-        existing = combined[key]
-        if person["hours"] is not None and (
-            existing["hours"] is None or person["hours"] > existing["hours"]
-        ):
-            existing["hours"] = person["hours"]
+        _merge_person(combined[key], person)
 
     def hours_total(people: Mapping[Any, Mapping[str, Any]]) -> float:
         return round(sum(float(person["hours"]) for person in people.values() if person["hours"] is not None), 2)
 
-    missing_hours = sum(person["hours"] is None for person in combined.values())
+    direct_completeness = _hours_completeness(direct)
+    indirect_completeness = _hours_completeness(indirect)
+    total_completeness = _hours_completeness(combined)
     day = {
         "date": report_date,
         "direct_headcount": len(direct),
@@ -235,7 +346,17 @@ def _daily_manpower(payload: Mapping[str, Any], report_date: str) -> tuple[dict[
         "direct_man_hours": hours_total(direct),
         "indirect_man_hours": hours_total(indirect),
         "total_man_hours": hours_total(combined),
-        "unparsed_hours_count": missing_hours,
+        "parsed_hours_count": total_completeness["parsed_hours_count"],
+        "zero_hours_count": total_completeness["zero_hours_count"],
+        "missing_hours_count": total_completeness["missing_hours_count"],
+        "invalid_hours_count": total_completeness["invalid_hours_count"],
+        "unparsed_hours_count": total_completeness["unparsed_hours_count"],
+        "hours_complete": total_completeness["hours_complete"],
+        "hours_completeness": {
+            "direct": direct_completeness,
+            "indirect": indirect_completeness,
+            "total": total_completeness,
+        },
     }
 
     role_rows = []
@@ -245,6 +366,7 @@ def _daily_manpower(payload: Mapping[str, Any], report_date: str) -> tuple[dict[
                 "date": report_date,
                 "role": person["role"] or "Unspecified",
                 "man_hours": person["hours"],
+                "hours_state": person["hours_state"],
             }
         )
     return day, role_rows
@@ -510,12 +632,30 @@ def aggregate_monthly_records(
         key = _normalise_text(role)
         summary = role_summary.setdefault(
             key,
-            {"role": role, "person_days": 0, "man_hours": 0.0, "unparsed_hours_count": 0},
+            {
+                "role": role,
+                "person_days": 0,
+                "man_hours": 0.0,
+                "parsed_hours_count": 0,
+                "zero_hours_count": 0,
+                "missing_hours_count": 0,
+                "invalid_hours_count": 0,
+                "unparsed_hours_count": 0,
+                "hours_complete": True,
+            },
         )
         summary["person_days"] += 1
         if row["man_hours"] is None:
             summary["unparsed_hours_count"] += 1
+            if row.get("hours_state") == "invalid":
+                summary["invalid_hours_count"] += 1
+            else:
+                summary["missing_hours_count"] += 1
+            summary["hours_complete"] = False
         else:
+            summary["parsed_hours_count"] += 1
+            if row["man_hours"] == 0:
+                summary["zero_hours_count"] += 1
             summary["man_hours"] += float(row["man_hours"])
     roles = sorted(role_summary.values(), key=lambda row: _normalise_text(row["role"]))
     for row in roles:
@@ -529,7 +669,12 @@ def aggregate_monthly_records(
         "indirect_man_hours": round(sum(day["indirect_man_hours"] for day in daily_manpower), 2),
         "total_man_hours": round(sum(day["total_man_hours"] for day in daily_manpower), 2),
         "peak_headcount": max((day["total_headcount"] for day in daily_manpower), default=0),
+        "parsed_hours_count": sum(day["parsed_hours_count"] for day in daily_manpower),
+        "zero_hours_count": sum(day["zero_hours_count"] for day in daily_manpower),
+        "missing_hours_count": sum(day["missing_hours_count"] for day in daily_manpower),
+        "invalid_hours_count": sum(day["invalid_hours_count"] for day in daily_manpower),
         "unparsed_hours_count": sum(day["unparsed_hours_count"] for day in daily_manpower),
+        "hours_complete": all(day["hours_complete"] for day in daily_manpower),
     }
 
     if selected:
@@ -584,7 +729,8 @@ def aggregate_monthly_records(
             "totals": manpower_totals,
             "roles": roles,
             "hours_method": (
-                "elapsed shift range without break deduction; duplicate assignments use the longest shift"
+                "explicit man_hours takes precedence; otherwise use elapsed shift range without "
+                "break deduction; duplicate assignments use the authoritative or longest shift"
             ),
         },
         "overall_progress": _aggregate_progress(selected),
