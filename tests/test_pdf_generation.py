@@ -470,9 +470,10 @@ class PDFGenerationTests(unittest.TestCase):
             'report_information',
             'photo_documentation',
             'remarks',
+            'area_manpower',
             'constraints',
             'sign_off',
-            'daily_activities',
+            'area_activities',
             'indirect_manpower',
             'weather',
             'overall_progress',
@@ -496,10 +497,10 @@ class PDFGenerationTests(unittest.TestCase):
             'REPORT INFORMATION',
             'PHOTO DOCUMENTATION',
             'REMARKS',
+            'DIRECT MANPOWER BY AREA',
             'CONSTRAINTS &amp; ISSUES',
             'SIGN-OFF',
             'DAILY ACTIVITIES BY AREA',
-            'DIRECT MANPOWER BY AREA',
             'INDIRECT MANPOWER',
             'WEATHER REPORT',
         ])
@@ -629,7 +630,12 @@ class PDFGenerationTests(unittest.TestCase):
         self.assertIn('id="resetPDFSectionOrderBtn"', page)
         self.assertIn('id="confirmPDFSectionOrderBtn"', page)
         self.assertIn("report_information: { label:'Report Information'", page)
+        self.assertIn("area_activities:     { label:'Daily Activities'", page)
+        self.assertIn("area_manpower:       { label:'Direct Manpower'", page)
+        self.assertIn("daily_activities: ['area_activities', 'area_manpower']", page)
         self.assertIn("photo_documentation: { label:'Photo Documentation'", page)
+        self.assertIn('class="form-control form-control-sm mp-task"', page)
+        self.assertIn("task:  row.querySelector('.mp-task').value", page)
         self.assertIn('function openPDFSectionOrderModal()', page)
         self.assertIn('function confirmPDFSectionOrder()', page)
         self.assertIn('function renderPDFPreview()', page)

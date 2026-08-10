@@ -24,6 +24,7 @@ from reportlab.platypus import (
     BaseDocTemplate,
     Flowable,
     Frame,
+    Image as RLImage,
     LongTable,
     NextPageTemplate,
     PageBreak,
@@ -34,6 +35,8 @@ from reportlab.platypus import (
     TableStyle,
 )
 from reportlab.platypus.tableofcontents import TableOfContents
+
+from .photos import asset_filename, is_asset_id
 
 
 __all__ = ["render_monthly_report"]
@@ -1228,15 +1231,118 @@ def _appendix_label(item: Mapping[str, Any]) -> str:
     return label
 
 
+def _photo_grid_flowables(
+    photos: list[Any],
+    styles: Mapping[str, ParagraphStyle],
+    *,
+    photo_base_dir: str | os.PathLike[str] | None,
+) -> list[Flowable]:
+    """Render reviewed draft-local photo references in a three-column grid."""
+
+    if photo_base_dir is None:
+        return [Paragraph("Photo assets are unavailable.", styles["placeholder"])]
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return [Paragraph("Photo rendering requires Pillow.", styles["placeholder"])]
+
+    root = os.path.realpath(os.fspath(photo_base_dir))
+    columns = 3
+    cell_width = BODY_WIDTH / columns
+    image_width = cell_width - 8
+    image_height = 122.0
+    rows: list[list[Any]] = []
+    current: list[Any] = []
+
+    for raw in photos:
+        if not isinstance(raw, Mapping):
+            continue
+        asset_id = _plain(raw.get("asset_id"))
+        if not is_asset_id(asset_id):
+            continue
+        path = os.path.realpath(os.path.join(root, asset_filename(asset_id)))
+        if os.path.dirname(path) != root or not os.path.isfile(path):
+            continue
+        try:
+            with Image.open(path) as opened:
+                if str(opened.format or "").upper() != "JPEG":
+                    continue
+                image = ImageOps.exif_transpose(opened).convert("RGB")
+                fitted = ImageOps.fit(
+                    image,
+                    (max(1, int(image_width * 2)), max(1, int(image_height * 2))),
+                    method=Image.Resampling.LANCZOS,
+                )
+                image_buffer = io.BytesIO()
+                fitted.save(image_buffer, format="JPEG", quality=82, optimize=True)
+                image_buffer.seek(0)
+            rendered_image: Any = RLImage(
+                image_buffer,
+                width=image_width,
+                height=image_height,
+            )
+        except Exception:
+            continue
+
+        source = _plain(raw.get("source"))
+        page = _plain(raw.get("page"))
+        fallback = f"{source} - p.{page}" if source and page else source
+        caption = _plain(raw.get("caption"), fallback)
+        card = Table(
+            [
+                [rendered_image],
+                [Paragraph(_xml(caption, "Photo documentation"), styles["small"])],
+            ],
+            colWidths=[cell_width - 4],
+        )
+        card.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.55, CYAN),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        current.append(card)
+        if len(current) == columns:
+            rows.append(current)
+            current = []
+
+    if current:
+        current.extend([""] * (columns - len(current)))
+        rows.append(current)
+    if not rows:
+        return [Paragraph("No selected photo assets are available.", styles["placeholder"])]
+
+    grid = Table(rows, colWidths=[cell_width] * columns, hAlign="LEFT", splitByRow=1)
+    grid.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return [grid]
+
+
 def _build_story(
     report: Mapping[str, Any],
     styles: Mapping[str, ParagraphStyle],
+    *,
+    photo_base_dir: str | os.PathLike[str] | None = None,
 ) -> list[Flowable]:
     report_type = _report_type(report)
     progress = _normalise_progress(report.get("progress", report.get("overall_progress", [])))
     include_s_curve = _coerce_bool(report.get("include_s_curve"), bool(progress))
     curve = _normalise_s_curve(report.get("s_curve"), progress) if include_s_curve else None
     appendices = _normalise_appendices(report.get("appendices"), has_s_curve=curve is not None)
+    photos = [item for item in _as_list(report.get("photo_documentation")) if isinstance(item, Mapping)]
+    if photos:
+        for item in appendices:
+            if item.get("number") == "6.6":
+                item["status"] = "Attached"
+                item["content"] = "__reviewed_photos__"
+                break
 
     story: list[Flowable] = [
         Spacer(1, 1),
@@ -1433,9 +1539,16 @@ def _build_story(
                 styles["h1"],
             ),
         ])
-        story.extend(_content_flowables(
-            content, styles, empty_message="No appendix content supplied.", bullets=True,
-        ))
+        if content == "__reviewed_photos__":
+            story.extend(_photo_grid_flowables(
+                photos,
+                styles,
+                photo_base_dir=photo_base_dir,
+            ))
+        else:
+            story.extend(_content_flowables(
+                content, styles, empty_message="No appendix content supplied.", bullets=True,
+            ))
     return story
 
 
@@ -1443,6 +1556,7 @@ def render_monthly_report(
     report: Mapping[str, Any],
     *,
     logo_path: str | os.PathLike[str] | None = None,
+    photo_base_dir: str | os.PathLike[str] | None = None,
 ) -> io.BytesIO:
     """Render a Weekly or Monthly Progress Report and return a rewound buffer.
 
@@ -1511,6 +1625,9 @@ def render_monthly_report(
     def canvas_maker(*args, **kwargs):
         return _NumberedCanvas(*args, status=status, **kwargs)
 
-    document.multiBuild(_build_story(report, styles), canvasmaker=canvas_maker)
+    document.multiBuild(
+        _build_story(report, styles, photo_base_dir=photo_base_dir),
+        canvasmaker=canvas_maker,
+    )
     buffer.seek(0)
     return buffer

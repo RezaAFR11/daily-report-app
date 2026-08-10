@@ -391,6 +391,24 @@
           </div>
         </div>
 
+        <div class="border rounded-3 p-3 mb-4 d-none" id="photo-review-card" style="background:#f8fafc;">
+          <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
+            <div>
+              <div class="section-label mb-1">Photo Documentation</div>
+              <div class="muted-note">
+                Review extracted Daily Report photos before they are added to Appendix 6.6.
+                Repeated logos and exact duplicates are filtered automatically.
+              </div>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+              <span class="badge text-bg-secondary" id="photo-count-badge">0 photos</span>
+              <button type="button" class="btn btn-sm btn-outline-primary" onclick="openPhotoReview()">
+                Review Photos
+              </button>
+            </div>
+          </div>
+        </div>
+
         <div class="section-label">Executive Summary</div>
         <textarea class="form-control mb-4" id="review-executive-summary" rows="4"></textarea>
 
@@ -493,6 +511,28 @@
   </div>
 </div>
 
+<div class="modal fade" id="photo-review-modal" tabindex="-1" aria-labelledby="photo-review-title" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="photo-review-title">Review Photo Documentation</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted small">
+          Remove irrelevant images, edit captions, or change their order. Only this reviewed list is rendered in Appendix 6.6.
+        </p>
+        <div class="row g-3" id="photo-review-grid"></div>
+      </div>
+      <div class="modal-footer">
+        <span class="small text-muted me-auto" id="photo-review-status"></span>
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="save-photo-review-btn" onclick="savePhotoReview()">Save Photo Review</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 let monthlySource = 'stored_json';
@@ -507,6 +547,7 @@ let monthlyUploadController = null;
 let monthlyProjectValidationGroups = [];
 let monthlyDuplicateValidationGroups = [];
 let monthlySourceValidationApplied = false;
+let monthlyPhotos = [];
 const MAX_MONTHLY_UPLOAD_FILES = 35;
 const MAX_MONTHLY_PDF_BYTES = {{ pdf_upload_max_bytes|default(52428800)|int }};
 const MONTHLY_UPLOAD_CLEANUP_KEY = 'gpa-report-upload-cleanup';
@@ -1164,7 +1205,128 @@ function populateMonthlyReview(draft) {
   const rows = draft.progress?.rows || draft.progress_rows || [];
   rows.forEach(row => addProgressRow(row));
   if (!rows.length) addProgressRow();
+  monthlyPhotos = Array.isArray(draft.photo_documentation)
+    ? draft.photo_documentation.map(photo => ({...photo}))
+    : [];
+  updatePhotoReviewCard();
   toggleFinalConfirmation();
+}
+
+function updatePhotoReviewCard() {
+  const card = document.getElementById('photo-review-card');
+  const badge = document.getElementById('photo-count-badge');
+  card.classList.toggle('d-none', monthlyPhotos.length === 0 || !monthlySourceValidationApplied);
+  badge.textContent = `${monthlyPhotos.length} photo${monthlyPhotos.length === 1 ? '' : 's'}`;
+}
+
+function moveMonthlyPhoto(index, offset) {
+  const target = index + offset;
+  if (target < 0 || target >= monthlyPhotos.length) return;
+  [monthlyPhotos[index], monthlyPhotos[target]] = [monthlyPhotos[target], monthlyPhotos[index]];
+  renderPhotoReviewGrid();
+}
+
+function removeMonthlyPhoto(index) {
+  monthlyPhotos.splice(index, 1);
+  renderPhotoReviewGrid();
+}
+
+function renderPhotoReviewGrid() {
+  const grid = document.getElementById('photo-review-grid');
+  grid.replaceChildren();
+  if (!monthlyPhotos.length) {
+    const empty = document.createElement('div');
+    empty.className = 'col-12 text-muted small';
+    empty.textContent = 'No photos are selected for Appendix 6.6.';
+    grid.appendChild(empty);
+    return;
+  }
+  monthlyPhotos.forEach((photo, index) => {
+    const column = document.createElement('div');
+    column.className = 'col-12 col-sm-6 col-lg-4';
+    const card = document.createElement('div');
+    card.className = 'border rounded p-2 h-100 bg-white';
+
+    const image = document.createElement('img');
+    image.className = 'rounded mb-2 d-block w-100';
+    image.style.height = '180px';
+    image.style.objectFit = 'cover';
+    image.alt = 'Extracted Daily Report photo';
+    image.loading = 'lazy';
+    image.src = `/monthly/photos/${encodeURIComponent(monthlyDraftId)}/${encodeURIComponent(photo.asset_id || '')}`;
+    card.appendChild(image);
+
+    const source = document.createElement('div');
+    source.className = 'small text-muted mb-2 text-break';
+    source.textContent = `${photo.source || 'Daily Report'}${photo.page ? ` - page ${photo.page}` : ''}`;
+    card.appendChild(source);
+
+    const caption = document.createElement('textarea');
+    caption.className = 'form-control form-control-sm mb-2';
+    caption.rows = 2;
+    caption.maxLength = 500;
+    caption.placeholder = 'Photo caption';
+    caption.value = photo.caption || '';
+    caption.addEventListener('input', () => { monthlyPhotos[index].caption = caption.value; });
+    card.appendChild(caption);
+
+    const actions = document.createElement('div');
+    actions.className = 'd-flex gap-1';
+    const actionSpecs = [
+      ['Move up', 'Up', () => moveMonthlyPhoto(index, -1), index === 0],
+      ['Move down', 'Down', () => moveMonthlyPhoto(index, 1), index === monthlyPhotos.length - 1],
+      ['Remove photo', 'Remove', () => removeMonthlyPhoto(index), false],
+    ];
+    actionSpecs.forEach(([label, text, handler, disabled], actionIndex) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = actionIndex === 2
+        ? 'btn btn-sm btn-outline-danger ms-auto'
+        : 'btn btn-sm btn-outline-secondary';
+      button.setAttribute('aria-label', label);
+      button.textContent = text;
+      button.disabled = disabled;
+      button.addEventListener('click', handler);
+      actions.appendChild(button);
+    });
+    card.appendChild(actions);
+    column.appendChild(card);
+    grid.appendChild(column);
+  });
+}
+
+function openPhotoReview() {
+  document.getElementById('photo-review-status').textContent = '';
+  renderPhotoReviewGrid();
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('photo-review-modal')).show();
+}
+
+async function savePhotoReview() {
+  if (!monthlyDraftId) return;
+  const button = document.getElementById('save-photo-review-btn');
+  const status = document.getElementById('photo-review-status');
+  button.disabled = true;
+  status.textContent = 'Saving...';
+  try {
+    const response = await fetch(`/monthly/photos/${encodeURIComponent(monthlyDraftId)}`, {
+      method:'PATCH',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        photos:monthlyPhotos.map(photo => ({
+          asset_id:photo.asset_id,
+          caption:photo.caption || '',
+        })),
+      }),
+    });
+    const data = await responsePayload(response, 'Photo review could not be saved.');
+    monthlyPhotos = Array.isArray(data.photos) ? data.photos.map(photo => ({...photo})) : monthlyPhotos;
+    updatePhotoReviewCard();
+    bootstrap.Modal.getInstance(document.getElementById('photo-review-modal'))?.hide();
+  } catch (error) {
+    status.textContent = error.message || 'Photo review could not be saved.';
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function validationIssueText(issue) {
@@ -1328,6 +1490,7 @@ function updateValidationStatus() {
 
 function markSourceValidationDirty() {
   monthlySourceValidationApplied = false;
+  updatePhotoReviewCard();
   updateValidationStatus();
 }
 

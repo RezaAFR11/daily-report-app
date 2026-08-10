@@ -197,9 +197,9 @@
       <button class="btn btn-sm btn-outline-light" onclick="saveDraft()" title="Auto-saves every 60s">💾 Save</button>
       <button class="btn btn-sm btn-outline-light" onclick="loadDraftFromServer()" title="Load last saved draft">📂 Load</button>
       <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#versionsModal" title="Restore a previous draft snapshot">🕐 Versions</button>
-      <button class="btn btn-sm btn-outline-light" onclick="exportDraft()" title="Download draft as JSON">⬇ Export</button>
-      <label class="btn btn-sm btn-outline-light mb-0" title="Import draft from JSON file">
-        ⬆ Import<input type="file" id="importFileInput" accept=".json" style="display:none" onchange="importDraft(this)">
+      <button class="btn btn-sm btn-outline-light" onclick="exportDraft()" title="Download a portable ZIP containing the draft and its photos">⬇ Export</button>
+      <label class="btn btn-sm btn-outline-light mb-0" title="Import a GPA draft ZIP or legacy JSON file">
+        ⬆ Import<input type="file" id="importFileInput" accept=".zip,.json,application/zip,application/json" style="display:none" onchange="importDraft(this)">
       </label>
       <button class="btn btn-sm btn-outline-light text-warning" onclick="clearFormConfirm()" title="Clear entire form">🗑 Clear</button>
     </div>
@@ -1066,7 +1066,8 @@ const DEFAULT_PDF_SECTION_ORDER = [
   'weather',
   'indirect_manpower',
   'overall_progress',
-  'daily_activities',
+  'area_activities',
+  'area_manpower',
   'constraints',
   'remarks',
   'sign_off',
@@ -1077,9 +1078,10 @@ const PDF_SECTION_DEFINITIONS = {
   weather:             { label:'Weather Report', description:'Morning, afternoon, evening, and work impact' },
   indirect_manpower:   { label:'Indirect Manpower', description:'Global indirect manpower list' },
   overall_progress:    { label:'Overall Progress', description:'Included only when the Overall Progress toggle is ON' },
-  daily_activities:    { label:'Daily Activities & Manpower', description:'Activities and direct manpower for each area' },
+  area_activities:     { label:'Daily Activities', description:'Activity today and tomorrow for each area' },
+  area_manpower:       { label:'Direct Manpower', description:'Direct manpower table for each area' },
   constraints:         { label:'Constraints & Issues', description:'Summary of constraints entered for each area' },
-  remarks:             { label:'Remarks', description:'Global report remarks' },
+  remarks:             { label:'Remarks', description:'Area and global report remarks' },
   sign_off:            { label:'Sign-Off', description:'Approval names, roles, and signatures' },
   photo_documentation: { label:'Photo Documentation', description:'Photos and captions entered inside each area' },
 };
@@ -1089,12 +1091,13 @@ const PDF_SECTION_ALIASES = {
   weather_report: ['weather'],
   indirect: ['indirect_manpower'],
   progress: ['overall_progress'],
-  area_activities: ['daily_activities'],
-  activities: ['daily_activities'],
+  daily_activities: ['area_activities', 'area_manpower'],
+  activities: ['area_activities'],
+  manpower: ['area_manpower'],
   constraints_issues: ['constraints'],
   signoff: ['sign_off'],
   photos: ['photo_documentation'],
-  areas: ['daily_activities', 'constraints', 'remarks'],
+  areas: ['area_activities', 'area_manpower', 'constraints', 'remarks'],
 };
 
 let _pdfSectionOrder = [...DEFAULT_PDF_SECTION_ORDER];
@@ -1123,10 +1126,15 @@ function normaliseSavedSectionOrder(sectionOrder) {
       if (known.has(key) && !requested.includes(key)) requested.push(key);
     });
   });
-  // Former six-card orders used one Areas anchor for these three PDF sections.
-  if (requested.includes('daily_activities')
+  // Backward compatibility: old drafts used one Daily Activities & Manpower
+  // item. Keep its two replacement sections adjacent, without changing the
+  // existing Constraints and Remarks sections.
+  if (requested.includes('area_activities') && !requested.includes('area_manpower')) {
+    requested.splice(requested.indexOf('area_activities') + 1, 0, 'area_manpower');
+  }
+  if (requested.includes('area_manpower')
       && !requested.includes('constraints') && !requested.includes('remarks')) {
-    const insertAt = requested.indexOf('daily_activities') + 1;
+    const insertAt = requested.indexOf('area_manpower') + 1;
     requested.splice(insertAt, 0, 'constraints', 'remarks');
   }
   const result = ['report_information'];
@@ -1825,13 +1833,17 @@ function addPhoto(btn, d={}) {
   const col   = document.createElement('div');
   col.className = 'col-12 col-sm-6 col-md-4';
   // Support server-stored photos (photo_filename) or legacy base64 (img_data)
-  const hasFilename = !!d.photo_filename;
+  const missingFilename = !!d.photo_filename && d.photo_missing === true;
+  const hasFilename = !!d.photo_filename && !missingFilename;
   const hasImg = !hasFilename && d.img_data && d.img_data.includes(',');
   const previewSrc = hasFilename ? `/temp_photo/${d.photo_filename}` : (hasImg ? d.img_data : '');
   const isFilled = hasFilename || hasImg;
+  const placeholder = missingFilename
+    ? `⚠️ Photo file missing<br><span style="font-size:.72rem">${esc(d.photo_filename)}</span>`
+    : `📷 No photo<br><span style="font-size:.72rem">Browse or paste below</span>`;
   col.innerHTML = `
     <div class="photo-box${isFilled?' filled':''}">
-      <div class="photo-ph"${isFilled?' style="display:none"':''}>📷 No photo<br><span style="font-size:.72rem">Browse or paste below</span></div>
+      <div class="photo-ph"${isFilled?' style="display:none"':''}>${placeholder}</div>
       <img class="photo-prev${isFilled?' show':''}" src="${previewSrc}" alt="photo">
       <input type="text" class="form-control form-control-sm photo-desc" maxlength="300"
              placeholder="Description / caption…" value="${esc(d.desc||'')}">
@@ -1844,6 +1856,7 @@ function addPhoto(btn, d={}) {
       </div>
       <input type="hidden" class="photo-data" value="">
       <input type="hidden" class="photo-filename" value="${esc(d.photo_filename||'')}">
+      <input type="hidden" class="photo-missing" value="${missingFilename?'true':''}">
     </div>`;
   cont.appendChild(col);
 
@@ -1945,6 +1958,7 @@ function setPhoto(box, dataUrl) {
   box.classList.add('filled');
   box.querySelector('.photo-data').value = dataUrl;   // temporary until server upload done
   box.querySelector('.photo-filename').value = '';
+  box.querySelector('.photo-missing').value = '';
 
   // Upload to server as binary (FormData) — avoids base64 33% overhead → stays under nginx limit
   _pendingUploads++;
@@ -1967,6 +1981,7 @@ function clearPhoto(btn) {
   const box = btn.closest('.photo-box');
   box.querySelector('.photo-data').value = '';
   box.querySelector('.photo-filename').value = '';
+  box.querySelector('.photo-missing').value = '';
   const img = box.querySelector('.photo-prev');
   img.src = ''; img.classList.remove('show');
   box.querySelector('.photo-ph').style.display = '';
@@ -2177,7 +2192,12 @@ function collectData() {
       const data     = box.querySelector('.photo-data').value;
       const filename = box.querySelector('.photo-filename').value;
       const desc     = box.querySelector('.photo-desc').value;
-      if (data || filename || desc) photos.push({ img_data: data, photo_filename: filename, desc });
+      const missing  = box.querySelector('.photo-missing')?.value === 'true';
+      if (data || filename || desc) {
+        const photo = { img_data: data, photo_filename: filename, desc };
+        if (missing) photo.photo_missing = true;
+        photos.push(photo);
+      }
     });
 
     areas.push({
@@ -2481,30 +2501,79 @@ async function renderPDFPreview() {
 // ════════════════════════════════════════════════════════════
 // EXPORT / IMPORT / CLEAR DRAFT
 // ════════════════════════════════════════════════════════════
-function exportDraft() {
+async function exportDraft() {
   const data = collectData();
-  const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `GPA_Report_Draft_${data.date || 'draft'}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
+  try {
+    if (_pendingUploads > 0) {
+      toast('Waiting for photo uploads to finish…');
+      await new Promise(resolve => {
+        const poll = setInterval(() => {
+          if (_pendingUploads === 0) { clearInterval(poll); resolve(); }
+        }, 200);
+      });
+    }
+    const response = await fetch('/export_draft_bundle', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(collectData()),
+    });
+    if (!response.ok) {
+      let message = `Export failed (${response.status})`;
+      try { const body = await response.json(); if (body.error) message = body.error; } catch (_) {}
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `GPA_Report_Draft_${data.date || 'draft'}.zip`;
+    a.click();
+    URL.revokeObjectURL(url);
+    const photoCount = Number(response.headers.get('X-Draft-Photo-Count') || 0);
+    const missingCount = Number(response.headers.get('X-Draft-Missing-Photos') || 0);
+    if (missingCount > 0) {
+      toast(`Draft exported with ${photoCount} photo(s); ${missingCount} referenced photo(s) were unavailable.`, 'warning');
+    } else {
+      toast(`✓ Draft and ${photoCount} photo(s) exported`, 'success');
+    }
+  } catch (err) {
+    toast('Export failed: ' + err.message, 'danger');
+  }
 }
 
-function importDraft(input) {
+async function importDraft(input) {
   const file = input.files[0]; if (!file) return;
-  const reader = new FileReader();
-  reader.onload = e => {
-    try {
-      const data = JSON.parse(e.target.result);
-      populateForm(data);
-    } catch(err) {
-      alert('Invalid draft file: ' + err.message);
+  try {
+    const form = new FormData();
+    form.append('file', file, file.name);
+    const response = await fetch('/import_draft_bundle', {method:'POST', body:form});
+    let result = {};
+    try { result = await response.json(); } catch (_) {}
+    if (!response.ok) throw new Error(result.error || `Import failed (${response.status})`);
+
+    populateForm(result.data || {});
+    const importedCount = Number(result.imported_photos || 0);
+    const missing = Array.isArray(result.missing_photos) ? result.missing_photos : [];
+    if (missing.length) {
+      const details = missing.slice(0, 10).map(item =>
+        `• ${item.area || 'Area'} / photo ${item.photo || '?'}: ` +
+        `${item.filename || '(inline image)'} — ${item.reason || 'file unavailable'}`
+      ).join('\n');
+      const remainder = missing.length > 10 ? `\n…and ${missing.length - 10} more.` : '';
+      alert(
+        `Draft imported, but ${missing.length} photo file(s) were not available.\n` +
+        `The report data was preserved; replace the missing photos before generating the PDF.\n\n` +
+        details + remainder
+      );
+      toast(`Draft imported: ${importedCount} photo(s) restored, ${missing.length} missing.`, 'warning');
+    } else {
+      toast(`✓ Draft imported with ${importedCount} photo(s)`, 'success');
     }
-  };
-  reader.readAsText(file);
-  input.value = '';
+  } catch(err) {
+    alert('Invalid draft file: ' + err.message);
+  } finally {
+    input.value = '';
+  }
 }
 
 function clearFormConfirm() {

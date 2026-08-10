@@ -16,6 +16,14 @@ from flask import jsonify, request, send_file, session, url_for
 
 from .aggregate import aggregate_monthly_records
 from .importer import DEFAULT_LIMITS, PDFImportError, import_daily_report_pdf
+from .photos import (
+    DEFAULT_PHOTO_LIMITS,
+    asset_filename,
+    copy_photo_assets,
+    extract_pdf_photo_candidates,
+    is_asset_id,
+    store_photo_candidates,
+)
 from .renderer import render_monthly_report
 from .storage import list_canonical_records
 from .validation import (
@@ -35,6 +43,7 @@ _UPLOAD_OPERATION_LOCK_STALE_SECONDS = 15 * 60
 _MAX_STAGED_REQUEST_BYTES = DEFAULT_LIMITS.max_bytes + (1024 * 1024)
 _MAX_REVIEW_TEXT = 30_000
 _REPORT_TYPES = {"monthly", "weekly"}
+_MAX_PHOTO_REVIEW_BYTES = 128 * 1024
 
 
 def _report_type(value: Any) -> str:
@@ -90,6 +99,30 @@ def _monthly_user_dir(data_dir: str | Path, username: str) -> Path:
     (directory / "reports").mkdir(parents=True, exist_ok=True)
     (directory / "drafts").mkdir(parents=True, exist_ok=True)
     return directory
+
+
+def _draft_photo_dir(
+    data_dir: str | Path,
+    username: str,
+    draft_id: str,
+    *,
+    create: bool = True,
+) -> Path | None:
+    if not _DRAFT_ID_RE.fullmatch(str(draft_id or "")):
+        return None
+    root = (_monthly_user_dir(data_dir, username) / "draft_assets").resolve(strict=False)
+    directory = (root / draft_id).resolve(strict=False)
+    if directory.parent != root:
+        return None
+    if create:
+        directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _remove_draft_assets(data_dir: str | Path, username: str, draft_id: str) -> None:
+    directory = _draft_photo_dir(data_dir, username, draft_id, create=False)
+    if directory is not None and directory.is_dir():
+        shutil.rmtree(directory)
 
 
 def _upload_sessions_dir(data_dir: str | Path, username: str) -> Path:
@@ -261,12 +294,14 @@ def _save_draft(
     for stale in existing[19:]:
         try:
             stale.unlink()
+            _remove_draft_assets(data_dir, username, stale.stem)
         except OSError:
             pass
     for stale in existing[:19]:
         try:
             if stale.stat().st_mtime < cutoff:
                 stale.unlink()
+                _remove_draft_assets(data_dir, username, stale.stem)
         except OSError:
             pass
     draft_id = str(draft_id or uuid.uuid4().hex)
@@ -665,6 +700,125 @@ def _record_from_uploaded_pdf(
     return record, warnings
 
 
+def _bound_record_photo_candidates(records: list[dict[str, Any]]) -> list[str]:
+    """Apply whole-draft count/byte bounds and exact hash deduplication."""
+
+    seen: set[str] = set()
+    total_bytes = 0
+    retained = 0
+    removed_duplicates = 0
+    removed_for_limit = 0
+    for record in records:
+        raw = record.get("_photo_candidates")
+        bounded: list[dict[str, Any]] = []
+        for item in raw if isinstance(raw, list) else []:
+            if not isinstance(item, dict):
+                continue
+            asset_id = str(item.get("asset_id") or "")
+            try:
+                size_bytes = max(0, int(item.get("size_bytes") or 0))
+            except (TypeError, ValueError):
+                size_bytes = 0
+            if not is_asset_id(asset_id) or size_bytes > DEFAULT_PHOTO_LIMITS.max_asset_bytes:
+                continue
+            if asset_id in seen:
+                removed_duplicates += 1
+                # Keep the reference on every source record so choosing a
+                # later duplicate record during Source Validation does not
+                # accidentally remove its photo. Output collection dedupes it.
+                bounded.append(copy.deepcopy(item))
+                continue
+            if (
+                retained >= DEFAULT_PHOTO_LIMITS.max_images_per_draft
+                or total_bytes + size_bytes > DEFAULT_PHOTO_LIMITS.max_total_asset_bytes_per_draft
+            ):
+                removed_for_limit += 1
+                continue
+            seen.add(asset_id)
+            total_bytes += size_bytes
+            retained += 1
+            bounded.append(copy.deepcopy(item))
+        record["_photo_candidates"] = bounded
+
+    warnings: list[str] = []
+    if removed_duplicates:
+        warnings.append(
+            f"{removed_duplicates} duplicate photo(s) across uploaded Daily Reports were removed."
+        )
+    if removed_for_limit:
+        warnings.append(
+            f"{removed_for_limit} photo(s) exceeded the {DEFAULT_PHOTO_LIMITS.max_images_per_draft}-photo "
+            "or draft asset byte limit and were excluded."
+        )
+    return warnings
+
+
+def _photo_references_for_records(
+    records: list[dict[str, Any]],
+    *,
+    previous: Any = None,
+) -> list[dict[str, Any]]:
+    """Return references belonging only to the selected source records."""
+
+    selected_ids = {str(record.get("report_id") or "") for record in records}
+    prior_by_id: dict[str, dict[str, Any]] = {}
+    prior_order: list[str] = []
+    if isinstance(previous, list):
+        for item in previous:
+            if not isinstance(item, dict):
+                continue
+            asset_id = str(item.get("asset_id") or "")
+            if is_asset_id(asset_id) and asset_id not in prior_by_id:
+                prior_by_id[asset_id] = item
+                prior_order.append(asset_id)
+
+    available: dict[str, dict[str, Any]] = {}
+    discovered_order: list[str] = []
+    for record in records:
+        report_id = str(record.get("report_id") or "")
+        if report_id not in selected_ids:
+            continue
+        candidates = record.get("_photo_candidates")
+        for item in candidates if isinstance(candidates, list) else []:
+            if not isinstance(item, dict):
+                continue
+            asset_id = str(item.get("asset_id") or "")
+            if not is_asset_id(asset_id) or asset_id in available:
+                continue
+            reference = {
+                "schema_version": "periodic-photo/1",
+                "asset_id": asset_id,
+                "source_report_id": report_id,
+                "source": _clean_text(item.get("source"), 255),
+                "page": max(1, int(item.get("page") or 1)),
+                "width": max(1, int(item.get("width") or 1)),
+                "height": max(1, int(item.get("height") or 1)),
+                "size_bytes": max(0, int(item.get("size_bytes") or 0)),
+                "caption": "",
+            }
+            previous_item = prior_by_id.get(asset_id)
+            if previous_item is not None:
+                reference["caption"] = _clean_text(previous_item.get("caption"), 500)
+            available[asset_id] = reference
+            discovered_order.append(asset_id)
+
+    ordered_ids = [asset_id for asset_id in prior_order if asset_id in available]
+    ordered_ids.extend(asset_id for asset_id in discovered_order if asset_id not in ordered_ids)
+    result = [available[asset_id] for asset_id in ordered_ids]
+    for index, item in enumerate(result):
+        item["order"] = index
+    return result[: DEFAULT_PHOTO_LIMITS.max_images_per_draft]
+
+
+def _all_photo_references(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for record in records:
+        candidates = record.get("_photo_candidates")
+        if isinstance(candidates, list):
+            result.extend(item for item in candidates if isinstance(item, dict))
+    return result
+
+
 def _provisional_project_records(
     records: list[dict[str, Any]],
     validation: dict[str, Any],
@@ -912,7 +1066,12 @@ def _draft_report_type(draft: dict[str, Any]) -> str:
     return _report_type(draft.get("report_type") or "monthly")
 
 
-def _render(draft: dict[str, Any], config: dict[str, Any]):
+def _render(
+    draft: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    photo_base_dir: str | os.PathLike[str] | None = None,
+):
     configured_logo = config.get("logo_gpa") if isinstance(config, dict) else None
     bundled_logo = Path(__file__).resolve().parent.parent / "static" / "pdf_assets" / "gpa_logo.png"
     configured_path = Path(str(configured_logo)) if configured_logo else None
@@ -921,7 +1080,11 @@ def _render(draft: dict[str, Any], config: dict[str, Any]):
         if configured_path is not None and configured_path.is_file()
         else (str(bundled_logo) if bundled_logo.is_file() else None)
     )
-    result = render_monthly_report(draft, logo_path=logo_path)
+    result = render_monthly_report(
+        draft,
+        logo_path=logo_path,
+        photo_base_dir=photo_base_dir,
+    )
     if hasattr(result, "seek") and hasattr(result, "getvalue"):
         result.seek(0)
         return result
@@ -1237,6 +1400,23 @@ def register_monthly_routes(
                         date_to=str(manifest.get("date_to") or ""),
                         report_type=str(manifest.get("report_type") or "monthly"),
                     )
+                    if record is not None:
+                        candidates, photo_warnings = extract_pdf_photo_candidates(
+                            upload.stream,
+                            filename=filename,
+                        )
+                        photo_references = store_photo_candidates(
+                            candidates,
+                            directory / "assets",
+                            source_report_id=str(record.get("report_id") or ""),
+                            max_total_bytes=DEFAULT_PHOTO_LIMITS.max_total_asset_bytes_per_draft,
+                        )
+                        record["_photo_candidates"] = photo_references
+                        if len(photo_references) < len(candidates):
+                            warnings.append(
+                                f"{filename}: some photos were excluded by the report draft asset limit."
+                            )
+                        warnings.extend(photo_warnings)
                     source = imported.get("source") if isinstance(imported.get("source"), dict) else {}
                     source_size = int(source.get("size_bytes") or source_size)
                 except PDFImportError as exc:
@@ -1382,6 +1562,8 @@ def register_monthly_routes(
                         )
                 records = in_window
 
+            warnings.extend(_bound_record_photo_candidates(records))
+
             source_validation = build_source_validation(
                 records,
                 selected_project_no=project_no,
@@ -1426,8 +1608,21 @@ def register_monthly_routes(
             )
             draft["source_validation"] = source_validation
             draft["_source_records"] = copy.deepcopy(records)
+            draft["photo_documentation"] = _photo_references_for_records(selected_records)
             # Reusing the random upload-session ID closes the crash window
             # between saving the draft and writing the small result tombstone.
+            draft_photo_dir = _draft_photo_dir(
+                data_dir,
+                session["username"],
+                upload_session_id,
+            )
+            if draft_photo_dir is None:
+                raise ValueError("Invalid report draft photo directory")
+            copy_photo_assets(
+                _all_photo_references(records),
+                directory / "assets",
+                draft_photo_dir,
+            )
             draft_id = _save_draft(
                 data_dir,
                 session["username"],
@@ -1490,6 +1685,8 @@ def register_monthly_routes(
         if len(uploads) > _MAX_UPLOAD_FILES:
             return jsonify({"error": f"A maximum of {_MAX_UPLOAD_FILES} PDF files can be compiled at once."}), 413
         kind = "monthly"
+        pending_draft_id = uuid.uuid4().hex
+        draft_saved = False
         try:
             kind = _report_type(request.form.get("report_type") or "monthly")
             mode = _normalise_report_mode(kind, request.form.get("report_mode"))
@@ -1536,9 +1733,33 @@ def register_monthly_routes(
                 )
                 warnings.extend(imported_warnings)
                 if record is not None:
+                    candidates, photo_warnings = extract_pdf_photo_candidates(
+                        upload.stream,
+                        filename=filename,
+                    )
+                    pending_assets = _draft_photo_dir(
+                        data_dir,
+                        session["username"],
+                        pending_draft_id,
+                    )
+                    if pending_assets is None:
+                        raise ValueError("Invalid report draft photo directory")
+                    photo_references = store_photo_candidates(
+                        candidates,
+                        pending_assets,
+                        source_report_id=str(record.get("report_id") or ""),
+                        max_total_bytes=DEFAULT_PHOTO_LIMITS.max_total_asset_bytes_per_draft,
+                    )
+                    record["_photo_candidates"] = photo_references
+                    if len(photo_references) < len(candidates):
+                        warnings.append(
+                            f"{filename}: some photos were excluded by the report draft asset limit."
+                        )
+                    warnings.extend(photo_warnings)
                     records.append(record)
 
             if not records:
+                _remove_draft_assets(data_dir, session["username"], pending_draft_id)
                 error = (
                     "None of the uploaded PDFs could be included in this Weekly Report. "
                     "Check the project, period, text layer, and file warnings."
@@ -1564,6 +1785,7 @@ def register_monthly_routes(
                             f"rolling 7-day period ending {end_text}; file excluded."
                         )
                 records = in_window
+            warnings.extend(_bound_record_photo_candidates(records))
             source_validation = build_source_validation(
                 records,
                 selected_project_no=project_no,
@@ -1608,12 +1830,23 @@ def register_monthly_routes(
             )
             draft["source_validation"] = source_validation
             draft["_source_records"] = copy.deepcopy(records)
-            draft_id = _save_draft(data_dir, session["username"], draft)
+            draft["photo_documentation"] = _photo_references_for_records(selected_records)
+            draft_id = _save_draft(
+                data_dir,
+                session["username"],
+                draft,
+                draft_id=pending_draft_id,
+            )
+            draft_saved = True
             draft["draft_id"] = draft_id
             return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
         except ValueError as exc:
+            if not draft_saved:
+                _remove_draft_assets(data_dir, session["username"], pending_draft_id)
             return jsonify({"error": str(exc)}), 400
         except Exception as exc:
+            if not draft_saved:
+                _remove_draft_assets(data_dir, session["username"], pending_draft_id)
             app.logger.exception("Uploaded PDF %s compilation failed", kind)
             prefix = "Weekly PDF" if kind == "weekly" else "PDF"
             return jsonify({"error": f"{prefix} compilation failed: {exc}"}), 500
@@ -1745,6 +1978,10 @@ def register_monthly_routes(
             })
             refreshed["source_validation"] = applied_validation
             refreshed["_source_records"] = copy.deepcopy(raw_records)
+            refreshed["photo_documentation"] = _photo_references_for_records(
+                selected_records,
+                previous=draft.get("photo_documentation"),
+            )
             refreshed["draft_id"] = draft_id
             refreshed["owner"] = username
             refreshed["created_at"] = draft.get(
@@ -1757,6 +1994,80 @@ def register_monthly_routes(
         except Exception:
             app.logger.exception("Source validation failed for report draft %s", draft_id)
             return jsonify({"error": "Source validation failed. Retry or check the server logs."}), 500
+
+    @app.get("/monthly/photos/<draft_id>/<asset_id>")
+    def get_monthly_draft_photo(draft_id: str, asset_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        username = session["username"]
+        draft = _load_draft(data_dir, username, draft_id)
+        if draft is None or not is_asset_id(asset_id):
+            return jsonify({"error": "Photo not found."}), 404
+        photos = draft.get("photo_documentation")
+        allowed = {
+            str(item.get("asset_id") or "")
+            for item in (photos if isinstance(photos, list) else []) if isinstance(item, dict)
+        }
+        if asset_id not in allowed:
+            return jsonify({"error": "Photo not found."}), 404
+        directory = _draft_photo_dir(data_dir, username, draft_id, create=False)
+        path = directory / asset_filename(asset_id) if directory is not None else None
+        if path is None or not path.is_file():
+            return jsonify({"error": "Photo asset is unavailable."}), 404
+        return send_file(
+            path,
+            mimetype="image/jpeg",
+            as_attachment=False,
+            conditional=True,
+            max_age=3600,
+        )
+
+    @app.patch("/monthly/photos/<draft_id>")
+    def update_monthly_draft_photos(draft_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        if request.content_length is not None and request.content_length > _MAX_PHOTO_REVIEW_BYTES:
+            return jsonify({"error": "Photo review request is too large."}), 413
+        username = session["username"]
+        draft = _load_draft(data_dir, username, draft_id)
+        if draft is None:
+            return jsonify({"error": "Report draft not found."}), 404
+        body = request.get_json(silent=True)
+        photos = body.get("photos") if isinstance(body, dict) else None
+        if not isinstance(photos, list):
+            return jsonify({"error": "photos must be a list."}), 400
+        if len(photos) > DEFAULT_PHOTO_LIMITS.max_images_per_draft:
+            return jsonify({
+                "error": f"A report may contain at most {DEFAULT_PHOTO_LIMITS.max_images_per_draft} photos."
+            }), 400
+
+        current = draft.get("photo_documentation")
+        current_by_id = {
+            str(item.get("asset_id") or ""): item
+            for item in (current if isinstance(current, list) else []) if isinstance(item, dict)
+            and is_asset_id(item.get("asset_id"))
+        }
+        cleaned: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for index, item in enumerate(photos):
+            if not isinstance(item, dict):
+                return jsonify({"error": "Each photo review item must be an object."}), 400
+            asset_id = str(item.get("asset_id") or "")
+            if asset_id in seen or asset_id not in current_by_id:
+                return jsonify({"error": "Photo review contains an unknown or duplicate asset."}), 400
+            seen.add(asset_id)
+            reference = copy.deepcopy(current_by_id[asset_id])
+            reference.pop("data", None)
+            reference.pop("path", None)
+            reference["caption"] = _clean_text(item.get("caption"), 500)
+            reference["order"] = index
+            cleaned.append(reference)
+
+        draft["photo_documentation"] = cleaned
+        _update_draft(data_dir, username, draft)
+        return jsonify({"ok": True, "count": len(cleaned), "photos": cleaned})
 
     @app.post("/monthly/preview/<draft_id>")
     def preview_monthly_report(draft_id: str):
@@ -1774,7 +2085,16 @@ def register_monthly_routes(
         try:
             reviewed = _apply_review(draft, body)
             _update_draft(data_dir, session["username"], reviewed)
-            buffer = _render(reviewed, config_provider())
+            buffer = _render(
+                reviewed,
+                config_provider(),
+                photo_base_dir=_draft_photo_dir(
+                    data_dir,
+                    session["username"],
+                    draft_id,
+                    create=False,
+                ),
+            )
             return send_file(
                 buffer,
                 mimetype="application/pdf",
@@ -1829,7 +2149,16 @@ def register_monthly_routes(
             pdf_path = reports_dir / filename
             json_filename = f"{Path(filename).stem}.json"
             json_path = reports_dir / json_filename
-            buffer = _render(reviewed, config_provider())
+            buffer = _render(
+                reviewed,
+                config_provider(),
+                photo_base_dir=_draft_photo_dir(
+                    data_dir,
+                    username,
+                    draft_id,
+                    create=False,
+                ),
+            )
             pdf_bytes = buffer.getvalue()
             temporary = pdf_path.with_name(f"{pdf_path.name}.{uuid.uuid4().hex}.tmp")
             try:
