@@ -77,7 +77,7 @@ class GoogleDriveMappingTests(unittest.TestCase):
                 "PC-26-0004-KN-GPA-029-DAR",
             )
 
-    def test_folder_path_uses_indonesian_month_then_year(self):
+    def test_folder_path_uses_year_then_indonesian_month_name(self):
         category, path = build_drive_folder_path(
             project_title="Electrical Installation & Construction",
             project_no="PC-26-0004-KN-GPA-029-DAR",
@@ -86,7 +86,7 @@ class GoogleDriveMappingTests(unittest.TestCase):
         self.assertEqual(category, "electrical")
         self.assertEqual(
             path,
-            ["Daily Reports", "Daily Reports Electrical", "08 - Agustus", "2026"],
+            ["Daily Reports", "Daily Reports Electrical", "2026", "Agustus"],
         )
 
     def test_upload_creates_folder_tree_and_pdf_with_stable_report_key(self):
@@ -102,8 +102,8 @@ class GoogleDriveMappingTests(unittest.TestCase):
         files.create.return_value.execute.side_effect = [
             {"id": "folder-root", "name": "Daily Reports"},
             {"id": "folder-project", "name": "Daily Reports Electrical"},
-            {"id": "folder-month", "name": "08 - Agustus"},
             {"id": "folder-year", "name": "2026"},
+            {"id": "folder-month", "name": "Agustus"},
             {
                 "id": "pdf-file",
                 "name": "Daily Report.pdf",
@@ -130,7 +130,7 @@ class GoogleDriveMappingTests(unittest.TestCase):
         self.assertEqual(files.create.call_count, 5)
         pdf_body = files.create.call_args_list[-1].kwargs["body"]
         self.assertEqual(pdf_body["name"], "Daily Report.pdf")
-        self.assertEqual(pdf_body["parents"], ["folder-year"])
+        self.assertEqual(pdf_body["parents"], ["folder-month"])
         self.assertEqual(pdf_body["appProperties"]["gpaReportKey"], result["report_key"])
 
     def test_identical_retry_reuses_existing_drive_file(self):
@@ -236,7 +236,7 @@ class GoogleDriveRouteTests(unittest.TestCase):
                 "web_view_link": "https://drive.google.com/file/d/drive-file/view",
                 "filename": filename,
                 "category": "electrical",
-                "folder_path": ["Daily Reports", "Daily Reports Electrical", "08 - Agustus", "2026"],
+                "folder_path": ["Daily Reports", "Daily Reports Electrical", "2026", "Agustus"],
                 "folder_ids": ["1", "2", "3", "4"],
                 "md5_checksum": "abc",
                 "report_key": "stable-key",
@@ -313,7 +313,7 @@ class GoogleDriveRouteTests(unittest.TestCase):
                 "web_view_link": "https://drive.google.com/file/d/old-drive-file/view",
                 "filename": filename,
                 "category": "electrical",
-                "folder_path": ["Daily Reports", "Daily Reports Electrical", "08 - Agustus", "2026"],
+                "folder_path": ["Daily Reports", "Daily Reports Electrical", "2026", "Agustus"],
                 "folder_ids": ["1", "2", "3", "4"],
                 "md5_checksum": "abc",
                 "report_key": "old-key",

@@ -10,12 +10,13 @@ The application creates these folders in the connected account's My Drive:
 
 ```text
 Daily Reports/
-  Daily Reports Electrical/08 - Agustus/2026/<current Daily Report filename>.pdf
-  Daily Reports Control Valve/08 - Agustus/2026/<current Daily Report filename>.pdf
-  Daily Reports Turbine & Generator/08 - Agustus/2026/<current Daily Report filename>.pdf
+  Daily Reports Electrical/2026/Agustus/<current Daily Report filename>.pdf
+  Daily Reports Control Valve/2026/Agustus/<current Daily Report filename>.pdf
+  Daily Reports Turbine & Generator/2026/Agustus/<current Daily Report filename>.pdf
 ```
 
-Month and year come from the report date, not the upload date. Unknown or
+Year and month come from the report date, not the upload date. Month folders
+use Indonesian names without a numeric prefix. Unknown or
 ambiguous projects are not guessed; My Reports shows a Retry/mapping warning.
 
 ## One-time Google Cloud setup

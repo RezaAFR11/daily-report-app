@@ -156,7 +156,7 @@ def build_drive_folder_path(
     root_folder_name: str = "Daily Reports",
     category_override: Any = "",
 ) -> tuple[str, list[str]]:
-    """Return category and folder path using report month, then report year."""
+    """Return category and folder path using report year, then month name."""
 
     category_override = str(category_override or "").strip()
     if category_override and category_override not in CATEGORY_FOLDER_NAMES:
@@ -167,12 +167,12 @@ def build_drive_folder_path(
     except ValueError as exc:
         raise GoogleDriveError("Report date must use YYYY-MM-DD before Drive upload.") from exc
 
-    month_folder = f"{parsed_date.month:02d} - {INDONESIAN_MONTHS[parsed_date.month]}"
+    month_folder = INDONESIAN_MONTHS[parsed_date.month]
     return category, [
         str(root_folder_name or "Daily Reports").strip() or "Daily Reports",
         CATEGORY_FOLDER_NAMES[category],
-        month_folder,
         str(parsed_date.year),
+        month_folder,
     ]
 
 
