@@ -13,11 +13,14 @@ Daily Reports/
   Daily Reports Electrical/2026/Agustus/<current Daily Report filename>.pdf
   Daily Reports Control Valve/2026/Agustus/<current Daily Report filename>.pdf
   Daily Reports Turbine & Generator/2026/Agustus/<current Daily Report filename>.pdf
+  Daily Reports Other Projects/2026/Agustus/<current Daily Report filename>.pdf
 ```
 
 Year and month come from the report date, not the upload date. Month folders
-use Indonesian names without a numeric prefix. Unknown or
-ambiguous projects are not guessed; My Reports shows a Retry/mapping warning.
+use Indonesian names without a numeric prefix. A non-empty project that does
+not match the three main branches is stored in `Daily Reports Other Projects`.
+Ambiguous or conflicting project identities are not guessed; My Reports shows
+a Retry/mapping warning.
 
 ## One-time Google Cloud setup
 

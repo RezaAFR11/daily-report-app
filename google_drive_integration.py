@@ -47,6 +47,7 @@ CATEGORY_FOLDER_NAMES = {
     "electrical": "Daily Reports Electrical",
     "control_valve": "Daily Reports Control Valve",
     "turbine_generator": "Daily Reports Turbine & Generator",
+    "other_projects": "Daily Reports Other Projects",
 }
 
 
@@ -113,10 +114,14 @@ def _normalise_project_number(value: Any) -> str:
 
 
 def resolve_project_category(project_title: Any, project_no: Any = "") -> str:
-    """Resolve a known project to one of the three requested Drive branches."""
+    """Resolve project metadata to a specific or fallback Drive branch."""
 
     number_match = PROJECT_NUMBER_CATEGORIES.get(_normalise_project_number(project_no))
     title = _normalise(project_title)
+    if not title:
+        raise ProjectCategoryError(
+            "Project title is empty. Choose a project before uploading to Google Drive."
+        )
     matches: set[str] = set()
     if "control valve" in title or "on off valve" in title:
         matches.add("control_valve")
@@ -139,13 +144,7 @@ def resolve_project_category(project_title: Any, project_no: Any = "") -> str:
         return title_match
     if number_match:
         return number_match
-    if not title:
-        raise ProjectCategoryError(
-            "Project title is empty. Choose a project before uploading to Google Drive."
-        )
-    raise ProjectCategoryError(
-        "Project title does not match Electrical, Control Valve, or Turbine & Generator."
-    )
+    return "other_projects"
 
 
 def build_drive_folder_path(

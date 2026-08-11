@@ -46,11 +46,21 @@ class GoogleDriveMappingTests(unittest.TestCase):
             "electrical",
         )
 
-    def test_unknown_and_ambiguous_titles_are_not_guessed(self):
-        with self.assertRaises(ProjectCategoryError):
-            resolve_project_category("Civil foundation", "UNKNOWN")
+    def test_unknown_titles_use_other_projects_and_ambiguous_titles_are_not_guessed(self):
+        self.assertEqual(
+            resolve_project_category("Civil foundation", "UNKNOWN"),
+            "other_projects",
+        )
+        self.assertEqual(
+            resolve_project_category("Plant Reactivation", "UNKNOWN"),
+            "other_projects",
+        )
         with self.assertRaises(ProjectCategoryError):
             resolve_project_category("Electrical Turbine and Generator", "UNKNOWN")
+        with self.assertRaises(ProjectCategoryError):
+            resolve_project_category("", "UNKNOWN")
+        with self.assertRaises(ProjectCategoryError):
+            resolve_project_category("", "PC-26-0004-KN-GPA-029-DAR")
 
     def test_title_keywords_work_without_known_number_and_conflicts_need_review(self):
         self.assertEqual(
@@ -70,8 +80,6 @@ class GoogleDriveMappingTests(unittest.TestCase):
             "turbine_generator",
         )
         with self.assertRaises(ProjectCategoryError):
-            resolve_project_category("Plant Reactivation", "UNKNOWN")
-        with self.assertRaises(ProjectCategoryError):
             resolve_project_category(
                 "Control Valve Repair",
                 "PC-26-0004-KN-GPA-029-DAR",
@@ -87,6 +95,18 @@ class GoogleDriveMappingTests(unittest.TestCase):
         self.assertEqual(
             path,
             ["Daily Reports", "Daily Reports Electrical", "2026", "Agustus"],
+        )
+
+    def test_other_project_folder_uses_same_year_month_structure(self):
+        category, path = build_drive_folder_path(
+            project_title="Civil Foundation Improvement",
+            project_no="CIVIL-001",
+            report_date="2026-08-11",
+        )
+        self.assertEqual(category, "other_projects")
+        self.assertEqual(
+            path,
+            ["Daily Reports", "Daily Reports Other Projects", "2026", "Agustus"],
         )
 
     def test_upload_creates_folder_tree_and_pdf_with_stable_report_key(self):
