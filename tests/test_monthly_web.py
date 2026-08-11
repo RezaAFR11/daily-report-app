@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import os
@@ -7,6 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from flask import Flask
+from PIL import Image
+from pypdf import PdfReader
 
 from monthly_report.importer import DEFAULT_LIMITS, PDFImportError
 from monthly_report.web import (
@@ -20,12 +23,19 @@ PROJECT_NO = "001/KN-GPA/EPC-2F-P2/IV/2025"
 PROJECT_TITLE = "REACTIVATION FOR TURBINES AND GENERATORS"
 
 
+def _jpeg_bytes(colour="#2563eb"):
+    output = io.BytesIO()
+    Image.new("RGB", (640, 480), colour).save(output, format="JPEG", quality=88)
+    return output.getvalue()
+
+
 def _canonical_record(report_date, report_id, *, tomorrow, progress_actual):
     return {
         "record_type": "final_daily_report",
         "report_id": report_id,
         "revision": 1,
         "username": "reza",
+        "_canonical_owner": "reza",
         "date": report_date,
         "project_no": PROJECT_NO,
         "project_title": PROJECT_TITLE,
@@ -213,7 +223,7 @@ class MonthlyWebRouteTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def _compile_stored(self, report_mode="mtd"):
+    def _compile_stored(self, report_mode="mtd", report_type="monthly"):
         with patch("monthly_report.web.list_canonical_records", return_value=self.records) as loader:
             response = self.client.post(
                 "/monthly/compile/stored",
@@ -223,6 +233,7 @@ class MonthlyWebRouteTests(unittest.TestCase):
                     "date_from": "2026-07-01",
                     "date_to": "2026-07-02",
                     "report_mode": report_mode,
+                    "report_type": report_type,
                 },
             )
         loader.assert_called_once_with(
@@ -232,6 +243,40 @@ class MonthlyWebRouteTests(unittest.TestCase):
             date_to="2026-07-02",
         )
         return response
+
+    def _attach_canonical_photo(
+        self,
+        record,
+        *,
+        caption="Stored valve inspection",
+        colour="#2563eb",
+    ):
+        raw = _jpeg_bytes(colour)
+        digest = hashlib.sha256(raw).hexdigest()
+        relative_path = f"assets/{digest}.jpg"
+        target = (
+            self.data_dir
+            / "users"
+            / record["username"]
+            / "reports"
+            / "canonical"
+            / relative_path
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+        asset = {
+            "sha256": digest,
+            "size_bytes": len(raw),
+            "asset_path": relative_path,
+            "original_name": "stored-photo.jpg",
+        }
+        record["payload"]["areas"][0]["photos"] = [{
+            "photo_filename": "stored-photo.jpg",
+            "desc": caption,
+            "asset": asset,
+        }]
+        record["assets"] = [asset]
+        return raw
 
     def _start_staged_upload(
         self,
@@ -353,6 +398,62 @@ class MonthlyWebRouteTests(unittest.TestCase):
         self.assertTrue(draft_path.is_file())
         self.assertEqual(json.loads(draft_path.read_text(encoding="utf-8"))["owner"], "reza")
 
+    def test_stored_json_photo_is_reviewable_and_rendered_in_appendix_66(self):
+        self._attach_canonical_photo(self.records[0])
+
+        response = self._compile_stored()
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        body = response.get_json()
+        photos = body["draft"]["photo_documentation"]
+        self.assertEqual(len(photos), 1)
+        self.assertEqual(photos[0]["caption"], "Stored valve inspection")
+        self.assertIn("2026-07-01", photos[0]["source"])
+        self.assertIn("Turbine Unit 2", photos[0]["source"])
+        self.assertNotIn("page", photos[0])
+
+        asset_id = photos[0]["asset_id"]
+        draft_asset = (
+            self.data_dir
+            / "monthly_reports"
+            / "reza"
+            / "draft_assets"
+            / body["draft_id"]
+            / f"{asset_id}.jpg"
+        )
+        self.assertTrue(draft_asset.is_file())
+        fetched = self.client.get(f"/monthly/photos/{body['draft_id']}/{asset_id}")
+        self.assertEqual(fetched.status_code, 200)
+        self.assertEqual(fetched.mimetype, "image/jpeg")
+        fetched.close()
+
+        validated = self._apply_source_validation(body)
+        self.assertEqual(
+            validated["draft"]["photo_documentation"][0]["caption"],
+            "Stored valve inspection",
+        )
+        preview = self.client.post(
+            f"/monthly/preview/{body['draft_id']}",
+            json={"report_mode": "mtd"},
+        )
+        self.assertEqual(preview.status_code, 200)
+        reader = PdfReader(io.BytesIO(preview.data))
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        self.assertIn("Appendix 6.6 - Photographs Activity", text)
+        self.assertIn("Stored valve inspection", text)
+        preview.close()
+
+    def test_stored_json_photo_is_included_for_weekly_report(self):
+        self._attach_canonical_photo(self.records[0], caption="Weekly stored photo")
+
+        response = self._compile_stored(report_mode="wtd", report_type="weekly")
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        draft = response.get_json()["draft"]
+        self.assertEqual(draft["report_type"], "weekly")
+        self.assertEqual(len(draft["photo_documentation"]), 1)
+        self.assertEqual(draft["photo_documentation"][0]["caption"], "Weekly stored photo")
+
     def test_project_ambiguity_requires_validation_and_keep_separate_reaggregates(self):
         variant = json.loads(json.dumps(self.records[1]))
         variant["project_no"] = "LEGACY-PC-DAR"
@@ -412,6 +513,16 @@ class MonthlyWebRouteTests(unittest.TestCase):
         second["date"] = first["date"]
         second["payload"]["date"] = first["date"]
         second["report_id"] = "report-explicit-second"
+        self._attach_canonical_photo(
+            first,
+            caption="Photo from explicitly selected first source",
+            colour="#15803d",
+        )
+        self._attach_canonical_photo(
+            second,
+            caption="Photo from provisional second source",
+            colour="#dc2626",
+        )
         with patch(
             "monthly_report.web.list_canonical_records",
             return_value=[first, second],
@@ -456,6 +567,57 @@ class MonthlyWebRouteTests(unittest.TestCase):
         self.assertEqual(
             validated["source_validation"]["duplicate_excluded_record_count"],
             1,
+        )
+        self.assertEqual(len(validated["photo_documentation"]), 1)
+        self.assertEqual(
+            validated["photo_documentation"][0]["caption"],
+            "Photo from explicitly selected first source",
+        )
+        draft_assets = list(
+            (
+                self.data_dir
+                / "monthly_reports"
+                / "reza"
+                / "draft_assets"
+                / body["draft_id"]
+            ).glob("*.jpg")
+        )
+        self.assertEqual(len(draft_assets), 1)
+
+    def test_stored_photo_hydration_only_scans_provisionally_selected_records(self):
+        unrelated = json.loads(json.dumps(self.records[0]))
+        unrelated["report_id"] = "unrelated-project"
+        unrelated["project_no"] = "OTHER-001"
+        unrelated["project_title"] = "ANOTHER PROJECT"
+        unrelated["payload"]["project_no"] = "OTHER-001"
+        unrelated["payload"]["project_title"] = "ANOTHER PROJECT"
+
+        with (
+            patch(
+                "monthly_report.web.list_canonical_records",
+                return_value=[unrelated, self.records[0]],
+            ),
+            patch(
+                "monthly_report.web.attach_canonical_photo_candidates",
+                return_value=[],
+            ) as hydrate,
+        ):
+            response = self.client.post(
+                "/monthly/compile/stored",
+                json={
+                    "project_no": PROJECT_NO,
+                    "project_title": PROJECT_TITLE,
+                    "date_from": "2026-07-01",
+                    "date_to": "2026-07-01",
+                    "report_mode": "mtd",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        hydrated_records = hydrate.call_args.args[0]
+        self.assertEqual(
+            [record["report_id"] for record in hydrated_records],
+            [self.records[0]["report_id"]],
         )
 
     def test_final_requires_confirmation_then_archives_and_downloads_pdf(self):

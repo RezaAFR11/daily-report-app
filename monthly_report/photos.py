@@ -25,6 +25,8 @@ _PHOTO_HEADING_RE = re.compile(
     re.IGNORECASE,
 )
 _ASSET_ID_RE = re.compile(r"^[a-f0-9]{64}$")
+_CANONICAL_OWNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_CANONICAL_DIGEST_RE = re.compile(r"^[a-fA-F0-9]{64}$")
 _ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP", "JPEG2000"}
 
 
@@ -369,19 +371,380 @@ def store_photo_candidates(
                     except OSError:
                         pass
             stored_bytes += len(content)
-        result.append({
+        reference = {
             "schema_version": "periodic-photo/1",
             "asset_id": asset_id,
             "source_report_id": str(source_report_id or "")[:160],
             "source": str(item.get("source") or "")[:255],
-            "page": max(1, int(item.get("page") or 1)),
             "width": max(1, int(item.get("width") or 1)),
             "height": max(1, int(item.get("height") or 1)),
             "size_bytes": len(content),
             "order": order,
-            "caption": "",
-        })
+            "caption": str(item.get("caption") or "")[:500],
+        }
+        # PDF candidates have meaningful page provenance. Canonical Stored
+        # JSON assets do not, so do not invent "page 1" for them.
+        try:
+            page = int(item.get("page") or 0)
+        except (TypeError, ValueError):
+            page = 0
+        if page > 0:
+            reference["page"] = page
+        for key, maximum_length in (("source_date", 10), ("source_area", 255)):
+            value = str(item.get(key) or "").strip()
+            if value:
+                reference[key] = value[:maximum_length]
+        result.append(reference)
     return result
+
+
+def _canonical_photo_warning(
+    record: Mapping[str, Any],
+    area: Any,
+    photo_index: int,
+    message: str,
+) -> str:
+    report_id = str(record.get("report_id") or "unknown report")[:160]
+    area_name = str(area or "unnamed area")[:160]
+    return f"Stored JSON photo: {report_id} / {area_name} / photo {photo_index}: {message}"
+
+
+def _canonical_asset_source(
+    data_dir: str | os.PathLike[str],
+    username: Any,
+    asset_path: Any,
+) -> Path:
+    """Resolve an owner-scoped canonical asset without following an escape."""
+
+    owner = str(username or "").strip()
+    if (
+        not _CANONICAL_OWNER_RE.fullmatch(owner)
+        or owner in {".", ".."}
+    ):
+        raise ValueError("the Stored JSON owner is invalid")
+
+    relative_text = str(asset_path or "").strip()
+    if not relative_text or "\x00" in relative_text:
+        raise ValueError("the canonical asset path is missing or unsafe")
+    relative = Path(relative_text)
+    if relative.is_absolute() or relative.drive:
+        raise ValueError("the canonical asset path is absolute")
+
+    canonical_root = (
+        Path(data_dir).expanduser()
+        / "users"
+        / owner
+        / "reports"
+        / "canonical"
+    ).resolve(strict=False)
+    candidate = (canonical_root / relative).resolve(strict=False)
+    try:
+        candidate.relative_to(canonical_root)
+    except ValueError as exc:
+        raise ValueError("the canonical asset path escapes its owner directory") from exc
+
+    if not candidate.is_file():
+        raise FileNotFoundError("the canonical photo asset file is missing")
+
+    # Re-resolve existing paths to catch a symlink/junction that points outside
+    # the owner-specific canonical root.
+    canonical_existing = canonical_root.resolve(strict=True)
+    candidate_existing = candidate.resolve(strict=True)
+    try:
+        candidate_existing.relative_to(canonical_existing)
+    except ValueError as exc:
+        raise ValueError("the canonical asset resolves outside its owner directory") from exc
+    return candidate_existing
+
+
+def attach_canonical_photo_candidates(
+    records: Iterable[dict[str, Any]],
+    data_dir: str | os.PathLike[str],
+    target_directory: str | os.PathLike[str],
+    *,
+    limits: PhotoLimits = DEFAULT_PHOTO_LIMITS,
+) -> list[str]:
+    """Attach safe Stored JSON photo references to canonical records.
+
+    Only ``payload.areas[].photos[].asset`` entries are accepted. Source files
+    are constrained to the canonical directory belonging to the trusted
+    ``_canonical_owner`` injected by :func:`list_canonical_records`, verified
+    against their archived size and SHA-256 digest,
+    decoded within :class:`PhotoLimits`, and normalized to content-addressed
+    JPEG assets in ``target_directory``. Each mutable record receives a
+    JSON-safe ``_photo_candidates`` list. The return value contains reviewable
+    warnings for rejected or legacy references.
+    """
+
+    warnings: list[str] = []
+    suppressed_warnings = 0
+    maximum_warnings = max(40, limits.max_images_per_draft * 2)
+
+    def add_warning(message: str) -> None:
+        nonlocal suppressed_warnings
+        if len(warnings) < maximum_warnings:
+            warnings.append(message)
+        else:
+            suppressed_warnings += 1
+
+    records = list(records)
+    mutable_records: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            add_warning(
+                "Stored JSON photo: a non-object record was skipped while loading photos."
+            )
+            continue
+        # Always clear stale candidates. Source validation may call this
+        # function repeatedly with a different selected revision/project.
+        record["_photo_candidates"] = []
+        mutable_records.append(record)
+
+    seen_assets: set[str] = set()
+    total_asset_bytes = 0
+    retained_assets = 0
+    target = Path(target_directory)
+    draft_limit_warning_added = False
+
+    for record in mutable_records:
+        if (
+            retained_assets >= limits.max_images_per_draft
+            or total_asset_bytes >= limits.max_total_asset_bytes_per_draft
+        ):
+            if not draft_limit_warning_added:
+                add_warning(
+                    "Stored JSON photo: the draft photo count or byte limit was reached; "
+                    "remaining selected records were not scanned."
+                )
+                draft_limit_warning_added = True
+            break
+        payload = record.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        areas = payload.get("areas")
+        if not isinstance(areas, list):
+            continue
+
+        candidates: list[dict[str, Any]] = []
+        record_seen_assets: set[str] = set()
+        record_asset_bytes = 0
+        attempted_entries = 0
+        maximum_attempts = max(
+            limits.max_images_per_pdf,
+            limits.max_images_per_pdf * 4,
+        )
+        record_limit_reached = False
+        stop_record = False
+        for area_index, area in enumerate(areas, start=1):
+            if stop_record:
+                break
+            if not isinstance(area, Mapping):
+                continue
+            area_name = str(area.get("id") or area.get("name") or f"Area {area_index}").strip()
+            photos = area.get("photos")
+            if not isinstance(photos, list):
+                continue
+            for photo_index, photo in enumerate(photos, start=1):
+                attempted_entries += 1
+                if attempted_entries > maximum_attempts:
+                    add_warning(
+                        _canonical_photo_warning(
+                            record,
+                            area_name,
+                            photo_index,
+                            f"only the first {maximum_attempts} photo entries were inspected",
+                        )
+                    )
+                    stop_record = True
+                    break
+                if len(candidates) >= limits.max_images_per_pdf:
+                    if not record_limit_reached:
+                        add_warning(
+                            _canonical_photo_warning(
+                                record,
+                                area_name,
+                                photo_index,
+                                f"only the first {limits.max_images_per_pdf} photos were retained",
+                            )
+                        )
+                        record_limit_reached = True
+                    break
+                if not isinstance(photo, Mapping):
+                    continue
+                asset = photo.get("asset")
+                if not isinstance(asset, Mapping):
+                    if photo.get("photo_filename"):
+                        add_warning(
+                            _canonical_photo_warning(
+                                record,
+                                area_name,
+                                photo_index,
+                                "legacy filename-only photo has no archived asset and cannot be included",
+                            )
+                        )
+                    continue
+
+                digest_text = str(asset.get("sha256") or "").strip()
+                if not _CANONICAL_DIGEST_RE.fullmatch(digest_text):
+                    add_warning(
+                        _canonical_photo_warning(
+                            record, area_name, photo_index, "canonical asset digest is invalid"
+                        )
+                    )
+                    continue
+                expected_digest = digest_text.lower()
+                try:
+                    declared_size = int(asset.get("size_bytes"))
+                except (TypeError, ValueError):
+                    declared_size = -1
+                if (
+                    declared_size <= 0
+                    or declared_size > limits.max_embedded_image_bytes
+                ):
+                    add_warning(
+                        _canonical_photo_warning(
+                            record, area_name, photo_index, "canonical asset size is invalid or exceeds the limit"
+                        )
+                    )
+                    continue
+
+                try:
+                    source = _canonical_asset_source(
+                        data_dir,
+                        record.get("_canonical_owner"),
+                        asset.get("asset_path"),
+                    )
+                except (OSError, ValueError) as exc:
+                    add_warning(
+                        _canonical_photo_warning(record, area_name, photo_index, str(exc))
+                    )
+                    continue
+
+                try:
+                    actual_size = source.stat().st_size
+                    if actual_size != declared_size:
+                        add_warning(
+                            _canonical_photo_warning(
+                                record,
+                                area_name,
+                                photo_index,
+                                "canonical asset size does not match its metadata",
+                            )
+                        )
+                        continue
+                    with source.open("rb") as handle:
+                        raw = handle.read(limits.max_embedded_image_bytes + 1)
+                except OSError:
+                    add_warning(
+                        _canonical_photo_warning(
+                            record, area_name, photo_index, "canonical photo asset could not be read"
+                        )
+                    )
+                    continue
+                if len(raw) != declared_size or len(raw) > limits.max_embedded_image_bytes:
+                    add_warning(
+                        _canonical_photo_warning(
+                            record, area_name, photo_index, "canonical photo asset exceeds the read limit"
+                        )
+                    )
+                    continue
+                if hashlib.sha256(raw).hexdigest() != expected_digest:
+                    add_warning(
+                        _canonical_photo_warning(
+                            record, area_name, photo_index, "canonical asset hash does not match its metadata"
+                        )
+                    )
+                    continue
+
+                normalized = _normalise_image(raw, limits)
+                if normalized is None:
+                    add_warning(
+                        _canonical_photo_warning(
+                            record,
+                            area_name,
+                            photo_index,
+                            "photo is unsupported, unsafe, or outside the image limits",
+                        )
+                    )
+                    continue
+                content, width, height = normalized
+                asset_id = hashlib.sha256(content).hexdigest()
+                is_new_for_record = asset_id not in record_seen_assets
+                if is_new_for_record and (
+                    record_asset_bytes + len(content)
+                    > limits.max_total_asset_bytes_per_pdf
+                ):
+                    add_warning(
+                        _canonical_photo_warning(
+                            record,
+                            area_name,
+                            photo_index,
+                            "photo exceeded the per-Daily-Report photo byte limit",
+                        )
+                    )
+                    continue
+                is_new_asset = asset_id not in seen_assets
+                if is_new_asset and (
+                    retained_assets >= limits.max_images_per_draft
+                    or total_asset_bytes + len(content) > limits.max_total_asset_bytes_per_draft
+                ):
+                    if not draft_limit_warning_added:
+                        add_warning(
+                            _canonical_photo_warning(
+                                record,
+                                area_name,
+                                photo_index,
+                                "photo exceeded the overall Stored JSON photo count or byte limit",
+                            )
+                        )
+                        draft_limit_warning_added = True
+                    # A full count budget cannot accept any later unique
+                    # image. Stop decoding the remainder of the selection.
+                    if retained_assets >= limits.max_images_per_draft:
+                        stop_record = True
+                        break
+                    # When only the byte budget is tight, a smaller later
+                    # image may still fit, so continue within the scan cap.
+                    continue
+                if is_new_for_record:
+                    record_seen_assets.add(asset_id)
+                    record_asset_bytes += len(content)
+                if is_new_asset:
+                    seen_assets.add(asset_id)
+                    retained_assets += 1
+                    total_asset_bytes += len(content)
+                report_date = str(record.get("date") or payload.get("date") or "").strip()[:10]
+                source_label = " - ".join(
+                    part for part in ("Stored JSON", report_date, area_name) if part
+                )
+                candidates.append({
+                    "asset_id": asset_id,
+                    "content": content,
+                    "source": source_label[:255],
+                    "source_date": report_date,
+                    "source_area": area_name[:255],
+                    "width": width,
+                    "height": height,
+                    "caption": str(photo.get("desc") or "")[:500],
+                })
+
+        record["_photo_candidates"] = store_photo_candidates(
+            candidates,
+            target,
+            source_report_id=str(record.get("report_id") or "")[:160],
+            maximum=limits.max_images_per_pdf,
+            # Whole-draft limits are already applied above to the currently
+            # selected records. Do not let stale assets from a prior Source
+            # Validation choice block the new selection from being copied.
+            max_total_bytes=None,
+        )
+
+    if suppressed_warnings:
+        warnings.append(
+            "Stored JSON photo: "
+            f"{suppressed_warnings} additional photo warning(s) were suppressed."
+        )
+    return warnings
 
 
 def copy_photo_assets(
@@ -422,6 +785,7 @@ def copy_photo_assets(
 __all__ = [
     "DEFAULT_PHOTO_LIMITS",
     "PhotoLimits",
+    "attach_canonical_photo_candidates",
     "asset_filename",
     "copy_photo_assets",
     "extract_pdf_photo_candidates",

@@ -18,6 +18,7 @@ from .aggregate import aggregate_monthly_records
 from .importer import DEFAULT_LIMITS, PDFImportError, import_daily_report_pdf
 from .photos import (
     DEFAULT_PHOTO_LIMITS,
+    attach_canonical_photo_candidates,
     asset_filename,
     copy_photo_assets,
     extract_pdf_photo_candidates,
@@ -44,6 +45,7 @@ _MAX_STAGED_REQUEST_BYTES = DEFAULT_LIMITS.max_bytes + (1024 * 1024)
 _MAX_REVIEW_TEXT = 30_000
 _REPORT_TYPES = {"monthly", "weekly"}
 _MAX_PHOTO_REVIEW_BYTES = 128 * 1024
+_STORED_PHOTO_WARNING_PREFIX = "Stored JSON photo:"
 
 
 def _report_type(value: Any) -> str:
@@ -123,6 +125,41 @@ def _remove_draft_assets(data_dir: str | Path, username: str, draft_id: str) -> 
     directory = _draft_photo_dir(data_dir, username, draft_id, create=False)
     if directory is not None and directory.is_dir():
         shutil.rmtree(directory)
+
+
+def _is_generated_stored_photo_warning(value: Any) -> bool:
+    text = str(value or "").strip()
+    return text.startswith(_STORED_PHOTO_WARNING_PREFIX) or bool(
+        re.fullmatch(
+            r"\d+ (?:duplicate photo\(s\) across Daily Reports were removed"
+            r"|photo\(s\) exceeded the \d+-photo or draft asset byte limit and were excluded)\.",
+            text,
+        )
+    )
+
+
+def _prune_draft_photo_assets(
+    data_dir: str | Path,
+    username: str,
+    draft_id: str,
+    references: Any,
+) -> None:
+    """Best-effort removal of assets no longer selected for one draft."""
+
+    directory = _draft_photo_dir(data_dir, username, draft_id, create=False)
+    if directory is None or not directory.is_dir():
+        return
+    allowed = {
+        str(item.get("asset_id") or "")
+        for item in (references if isinstance(references, list) else [])
+        if isinstance(item, dict) and is_asset_id(item.get("asset_id"))
+    }
+    for path in directory.glob("*.jpg"):
+        if is_asset_id(path.stem) and path.stem not in allowed:
+            try:
+                path.unlink()
+            except OSError:
+                continue
 
 
 def _upload_sessions_dir(data_dir: str | Path, username: str) -> Path:
@@ -743,7 +780,7 @@ def _bound_record_photo_candidates(records: list[dict[str, Any]]) -> list[str]:
     warnings: list[str] = []
     if removed_duplicates:
         warnings.append(
-            f"{removed_duplicates} duplicate photo(s) across uploaded Daily Reports were removed."
+            f"{removed_duplicates} duplicate photo(s) across Daily Reports were removed."
         )
     if removed_for_limit:
         warnings.append(
@@ -785,17 +822,22 @@ def _photo_references_for_records(
             asset_id = str(item.get("asset_id") or "")
             if not is_asset_id(asset_id) or asset_id in available:
                 continue
+            try:
+                page_number = int(item.get("page") or 0)
+            except (TypeError, ValueError):
+                page_number = 0
             reference = {
                 "schema_version": "periodic-photo/1",
                 "asset_id": asset_id,
                 "source_report_id": report_id,
                 "source": _clean_text(item.get("source"), 255),
-                "page": max(1, int(item.get("page") or 1)),
                 "width": max(1, int(item.get("width") or 1)),
                 "height": max(1, int(item.get("height") or 1)),
                 "size_bytes": max(0, int(item.get("size_bytes") or 0)),
-                "caption": "",
+                "caption": _clean_text(item.get("caption"), 500),
             }
+            if page_number > 0:
+                reference["page"] = page_number
             previous_item = prior_by_id.get(asset_id)
             if previous_item is not None:
                 reference["caption"] = _clean_text(previous_item.get("caption"), 500)
@@ -1114,6 +1156,8 @@ def register_monthly_routes(
         if not isinstance(body, dict):
             return jsonify({"error": "Invalid report compile request."}), 400
         kind = "monthly"
+        pending_draft_id = ""
+        draft_saved = False
         try:
             kind = _report_type(body.get("report_type") or "monthly")
             mode = _normalise_report_mode(kind, body.get("report_mode"))
@@ -1140,6 +1184,7 @@ def register_monthly_routes(
                 return jsonify({
                     "error": error
                 }), 404
+
             source_validation = build_source_validation(
                 records,
                 selected_project_no=project_no,
@@ -1167,6 +1212,32 @@ def register_monthly_routes(
                 record for record in provisional_records
                 if not selected_ids or str(record.get("report_id") or "") in selected_ids
             ]
+
+            # Hydrate only the records that aggregation actually selected.
+            # Unrelated projects and superseded revisions must not consume the
+            # draft's 60-photo/byte budget.
+            pending_draft_id = uuid.uuid4().hex
+            draft_photo_dir = _draft_photo_dir(
+                data_dir,
+                session["username"],
+                pending_draft_id,
+            )
+            if draft_photo_dir is None:
+                raise ValueError("Invalid report draft photo directory")
+            photo_warnings = attach_canonical_photo_candidates(
+                selected_records,
+                data_dir,
+                draft_photo_dir,
+            )
+            photo_warnings.extend(_bound_record_photo_candidates(selected_records))
+            # Rebuild the same source groups with photo warnings included in
+            # the confirmation form. Selection itself remains unchanged.
+            source_validation = build_source_validation(
+                records,
+                selected_project_no=project_no,
+                selected_project_title=project_title,
+                issues=photo_warnings,
+            )
             manifest = _source_manifest(selected_records, "stored_json")
             draft = _prepare_draft(
                 aggregated,
@@ -1178,16 +1249,28 @@ def register_monthly_routes(
                 source_method="stored_json",
                 source_manifest=manifest,
                 report_context=_latest_report_context(selected_records),
+                extra_warnings=photo_warnings,
                 report_type=kind,
             )
             draft["source_validation"] = source_validation
             draft["_source_records"] = copy.deepcopy(records)
-            draft_id = _save_draft(data_dir, session["username"], draft)
+            draft["photo_documentation"] = _photo_references_for_records(selected_records)
+            draft_id = _save_draft(
+                data_dir,
+                session["username"],
+                draft,
+                draft_id=pending_draft_id,
+            )
+            draft_saved = True
             draft["draft_id"] = draft_id
             return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
         except ValueError as exc:
+            if pending_draft_id and not draft_saved:
+                _remove_draft_assets(data_dir, session["username"], pending_draft_id)
             return jsonify({"error": str(exc)}), 400
         except Exception as exc:
+            if pending_draft_id and not draft_saved:
+                _remove_draft_assets(data_dir, session["username"], pending_draft_id)
             report_name = _report_name(kind)
             app.logger.exception("Stored JSON %s compilation failed", kind)
             return jsonify({"error": f"{report_name} compilation failed: {exc}"}), 500
@@ -1909,10 +1992,28 @@ def register_monthly_routes(
                 record for record in included_records
                 if not selected_ids or str(record.get("report_id") or "") in selected_ids
             ]
+            source_method = str(draft.get("source_method") or "stored_json")
+            photo_warnings: list[str] = []
+            if source_method == "stored_json":
+                draft_photo_dir = _draft_photo_dir(data_dir, username, draft_id)
+                if draft_photo_dir is None:
+                    raise ValueError("Invalid report draft photo directory")
+                # A changed project/revision choice gets a fresh, bounded
+                # hydration pass. Canonical files remain read-only.
+                photo_warnings = attach_canonical_photo_candidates(
+                    selected_records,
+                    data_dir,
+                    draft_photo_dir,
+                )
+                photo_warnings.extend(_bound_record_photo_candidates(selected_records))
             warnings = [
                 str(value).strip()
                 for value in draft.get("warnings", [])
                 if str(value).strip()
+                and not (
+                    source_method == "stored_json"
+                    and _is_generated_stored_photo_warning(value)
+                )
                 and not re.fullmatch(
                     r"(?:\d+ Daily Report source\(s\) were kept separate and excluded from this report"
                     r"|\d+ duplicate Daily Report source\(s\) were not selected for this report)\.",
@@ -1927,6 +2028,7 @@ def register_monthly_routes(
                 warnings.append(
                     f"{len(duplicate_excluded_records)} duplicate Daily Report source(s) were not selected for this report."
                 )
+            warnings.extend(photo_warnings)
             refreshed = _prepare_draft(
                 aggregated,
                 project_no=project_no,
@@ -1934,10 +2036,10 @@ def register_monthly_routes(
                 date_from=start.strftime("%Y-%m-%d"),
                 date_to=end.strftime("%Y-%m-%d"),
                 report_mode=mode,
-                source_method=str(draft.get("source_method") or "stored_json"),
+                source_method=source_method,
                 source_manifest=_source_manifest(
                     selected_records,
-                    str(draft.get("source_method") or "stored_json"),
+                    source_method,
                 ),
                 report_context=_latest_report_context(selected_records),
                 extra_warnings=warnings,
@@ -1949,6 +2051,18 @@ def register_monthly_routes(
                 if isinstance(row, dict)
             }
             applied_validation = copy.deepcopy(validation)
+            if source_method == "stored_json":
+                retained_issues = []
+                for issue in applied_validation.get("issues", []):
+                    if not isinstance(issue, dict):
+                        continue
+                    if not _is_generated_stored_photo_warning(issue.get("message")):
+                        retained_issues.append(issue)
+                retained_issues.extend(
+                    {"severity": "warning", "message": message}
+                    for message in photo_warnings
+                )
+                applied_validation["issues"] = retained_issues
             for group in applied_validation.get("project_groups", []):
                 if isinstance(group, dict):
                     group["decision"] = decisions.get(str(group.get("key") or ""), "")
@@ -1988,6 +2102,13 @@ def register_monthly_routes(
                 "created_at", datetime.now().isoformat(timespec="seconds")
             )
             _update_draft(data_dir, username, refreshed)
+            if source_method == "stored_json":
+                _prune_draft_photo_assets(
+                    data_dir,
+                    username,
+                    draft_id,
+                    refreshed.get("photo_documentation"),
+                )
             return jsonify({"ok": True, "draft_id": draft_id, "draft": refreshed})
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400

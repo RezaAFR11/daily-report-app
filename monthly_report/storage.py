@@ -457,6 +457,11 @@ def list_canonical_records(
                 str(_record_metadata(record, "project_title"))
             ) != wanted_title:
                 continue
+            # Bind ownership to the directory we actually traversed.  This is
+            # intentionally added only to the in-memory representation; old
+            # canonical JSON files remain immutable on disk.
+            record["_canonical_owner"] = current_username
+            record["username"] = current_username
             records.append(record)
 
     def sort_key(record: Mapping[str, Any]) -> tuple[Any, ...]:
