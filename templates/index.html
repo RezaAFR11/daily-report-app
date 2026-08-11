@@ -216,7 +216,11 @@
       <a href="/my_reports" class="btn btn-sm btn-outline-light">📑 My Reports</a>
       <a href="/letters"    class="btn btn-sm btn-outline-light">📝 Letters</a>
       <a href="/field"      class="btn btn-sm btn-outline-light" title="Supervisor field input">🏗 Field</a>
-      <button class="btn btn-sm btn-outline-light" onclick="toggleAIChat()" title="AI Report Assistant">🤖 AI</button>
+      {% if ai_chat_allowed %}
+      <button class="btn btn-sm btn-outline-light" onclick="toggleAIChat()"
+              title="{% if anthropic_configured %}AI Report Assistant{% else %}Configure ANTHROPIC_API_KEY in Railway first{% endif %}"
+              {% if not anthropic_configured %}disabled{% endif %}>🤖 AI</button>
+      {% endif %}
       {% if is_admin %}
       <button class="btn btn-sm btn-outline-warning position-relative" id="reviewNavBtn" onclick="openReview()" title="Review supervisor submissions" style="display:none">
         📋 Review<span class="badge bg-danger ms-1 py-0 px-1" id="reviewBadge" style="font-size:.65rem">0</span>
@@ -626,7 +630,9 @@
             <button class="nav-link" data-tab="appearance">🎨 Appearance</button>
             <button class="nav-link" data-tab="manpower">👥 Manpower</button>
             <button class="nav-link" data-tab="areas">📍 Areas</button>
+            {% if ai_chat_allowed %}
             <button class="nav-link" data-tab="ai">🤖 AI Assistant</button>
+            {% endif %}
           </div>
         </div>
         <!-- Content -->
@@ -787,14 +793,17 @@
             <p class="text-muted mt-2 mb-0" style="font-size:.75rem;">Changes take effect next time you add an area.</p>
           </div>
 
+          {% if ai_chat_allowed %}
           <!-- AI Assistant -->
           <div class="stg-tab d-none" id="tab-ai">
             <h6 class="mb-3 text-primary">AI Report Assistant</h6>
-            <p style="font-size:.82rem;color:#555;">The AI assistant uses Claude (Anthropic) to parse natural language descriptions of your day into structured report data. You need an API key from <a href="https://console.anthropic.com/" target="_blank">console.anthropic.com</a>.</p>
-            <div class="mb-3">
-              <div class="fld-lbl">Anthropic API Key</div>
-              <input type="password" id="cfg_ai_key" class="form-control form-control-sm" placeholder="sk-ant-...">
-              <div class="text-muted mt-1" style="font-size:.7rem;">Your key is stored in the app config on the server. Cost: ~$0.003 per report conversation.</div>
+            <p style="font-size:.82rem;color:#555;">The AI assistant uses Claude (Anthropic) to turn a natural-language description into reviewable form suggestions.</p>
+            <div class="alert {% if anthropic_configured %}alert-success{% else %}alert-warning{% endif %} py-2" style="font-size:.78rem;">
+              {% if anthropic_configured %}
+              Claude is configured. The API key is stored only in the Railway environment variable.
+              {% else %}
+              Claude is not configured. Add <code>ANTHROPIC_API_KEY</code> to the Railway service variables, then redeploy.
+              {% endif %}
             </div>
             <div class="mb-2">
               <div class="fld-lbl">How to use</div>
@@ -806,6 +815,7 @@
               </ol>
             </div>
           </div>
+          {% endif %}
 
         </div><!-- /stg-content -->
       </div>
@@ -2642,9 +2652,6 @@ function loadSettings() {
   localProjects = normalizeProjectList(APP_CONFIG.projects || []);
   renderProjectTable();
 
-  // AI key
-  const aiKeyEl = document.getElementById('cfg_ai_key');
-  if (aiKeyEl) aiKeyEl.value = c.ai_api_key || '';
 }
 
 function saveSettings() {
@@ -2703,10 +2710,6 @@ function saveSettings() {
   });
   localMpDB = mpRows;
   payload.manpower_db = mpRows;
-
-  // AI key
-  const aiKeyVal = (document.getElementById('cfg_ai_key') || {}).value || '';
-  if (aiKeyVal) payload.ai_api_key = aiKeyVal;
 
   fetch('/save_config', {
     method: 'POST',
@@ -3292,14 +3295,19 @@ function toggleAIChat() {
 function clearAIChat() {
   _aiHistory = [];
   const msgs = document.getElementById('aiChatMessages');
-  msgs.innerHTML = '<div class="chat-msg system">Describe today\'s work naturally — I\'ll fill the form for you.</div>';
+  msgs.replaceChildren();
+  const welcome = document.createElement('div');
+  welcome.className = 'chat-msg system';
+  welcome.textContent = "Describe today's work naturally — I'll fill the form for you.";
+  msgs.appendChild(welcome);
 }
 
-function _addChatMsg(role, html) {
+function _addChatMsg(role, text) {
   const msgs = document.getElementById('aiChatMessages');
   const div = document.createElement('div');
   div.className = 'chat-msg ' + role;
-  div.innerHTML = html;
+  div.textContent = String(text || '');
+  div.style.whiteSpace = 'pre-wrap';
   msgs.appendChild(div);
   msgs.scrollTop = msgs.scrollHeight;
   return div;
@@ -3312,7 +3320,7 @@ async function sendAIMessage() {
   if (!msg) return;
 
   box.value = '';
-  _addChatMsg('user', msg.replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'));
+  _addChatMsg('user', msg);
 
   _aiSending = true;
   const btn = document.getElementById('aiSendBtn');
@@ -3352,23 +3360,33 @@ async function sendAIMessage() {
     _aiHistory.push({role:'user', content: msg});
     _aiHistory.push({role:'assistant', content: JSON.stringify(data)});
 
-    // Build reply HTML
-    let replyHtml = (data.reply || '').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+    // Claude output is untrusted. Build the response with DOM nodes and
+    // textContent; never insert provider text through innerHTML.
+    const reply = _addChatMsg('bot', data.reply || '');
 
     if (data.updates && Object.keys(data.updates).length > 0) {
       const count = Object.keys(data.updates).length;
-      replyHtml += `<br><span class="updates-badge" onclick="applyAIUpdates(this)" data-updates='${JSON.stringify(data.updates).replace(/'/g,"&#39;")}'>📝 Apply ${count} update(s) to form</span>`;
+      const badge = document.createElement('span');
+      badge.className = 'updates-badge';
+      badge.dataset.updates = JSON.stringify(data.updates);
+      badge.textContent = `📝 Apply ${count} update(s) to form`;
+      badge.addEventListener('click', () => applyAIUpdates(badge));
+      reply.append(document.createElement('br'), badge);
     }
 
-    if (data.missing && data.missing.length > 0) {
-      replyHtml += `<br><span style="font-size:.7rem;color:#888;margin-top:4px;display:inline-block;">Missing: ${data.missing.join(', ')}</span>`;
+    if (Array.isArray(data.missing) && data.missing.length > 0) {
+      const missing = document.createElement('span');
+      missing.style.cssText = 'font-size:.7rem;color:#888;margin-top:4px;display:inline-block;';
+      missing.textContent = `Missing: ${data.missing.join(', ')}`;
+      reply.append(document.createElement('br'), missing);
     }
 
     if (data.ready) {
-      replyHtml += `<br><span style="font-size:.72rem;color:green;font-weight:600;margin-top:4px;display:inline-block;">✅ Report looks ready — review the form and click Generate PDF!</span>`;
+      const ready = document.createElement('span');
+      ready.style.cssText = 'font-size:.72rem;color:green;font-weight:600;margin-top:4px;display:inline-block;';
+      ready.textContent = '✅ Report looks ready — review the form and click Generate PDF!';
+      reply.append(document.createElement('br'), ready);
     }
-
-    _addChatMsg('bot', replyHtml);
 
   } catch(err) {
     typing.remove();

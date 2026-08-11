@@ -57,6 +57,39 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(config['project_no'], 'LEGACY-001')
         self.assertEqual(config['projects'], DEFAULT_PROJECTS)
 
+    def test_legacy_ai_key_is_removed_from_memory_disk_and_config_endpoint(self):
+        with open(self.config_path, 'w', encoding='utf-8') as config_file:
+            json.dump(
+                {
+                    'project_title': 'Legacy Project',
+                    'project_no': 'LEGACY-001',
+                    'ai_api_key': 'sk-ant-must-not-leak',
+                },
+                config_file,
+            )
+
+        config = load_config()
+
+        self.assertNotIn('ai_api_key', config)
+        with open(self.config_path, encoding='utf-8') as config_file:
+            persisted = json.load(config_file)
+        self.assertNotIn('ai_api_key', persisted)
+
+        response = self.client.get('/get_config')
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('ai_api_key', response.get_json())
+        self.assertNotIn('sk-ant-must-not-leak', response.get_data(as_text=True))
+
+    def test_ai_key_cannot_be_saved_in_application_config(self):
+        response = self.client.post(
+            '/save_config',
+            json={'ai_api_key': 'sk-ant-browser-secret'},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('ANTHROPIC_API_KEY', response.get_json()['error'])
+        self.assertNotIn('ai_api_key', load_config())
+
     def test_admin_can_save_same_title_with_different_numbers(self):
         projects = [
             {'title': 'Repeated Title', 'project_no': 'NO-001'},

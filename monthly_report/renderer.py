@@ -814,8 +814,8 @@ def _safety_table(value: Any, styles: Mapping[str, ParagraphStyle]) -> Table:
     ]
     table_data = []
     for label, raw in rows:
-        rendered = _plain(raw, "\u2014")
-        if label == "Total Man hours" and rendered != "\u2014" and not rendered.upper().endswith("MH"):
+        rendered = _plain(raw, "Not supplied")
+        if label == "Total Man hours" and rendered != "Not supplied" and not rendered.upper().endswith("MH"):
             rendered += " MH"
         table_data.append([
             _paragraph("\u2022", styles["body_center"], default=""),
@@ -1325,6 +1325,107 @@ def _photo_grid_flowables(
     return [grid]
 
 
+def _manpower_appendix_flowables(
+    manpower: Any,
+    styles: Mapping[str, ParagraphStyle],
+) -> list[Flowable]:
+    """Render deterministic attendance and man-hour details in Appendix 6.5."""
+
+    value = manpower if isinstance(manpower, Mapping) else {}
+    totals = value.get("totals") if isinstance(value.get("totals"), Mapping) else {}
+    daily = [row for row in _as_list(value.get("daily")) if isinstance(row, Mapping)]
+    roles = [row for row in _as_list(value.get("roles")) if isinstance(row, Mapping)]
+    header = styles["table_header"]
+    body = styles["table"]
+    center = styles["table_center"]
+    summary_rows = [
+        ["Category", "Person-days", "Regular MH", "OT MH", "Total MH"],
+        [
+            "Direct", totals.get("direct_person_days", "Not supplied"),
+            totals.get("regular_direct_man_hours", totals.get("direct_man_hours", "Not supplied")),
+            totals.get("direct_overtime_man_hours", "Not supplied"), totals.get("direct_man_hours", "Not supplied"),
+        ],
+        [
+            "Indirect", totals.get("indirect_person_days", "Not supplied"),
+            totals.get("regular_indirect_man_hours", totals.get("indirect_man_hours", "Not supplied")),
+            totals.get("indirect_overtime_man_hours", "Not supplied"), totals.get("indirect_man_hours", "Not supplied"),
+        ],
+        [
+            "Total", totals.get("total_person_days", "Not supplied"),
+            totals.get("regular_man_hours", totals.get("total_man_hours", "Not supplied")),
+            totals.get("overtime_man_hours", "Not supplied"), totals.get("total_man_hours", "Not supplied"),
+        ],
+    ]
+    summary = Table(
+        [[_paragraph(cell, header if row_index == 0 else (body if column_index == 0 else center))
+          for column_index, cell in enumerate(row)] for row_index, row in enumerate(summary_rows)],
+        colWidths=[118, 86, 90, 82, 90], repeatRows=1, hAlign="CENTER",
+    )
+    summary.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), GREY_HEADER),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    result: list[Flowable] = [summary, Spacer(1, 10)]
+    if daily:
+        table_rows: list[list[Any]] = [[
+            "Date", "Direct HC", "Indirect HC", "Total HC", "Regular MH", "OT MH", "Total MH",
+        ]]
+        for row in daily:
+            regular = row.get("regular_man_hours")
+            if regular is None:
+                direct_value = _number(row.get("direct_man_hours")) or 0
+                indirect_value = _number(row.get("indirect_man_hours")) or 0
+                regular = direct_value + indirect_value
+            table_rows.append([
+                row.get("date", ""), row.get("direct_headcount", 0), row.get("indirect_headcount", 0),
+                row.get("total_headcount", 0), regular, row.get("overtime_man_hours", "Not supplied"),
+                row.get("total_man_hours", regular),
+            ])
+        table = LongTable(
+            [[_paragraph(cell, header if row_index == 0 else center) for cell in row]
+             for row_index, row in enumerate(table_rows)],
+            colWidths=[74, 61, 66, 61, 70, 65, 72], repeatRows=1, splitByRow=1,
+        )
+        table.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.45, BLACK),
+            ("BACKGROUND", (0, 0), (-1, 0), CYAN),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        result.extend([_heading("Daily Headcount and Man-hours", styles["h2"], 1), table, Spacer(1, 10)])
+    if roles:
+        role_rows: list[list[Any]] = [["Role / Position", "Person-days", "Man-hours"]]
+        for row in roles:
+            role_rows.append([
+                row.get("role", "Unspecified"),
+                row.get("person_days", row.get("present_person_days", "")),
+                row.get("man_hours", row.get("physical_manhours", "")),
+            ])
+        table = LongTable(
+            [[_paragraph(cell, header if row_index == 0 else (body if column_index == 0 else center))
+              for column_index, cell in enumerate(row)] for row_index, row in enumerate(role_rows)],
+            colWidths=[270, 100, 100], repeatRows=1,
+        )
+        table.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.45, BLACK),
+            ("BACKGROUND", (0, 0), (-1, 0), CYAN),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        result.extend([_heading("Role Summary", styles["h2"], 1), table])
+    if totals.get("source"):
+        result.extend([Spacer(1, 8), _paragraph(
+            "Source: reviewed attendance workbook. Regular physical man-hours use 10 hours per present day; "
+            "overtime is elapsed clock time only when explicitly applied.", styles["placeholder"],
+        )])
+    return result
+
+
 def _build_story(
     report: Mapping[str, Any],
     styles: Mapping[str, ParagraphStyle],
@@ -1336,6 +1437,14 @@ def _build_story(
     include_s_curve = _coerce_bool(report.get("include_s_curve"), bool(progress))
     curve = _normalise_s_curve(report.get("s_curve"), progress) if include_s_curve else None
     appendices = _normalise_appendices(report.get("appendices"), has_s_curve=curve is not None)
+    manpower = report.get("manpower") if isinstance(report.get("manpower"), Mapping) else {}
+    manpower_totals = manpower.get("totals") if isinstance(manpower.get("totals"), Mapping) else {}
+    if manpower.get("daily") or manpower_totals:
+        for item in appendices:
+            if item.get("number") == "6.5":
+                item["status"] = "Attached"
+                item["content"] = "__reviewed_manpower__"
+                break
     photos = [item for item in _as_list(report.get("photo_documentation")) if isinstance(item, Mapping)]
     if photos:
         for item in appendices:
@@ -1489,6 +1598,9 @@ def _build_story(
         default=_value(report, *next_activity_keys, default=[]),
     )
     story.append(_heading("5. Site Services / Construction", styles["h1"], 0))
+    site_summary = _plain(site.get("summary"))
+    if site_summary:
+        story.extend([_paragraph(site_summary, styles["body"]), Spacer(1, 3)])
     story.append(_heading("5.1 Project Schedule Status", styles["h2"], 1))
     story.extend(_content_flowables(
         _value(site, "schedule_status", "project_schedule_status"), styles,
@@ -1510,7 +1622,7 @@ def _build_story(
     concern_rows = _as_list(_value(site, "concerns", "constraints", default=report.get("constraints")))
     concerns_table = _concerns_table(concern_rows, styles)
     if concerns_table is None:
-        story.append(_paragraph("No concerns supplied.", styles["placeholder"]))
+        story.append(_paragraph("Concern and closeout information was not supplied.", styles["placeholder"]))
     else:
         story.append(concerns_table)
     story.append(PageBreak())
@@ -1545,6 +1657,8 @@ def _build_story(
                 styles,
                 photo_base_dir=photo_base_dir,
             ))
+        elif content == "__reviewed_manpower__":
+            story.extend(_manpower_appendix_flowables(manpower, styles))
         else:
             story.extend(_content_flowables(
                 content, styles, empty_message="No appendix content supplied.", bullets=True,
