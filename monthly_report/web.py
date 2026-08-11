@@ -1048,7 +1048,14 @@ def _provisional_project_records(
     project_no: str,
     project_title: str,
 ) -> list[dict[str, Any]]:
-    """Include only exact selected identities until the user decides variants."""
+    """Provisionally merge uploaded project identities for the review preview.
+
+    Source Data Validation remains unapplied/unconfirmed, so the reviewer must
+    still decide Merge vs Keep separate before Final issue.  Including all
+    uploaded identities in the provisional preview prevents a project-number
+    mismatch from being misreported as a *missing date* when the Daily Report
+    for that date was actually uploaded and parsed successfully.
+    """
 
     groups = validation.get("project_groups") if isinstance(validation, dict) else []
     resolutions = []
@@ -1057,7 +1064,7 @@ def _provisional_project_records(
             continue
         resolutions.append({
             "group_key": group["key"],
-            "decision": "merge" if group.get("matches_selected") else "separate",
+            "decision": "merge",
         })
     try:
         included, _ = resolve_project_records(
@@ -1072,6 +1079,7 @@ def _provisional_project_records(
             return []
         raise
     return included
+
 
 
 def _source_validation_payload(review: Any) -> dict[str, Any]:
@@ -1364,6 +1372,15 @@ def _claim_text(value: Any) -> str:
     if isinstance(value, dict):
         return _clean_text(value.get("text"), 4_000)
     return _clean_text(value, 4_000)
+
+
+def _usable_ai_text(value: Any) -> str:
+    """Return AI text only when it contains a real narrative suggestion."""
+
+    text = _claim_text(value)
+    return "" if text.casefold() == "not supplied" else text
+
+
 
 
 def _clean_ai_references(value: Any) -> dict[str, list[str]]:
@@ -2843,11 +2860,20 @@ def register_monthly_routes(
                 "lookahead": lookahead_evidence,
                 "claims": claim_evidence,
             })
+            current_engineering = draft.get("engineering") if isinstance(draft.get("engineering"), dict) else {}
+            current_procurement = draft.get("procurement") if isinstance(draft.get("procurement"), dict) else {}
+            current_site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
             display = {
-                "executive_summary": _claim_text(raw.get("executive_summary")),
-                "engineering_summary": _claim_text(raw.get("engineering_summary")),
-                "procurement_summary": _claim_text(raw.get("procurement_summary")),
-                "site_summary": _claim_text(raw.get("site_summary")),
+                # A missing AI section must never make the review look worse
+                # than the deterministic draft that existed before AI.
+                "executive_summary": _usable_ai_text(raw.get("executive_summary"))
+                or _clean_text(draft.get("executive_summary"), 4_000),
+                "engineering_summary": _usable_ai_text(raw.get("engineering_summary"))
+                or _clean_text(current_engineering.get("summary"), 4_000),
+                "procurement_summary": _usable_ai_text(raw.get("procurement_summary"))
+                or _clean_text(current_procurement.get("summary"), 4_000),
+                "site_summary": _usable_ai_text(raw.get("site_summary"))
+                or _clean_text(current_site.get("summary"), 4_000),
                 "concerns": concerns,
                 "lookahead": lookahead,
                 "citation_evidence": citation_evidence,
@@ -2904,13 +2930,20 @@ def register_monthly_routes(
                 accepted = _clean_ai_review(body.get("suggestion"))
             except ValueError as exc:
                 return jsonify({"error": str(exc)}), 400
-            draft["executive_summary"] = accepted["executive_summary"]
             engineering = draft.get("engineering") if isinstance(draft.get("engineering"), dict) else {}
             procurement = draft.get("procurement") if isinstance(draft.get("procurement"), dict) else {}
             site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
-            engineering["summary"] = accepted["engineering_summary"]
-            procurement["summary"] = accepted["procurement_summary"]
-            site["summary"] = accepted["site_summary"]
+
+            # Accept AI only where it actually improved/provided narrative.
+            # Empty/Not supplied values preserve the deterministic draft.
+            if accepted["executive_summary"] and accepted["executive_summary"].casefold() != "not supplied":
+                draft["executive_summary"] = accepted["executive_summary"]
+            if accepted["engineering_summary"] and accepted["engineering_summary"].casefold() != "not supplied":
+                engineering["summary"] = accepted["engineering_summary"]
+            if accepted["procurement_summary"] and accepted["procurement_summary"].casefold() != "not supplied":
+                procurement["summary"] = accepted["procurement_summary"]
+            if accepted["site_summary"] and accepted["site_summary"].casefold() != "not supplied":
+                site["summary"] = accepted["site_summary"]
             # AI suggestions may improve wording, but accepting them must not
             # erase deterministic constraints or look-ahead items already
             # extracted from the Daily Reports.
