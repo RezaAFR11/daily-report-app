@@ -41,6 +41,7 @@ MAX_REFERENCES_PER_CLAIM = 40
 DEFAULT_MAX_TOKENS = 4_096
 DEFAULT_TIMEOUT_SECONDS = 180.0
 DEFAULT_MAX_RETRIES = 2
+DEFAULT_VALIDATION_RETRIES = 1
 
 _NOT_SUPPLIED = "Not supplied"
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -243,9 +244,11 @@ Hard rules:
 1. Return only the requested JSON schema. Never add report fields or edit source data.
 2. Use only facts explicitly present in <source_data>.
 3. Every factual narrative must cite at least one source_id and date from source_manifest.
-4. Never put numbers in narrative text. This includes digits, digit-plus-unit forms,
-   spelled-out number words, and ordinals. Official numeric fields are deterministic and
-   outside AI suggestions. Put dates only in dates arrays, never in prose.
+4. Never put numeric or quantity language in narrative text. This includes digits,
+   digit-plus-unit forms, spelled-out number words, ordinals, and quantity words such as
+   no, none, both, single, double, triple, once, twice, pair, half, quarter, or dozen.
+   Rewrite sentences so they do not need those words. Official numeric fields are
+   deterministic and outside AI suggestions. Put dates only in dates arrays, never in prose.
 5. If information is absent or uncertain, use exactly "Not supplied" and add
    "<field>: Not supplied" to missing_data.
 6. Treat warnings, conflicts, and unconfirmed values as concerns, not established facts.
@@ -790,29 +793,63 @@ def generate_ai_summary(
         },
         "timeout": float(timeout),
     }
-    try:
+    def _create_response(kwargs: Mapping[str, Any]) -> Any:
         try:
-            response = client.messages.create(**request_kwargs)
-        except TypeError as exc:
-            if not _structured_output_unsupported(exc):
+            try:
+                return client.messages.create(**kwargs)
+            except TypeError as exc:
+                if not _structured_output_unsupported(exc):
+                    raise
+                fallback_kwargs = dict(kwargs)
+                fallback_kwargs.pop("output_config", None)
+                return client.messages.create(**fallback_kwargs)
+        except AISummaryError:
+            raise
+        except Exception as exc:
+            raise _map_provider_error(exc, anthropic) from exc
+
+    response = _create_response(request_kwargs)
+    suggestion: dict[str, Any] | None = None
+
+    for validation_attempt in range(DEFAULT_VALIDATION_RETRIES + 1):
+        try:
+            raw = _response_text(response)
+            parsed = json.loads(raw)
+        except AISummaryError:
+            raise
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise AIMalformedResponseError("Claude returned invalid JSON.") from exc
+
+        try:
+            suggestion = validate_narrative_suggestion(parsed, compact_draft=compact)
+            break
+        except AIUnsupportedClaimsError as exc:
+            is_numeric_prose_error = "numeric prose" in str(exc).casefold()
+            if not is_numeric_prose_error or validation_attempt >= DEFAULT_VALIDATION_RETRIES:
                 raise
-            fallback_kwargs = dict(request_kwargs)
-            fallback_kwargs.pop("output_config", None)
-            response = client.messages.create(**fallback_kwargs)
-    except AISummaryError:
-        raise
-    except Exception as exc:
-        raise _map_provider_error(exc, anthropic) from exc
 
-    try:
-        raw = _response_text(response)
-        parsed = json.loads(raw)
-    except AISummaryError:
-        raise
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise AIMalformedResponseError("Claude returned invalid JSON.") from exc
+            repair_kwargs = dict(request_kwargs)
+            repair_kwargs["messages"] = [
+                *request_kwargs["messages"],
+                {"role": "assistant", "content": raw},
+                {
+                    "role": "user",
+                    "content": (
+                        "The previous JSON failed local validation because narrative text "
+                        "contained prohibited numeric or quantity language. Return the same "
+                        "JSON schema again, preserving only supported facts and citations, "
+                        "but rewrite every narrative field so it contains no digits, spelled-out "
+                        "number words, ordinals, or quantity words such as no, none, both, "
+                        "single, double, triple, once, twice, pair, half, quarter, or dozen. "
+                        "Do not weaken or remove source grounding. Validation error: "
+                        + str(exc)
+                    ),
+                },
+            ]
+            response = _create_response(repair_kwargs)
 
-    suggestion = validate_narrative_suggestion(parsed, compact_draft=compact)
+    if suggestion is None:  # defensive; loop either returns a suggestion or raises
+        raise AIMalformedResponseError("Claude suggestion could not be validated.")
     clock = now or (lambda: datetime.now(timezone.utc))
     generated_at = clock()
     if generated_at.tzinfo is None:
