@@ -391,6 +391,145 @@
           </div>
         </div>
 
+        <div class="border rounded-3 p-3 mb-4 d-none" id="workforce-review-card" style="background:#f8fafc;">
+          <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap mb-3">
+            <div>
+              <div class="section-label mb-1">Timesheet &amp; Overtime Validation</div>
+              <div class="muted-note">
+                Daily Report totals remain the baseline until you explicitly apply a reviewed Excel result.
+                Regular man-hours use 10 hours per present day; overtime uses the confirmed elapsed clock range.
+              </div>
+            </div>
+            <span class="badge text-bg-secondary" id="workforce-status-badge">Daily Report baseline</span>
+          </div>
+
+          <div class="row g-3">
+            <div class="col-lg-6">
+              <div class="coverage-card h-100">
+                <div class="section-label mb-2">1. Attendance Timesheet</div>
+                <label class="form-label small" for="timesheet-files">KN attendance workbook (.xlsx)</label>
+                <input class="form-control form-control-sm mb-2" type="file" id="timesheet-files"
+                  accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple>
+                <div class="row g-2 mb-2">
+                  <div class="col-sm-7">
+                    <label class="form-label small" for="timesheet-cutoff">Data cutoff / as-of date</label>
+                    <input class="form-control form-control-sm" type="date" id="timesheet-cutoff">
+                  </div>
+                  <div class="col-sm-5 d-flex align-items-end">
+                    <button type="button" class="btn btn-sm btn-outline-primary w-100" id="analyze-timesheet-btn"
+                      onclick="analyzeTimesheet()">Analyze Timesheet</button>
+                  </div>
+                </div>
+                <div class="small text-muted mb-2" id="timesheet-summary">No attendance workbook reviewed.</div>
+                <div class="alert alert-warning py-2 small d-none" id="timesheet-warnings"></div>
+                <div class="table-responsive d-none mb-2" id="timesheet-daily-panel">
+                  <table class="table table-sm table-bordered mb-0">
+                    <thead class="table-light"><tr><th>Date</th><th>Direct</th><th>Indirect</th><th>HC</th><th>Regular MH</th></tr></thead>
+                    <tbody id="timesheet-daily-body"></tbody>
+                  </table>
+                </div>
+                <div class="form-check d-none mb-2" id="timesheet-confirm-panel">
+                  <input class="form-check-input" type="checkbox" id="timesheet-confirm-exceptions">
+                  <label class="form-check-label small" for="timesheet-confirm-exceptions">
+                    I reviewed missing roles, status conflicts, blank cells, and incomplete attendance dates.
+                  </label>
+                </div>
+                <div class="d-flex gap-2 flex-wrap d-none" id="timesheet-actions">
+                  <button type="button" class="btn btn-sm btn-primary" onclick="decideTimesheet('apply')">Apply Timesheet Totals</button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" onclick="decideTimesheet('keep')">Keep Daily Report Data</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="col-lg-6">
+              <div class="coverage-card h-100">
+                <div class="section-label mb-2">2. Overtime Workbook</div>
+                <label class="form-label small" for="overtime-files">Daily overtime workbook (.xlsx)</label>
+                <input class="form-control form-control-sm mb-2" type="file" id="overtime-files"
+                  accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple>
+                <button type="button" class="btn btn-sm btn-outline-primary mb-2" id="analyze-overtime-btn"
+                  onclick="analyzeOvertime()">Analyze Overtime</button>
+                <div class="small text-muted mb-2" id="overtime-summary">No overtime workbook reviewed.</div>
+                <div class="alert alert-warning py-2 small d-none" id="overtime-warnings"></div>
+                <div class="table-responsive d-none mb-2" id="overtime-daily-panel">
+                  <table class="table table-sm table-bordered mb-0">
+                    <thead class="table-light"><tr><th>Date</th><th>People</th><th>OT MH</th><th>Coverage</th></tr></thead>
+                    <tbody id="overtime-daily-body"></tbody>
+                  </table>
+                </div>
+                <div class="table-responsive d-none mb-2" id="overtime-mapping-panel">
+                  <table class="table table-sm table-bordered mb-0">
+                    <thead class="table-light"><tr><th>Employee</th><th>Match / Category</th></tr></thead>
+                    <tbody id="overtime-mapping-body"></tbody>
+                  </table>
+                </div>
+                <div class="table-responsive d-none mb-2" id="overtime-record-panel">
+                  <table class="table table-sm table-bordered align-middle mb-0">
+                    <thead class="table-light"><tr><th>Date / Employee</th><th>Interval / Note</th><th>Decision</th><th>Hours</th></tr></thead>
+                    <tbody id="overtime-record-body"></tbody>
+                  </table>
+                </div>
+                <div class="form-check d-none mb-2" id="overtime-confirm-panel">
+                  <input class="form-check-input" type="checkbox" id="overtime-confirm-exceptions">
+                  <label class="form-check-label small" for="overtime-confirm-exceptions">
+                    I reviewed employees not marked present, notes, interval warnings, and dates marked Not supplied.
+                  </label>
+                </div>
+                <div class="d-flex gap-2 flex-wrap d-none" id="overtime-actions">
+                  <button type="button" class="btn btn-sm btn-primary" onclick="decideOvertime('apply')">Apply Confirmed OT</button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" onclick="decideOvertime('keep')">Keep Without OT</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="d-flex justify-content-between align-items-center gap-2 flex-wrap mt-3">
+            <div class="small" id="workforce-effective-summary"></div>
+            <button type="button" class="btn btn-sm btn-outline-danger" onclick="resetWorkforceValidation()">
+              Reset Timesheet &amp; Overtime
+            </button>
+          </div>
+        </div>
+
+        <div class="border rounded-3 p-3 mb-4 d-none" id="ai-summary-card">
+          <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap">
+            <div>
+              <div class="section-label mb-1">Claude AI Narrative Suggestions</div>
+              <div class="muted-note">
+                Claude can group activities and improve narrative wording. Verified numbers and source facts stay locked.
+              </div>
+            </div>
+            <button type="button" class="btn btn-sm btn-outline-primary" id="generate-ai-summary-btn"
+              onclick="generateAiSummary()"
+              {% if not anthropic_configured or not ai_summary_allowed %}disabled
+              title="{% if not anthropic_configured %}Configure ANTHROPIC_API_KEY in Railway first.{% else %}AI summaries are restricted to administrators.{% endif %}"{% endif %}>
+              Generate AI Summary
+            </button>
+          </div>
+          <div class="alert alert-info py-2 small d-none mt-3" id="ai-summary-status"></div>
+          <div class="d-none mt-3" id="ai-summary-review">
+            <div class="row g-3">
+              <div class="col-12"><label class="form-label small">Executive Summary</label><textarea class="form-control" rows="4" id="ai-executive-summary"></textarea></div>
+              <div class="col-md-6"><label class="form-label small">Engineering</label><textarea class="form-control" rows="3" id="ai-engineering-summary"></textarea></div>
+              <div class="col-md-6"><label class="form-label small">Procurement</label><textarea class="form-control" rows="3" id="ai-procurement-summary"></textarea></div>
+              <div class="col-12"><label class="form-label small">Site Summary</label><textarea class="form-control" rows="4" id="ai-site-summary"></textarea></div>
+              <div class="col-md-6"><label class="form-label small">Concerns / Actions</label><textarea class="form-control" rows="4" id="ai-concerns-summary"></textarea></div>
+              <div class="col-md-6"><label class="form-label small">Look-ahead</label><textarea class="form-control" rows="4" id="ai-lookahead-summary"></textarea></div>
+            </div>
+            <div class="border rounded p-3 mt-3 d-none bg-light" id="ai-evidence-panel">
+              <div class="section-label mb-2">AI Source References</div>
+              <ul class="small mb-0 ps-3 d-none" id="ai-citations-list"></ul>
+              <div class="mt-3 d-none" id="ai-missing-data-panel">
+                <div class="fw-semibold small mb-1">Missing data reported by AI</div>
+                <ul class="small mb-0 ps-3" id="ai-missing-data-list"></ul>
+              </div>
+            </div>
+            <div class="d-flex gap-2 mt-3">
+              <button type="button" class="btn btn-sm btn-primary" onclick="decideAiSummary('accept')">Accept / Apply Edited Suggestions</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" onclick="decideAiSummary('reject')">Reject Suggestions</button>
+            </div>
+          </div>
+        </div>
+
         <div class="border rounded-3 p-3 mb-4 d-none" id="photo-review-card" style="background:#f8fafc;">
           <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
             <div>
@@ -548,6 +687,8 @@ let monthlyProjectValidationGroups = [];
 let monthlyDuplicateValidationGroups = [];
 let monthlySourceValidationApplied = false;
 let monthlyPhotos = [];
+let monthlyWorkforce = {};
+let monthlyAiSuggestion = null;
 const MAX_MONTHLY_UPLOAD_FILES = 35;
 const MAX_MONTHLY_PDF_BYTES = {{ pdf_upload_max_bytes|default(52428800)|int }};
 const MONTHLY_UPLOAD_CLEANUP_KEY = 'gpa-report-upload-cleanup';
@@ -948,6 +1089,122 @@ function applyCompiledMonthlyDraft(data) {
   document.getElementById('monthly-review-panel').scrollIntoView({behavior:'smooth'});
 }
 
+const REPORT_NARRATIVE_REVIEW_FIELD_IDS = [
+  'review-executive-summary', 'review-engineering', 'review-procurement',
+  'review-this-month', 'review-next-month', 'review-concerns',
+];
+const AI_SUGGESTION_REVIEW_FIELD_IDS = [
+  'ai-executive-summary', 'ai-engineering-summary',
+  'ai-procurement-summary', 'ai-site-summary',
+  'ai-concerns-summary', 'ai-lookahead-summary',
+];
+const NON_WORKFORCE_REVIEW_FIELD_IDS = [
+  'review-project-title', 'review-project-no', 'review-validation-notes',
+  'review-confirm-validation', ...REPORT_NARRATIVE_REVIEW_FIELD_IDS,
+  'review-recordable', 'review-lost-days', 'review-lti',
+  'review-confirm-final', ...AI_SUGGESTION_REVIEW_FIELD_IDS,
+];
+
+function snapshotNonWorkforceReview() {
+  const fields = {};
+  NON_WORKFORCE_REVIEW_FIELD_IDS.forEach(id => {
+    const element = document.getElementById(id);
+    if (!element) return;
+    fields[id] = element.type === 'checkbox'
+      ? {checked:element.checked}
+      : {value:element.value};
+  });
+  const selectValues = selector => Array.from(document.querySelectorAll(selector)).map(select => ({
+    groupKey:select.dataset.groupKey || '',
+    value:select.value,
+  }));
+  const progressRows = Array.from(document.querySelectorAll('#review-progress-table tbody tr')).map(tr =>
+    Array.from(tr.querySelectorAll('input')).map(input => input.value)
+  );
+  return {
+    fields,
+    projectResolutions:selectValues('.project-resolution-select'),
+    duplicateResolutions:selectValues('.duplicate-resolution-select'),
+    progressRows,
+    sourceValidationApplied:monthlySourceValidationApplied,
+    photos:monthlyPhotos.map(photo => ({...photo})),
+  };
+}
+
+function restoreResolutionValues(selector, values) {
+  const saved = new Map((values || []).map(item => [item.groupKey, item.value]));
+  document.querySelectorAll(selector).forEach(select => {
+    if (saved.has(select.dataset.groupKey || '')) {
+      select.value = saved.get(select.dataset.groupKey || '');
+    }
+  });
+}
+
+function restoreNonWorkforceReview(snapshot) {
+  if (!snapshot) return;
+  Object.entries(snapshot.fields || {}).forEach(([id, state]) => {
+    const element = document.getElementById(id);
+    if (!element) return;
+    if (Object.prototype.hasOwnProperty.call(state, 'checked')) element.checked = state.checked;
+    else element.value = state.value;
+  });
+  restoreResolutionValues('.project-resolution-select', snapshot.projectResolutions);
+  restoreResolutionValues('.duplicate-resolution-select', snapshot.duplicateResolutions);
+
+  const tbody = document.querySelector('#review-progress-table tbody');
+  if (tbody) {
+    tbody.replaceChildren();
+    (snapshot.progressRows || []).forEach(values => {
+      addProgressRow({
+        description:values[0] || '', weight:values[1] ?? '', previous:values[2] ?? '',
+        this_month:values[3] ?? '', to_date:values[4] ?? '', plan:values[5] ?? '',
+        variance:values[6] ?? '',
+      });
+      const inputs = tbody.lastElementChild?.querySelectorAll('input') || [];
+      values.forEach((value, index) => {
+        if (inputs[index]) inputs[index].value = value;
+      });
+    });
+  }
+  monthlyPhotos = (snapshot.photos || []).map(photo => ({...photo}));
+  monthlySourceValidationApplied = snapshot.sourceValidationApplied === true;
+  updatePhotoReviewCard();
+  updateValidationStatus();
+}
+
+function applyWorkforceDraftPreservingReview(data) {
+  const snapshot = snapshotNonWorkforceReview();
+  applyCompiledMonthlyDraft(data);
+  restoreNonWorkforceReview(snapshot);
+}
+
+function populateWorkforcePreservingReview(draft) {
+  const snapshot = snapshotNonWorkforceReview();
+  populateWorkforceReview(draft);
+  restoreNonWorkforceReview(snapshot);
+}
+
+function snapshotAiActionReview({preserveNarratives=true}={}) {
+  const snapshot = snapshotNonWorkforceReview();
+  AI_SUGGESTION_REVIEW_FIELD_IDS.forEach(id => delete snapshot.fields[id]);
+  if (!preserveNarratives) {
+    REPORT_NARRATIVE_REVIEW_FIELD_IDS.forEach(id => delete snapshot.fields[id]);
+  }
+  // AI does not calculate safety. Preserve manual safety values while still
+  // allowing workforce actions to replace these two fields from the server.
+  ['review-total-manpower', 'review-man-hours'].forEach(id => {
+    const element = document.getElementById(id);
+    if (element) snapshot.fields[id] = {value:element.value};
+  });
+  return snapshot;
+}
+
+function applyAiDraftPreservingReview(data, {preserveNarratives=true}={}) {
+  const snapshot = snapshotAiActionReview({preserveNarratives});
+  applyCompiledMonthlyDraft(data);
+  restoreNonWorkforceReview(snapshot);
+}
+
 function assertCurrentUpload(generation) {
   if (generation !== monthlyUploadGeneration) {
     throw new DOMException('Upload selection changed.', 'AbortError');
@@ -1183,13 +1440,15 @@ function populateMonthlyReview(draft) {
   detail.classList.toggle('d-none', !details.length);
   populateSourceManifest(draft.source_manifest || []);
   populateSourceValidation(draft);
+  populateWorkforceReview(draft);
+  populateAiSummaryReview(draft);
 
   document.getElementById('review-executive-summary').value = draft.executive_summary || '';
   document.getElementById('review-total-manpower').value = draft.safety?.total_manpower ?? '';
   document.getElementById('review-man-hours').value = draft.safety?.total_man_hours ?? '';
-  document.getElementById('review-recordable').value = draft.safety?.recordable_cases ?? 0;
-  document.getElementById('review-lost-days').value = draft.safety?.lost_workdays ?? 0;
-  document.getElementById('review-lti').value = draft.safety?.lost_time_injuries ?? 0;
+  document.getElementById('review-recordable').value = draft.safety?.recordable_cases ?? '';
+  document.getElementById('review-lost-days').value = draft.safety?.lost_workdays ?? '';
+  document.getElementById('review-lti').value = draft.safety?.lost_time_injuries ?? '';
   document.getElementById('review-engineering').value = draft.engineering?.summary || draft.engineering_summary || '';
   document.getElementById('review-procurement').value = draft.procurement?.summary || draft.procurement_summary || '';
   document.getElementById('review-this-month').value = asList(draft.site?.this_month_activities || draft.this_month_activities).join('\n');
@@ -1210,6 +1469,419 @@ function populateMonthlyReview(draft) {
     : [];
   updatePhotoReviewCard();
   toggleFinalConfirmation();
+}
+
+function workbookWarnings(result) {
+  const values = [
+    ...(Array.isArray(result?.warnings) ? result.warnings : []),
+    ...(Array.isArray(result?.conflicts) ? result.conflicts : []),
+    ...(Array.isArray(result?.unresolved) ? result.unresolved : []),
+  ];
+  return values.map(value => {
+    if (typeof value === 'string') return value;
+    return value?.message || value?.reason || value?.code || JSON.stringify(value);
+  }).filter(Boolean);
+}
+
+function workforceDailyRows(result) {
+  if (Array.isArray(result?.daily)) return result.daily;
+  if (Array.isArray(result?.daily_totals)) return result.daily_totals.map(row => ({
+    ...row,
+    direct_headcount:row.present_by_section?.direct ?? 0,
+    indirect_headcount:row.present_by_section?.indirect ?? 0,
+    total_headcount:row.present_count ?? 0,
+    total_man_hours:row.physical_manhours ?? 0,
+  }));
+  if (Array.isArray(result?.manpower?.daily)) return result.manpower.daily;
+  return [];
+}
+
+function populateWorkforceReview(draft) {
+  monthlyWorkforce = draft.workforce_validation || {};
+  const card = document.getElementById('workforce-review-card');
+  card.classList.toggle('d-none', !monthlySourceValidationApplied);
+  const effective = monthlyWorkforce.effective || {};
+  const badge = document.getElementById('workforce-status-badge');
+  const source = effective.source || 'daily_report';
+  badge.className = `badge ${source === 'timesheet' ? 'text-bg-success' : 'text-bg-secondary'}`;
+  badge.textContent = source === 'timesheet'
+    ? (effective.overtime_applied ? 'Timesheet + OT applied' : 'Timesheet applied')
+    : 'Daily Report baseline';
+  document.getElementById('workforce-effective-summary').textContent = [
+    `Effective source: ${source === 'timesheet' ? 'reviewed KN timesheet' : 'Daily Report JSON/PDF'}`,
+    effective.peak_headcount !== undefined ? `Peak HC ${effective.peak_headcount}` : '',
+    effective.regular_man_hours !== undefined ? `Regular ${effective.regular_man_hours} MH` : '',
+    effective.overtime_man_hours !== undefined ? `OT ${effective.overtime_man_hours} MH` : '',
+    effective.total_man_hours !== undefined ? `Total ${effective.total_man_hours} MH` : '',
+  ].filter(Boolean).join(' · ');
+  ['review-total-manpower', 'review-man-hours'].forEach(id => {
+    const input = document.getElementById(id);
+    input.readOnly = source === 'timesheet';
+    input.classList.toggle('bg-light', source === 'timesheet');
+    input.title = source === 'timesheet' ? 'Locked to the reviewed timesheet/overtime calculation.' : '';
+  });
+  renderTimesheetPreview(monthlyWorkforce.timesheet?.preview || null, monthlyWorkforce.timesheet?.status || '');
+  renderOvertimePreview(monthlyWorkforce.overtime?.preview || null, monthlyWorkforce.overtime?.status || '');
+}
+
+function renderWarningBox(id, warnings) {
+  const box = document.getElementById(id);
+  const unique = Array.from(new Set(warnings || []));
+  box.textContent = unique.length ? `Review required:\n- ${unique.join('\n- ')}` : '';
+  box.classList.toggle('d-none', unique.length === 0);
+}
+
+function renderTimesheetPreview(result, status='') {
+  const rows = workforceDailyRows(result);
+  const totals = result?.manpower?.totals || result?.totals || {};
+  const summary = document.getElementById('timesheet-summary');
+  summary.textContent = result
+    ? [
+        status ? `Status: ${status}` : '',
+        result.period?.start && result.period?.end ? `${result.period.start}–${result.period.end}` : '',
+        totals.total_person_days !== undefined ? `${totals.total_person_days} person-days` : '',
+        totals.peak_headcount !== undefined ? `peak ${totals.peak_headcount}` : '',
+        totals.total_man_hours !== undefined ? `${totals.total_man_hours} regular MH` : '',
+      ].filter(Boolean).join(' · ')
+    : 'No attendance workbook reviewed.';
+  renderWarningBox('timesheet-warnings', result ? workbookWarnings(result) : []);
+  const body = document.getElementById('timesheet-daily-body');
+  body.replaceChildren();
+  rows.forEach(row => {
+    const tr = document.createElement('tr');
+    [row.date, row.direct_headcount, row.indirect_headcount, row.total_headcount, row.total_man_hours]
+      .forEach(value => { const td=document.createElement('td'); td.textContent=value ?? '-'; tr.appendChild(td); });
+    body.appendChild(tr);
+  });
+  document.getElementById('timesheet-daily-panel').classList.toggle('d-none', rows.length === 0);
+  const needsConfirmation = Boolean(result?.requires_confirmation || workbookWarnings(result).length);
+  const confirmationPanel = document.getElementById('timesheet-confirm-panel');
+  confirmationPanel.classList.toggle('d-none', !result || !needsConfirmation);
+  if (!result || !needsConfirmation || status !== 'preview') {
+    document.getElementById('timesheet-confirm-exceptions').checked = false;
+  }
+  document.getElementById('timesheet-actions').classList.toggle(
+    'd-none', !result || ['applied', 'kept'].includes(status)
+  );
+}
+
+function renderOvertimePreview(result, status='') {
+  const rows = workforceDailyRows(result);
+  const totals = result?.totals || {};
+  document.getElementById('overtime-summary').textContent = result
+    ? [
+        status ? `Status: ${status}` : '',
+        result.coverage?.covered_days !== undefined && result.coverage?.expected_days !== undefined
+          ? `coverage ${result.coverage.covered_days}/${result.coverage.expected_days} days` : '',
+        totals.participant_count !== undefined ? `${totals.participant_count} participants` : '',
+        (totals.actual_ot_man_hours ?? totals.total_man_hours) !== undefined
+          ? `${totals.actual_ot_man_hours ?? totals.total_man_hours} OT MH` : '',
+      ].filter(Boolean).join(' · ')
+    : 'No overtime workbook reviewed.';
+  renderWarningBox('overtime-warnings', result ? workbookWarnings(result) : []);
+  const body = document.getElementById('overtime-daily-body');
+  body.replaceChildren();
+  rows.forEach(row => {
+    const tr = document.createElement('tr');
+    [row.date, row.participant_count ?? row.total_headcount, row.actual_ot_man_hours ?? row.total_man_hours,
+      row.supplied === false ? 'Not supplied' : 'Supplied']
+      .forEach(value => { const td=document.createElement('td'); td.textContent=value ?? '-'; tr.appendChild(td); });
+    body.appendChild(tr);
+  });
+  document.getElementById('overtime-daily-panel').classList.toggle('d-none', rows.length === 0);
+
+  const people = Array.isArray(result?.review_people) ? result.review_people : [];
+  const mappingBody = document.getElementById('overtime-mapping-body');
+  mappingBody.replaceChildren();
+  people.forEach((person, index) => {
+    const tr = document.createElement('tr');
+    const name = document.createElement('td');
+    name.textContent = person.name || person.source_name || '(blank)';
+    const action = document.createElement('td');
+    const select = document.createElement('select');
+    select.className = 'form-select form-select-sm overtime-person-resolution';
+    select.dataset.key = person.key || person.normalized_name || String(index);
+    [['','Choose...'],['direct','Direct'],['indirect','Indirect'],['exclude','Exclude']].forEach(([value,label]) => {
+      const option=document.createElement('option'); option.value=value; option.textContent=label; select.appendChild(option);
+    });
+    select.value = person.category || person.resolution || '';
+    action.appendChild(select);
+    if (person.match_name) {
+      const hint=document.createElement('div'); hint.className='small text-muted mt-1'; hint.textContent=`Matched: ${person.match_name}`; action.appendChild(hint);
+    }
+    tr.append(name, action); mappingBody.appendChild(tr);
+  });
+  document.getElementById('overtime-mapping-panel').classList.toggle('d-none', people.length === 0);
+  const reviewRecords = Array.isArray(result?.records)
+    ? result.records.filter(record => record && record.requires_review)
+    : [];
+  const recordBody = document.getElementById('overtime-record-body');
+  recordBody.replaceChildren();
+  reviewRecords.forEach(record => {
+    const tr = document.createElement('tr');
+    const identity = document.createElement('td');
+    identity.textContent = `${record.date || '-'} / ${record.employee || '(blank)'}`;
+    const detail = document.createElement('td');
+    const interval = [record.start, record.end].filter(Boolean).join('–') || record.overtime_raw || '-';
+    const reasons = Array.isArray(record.review_reasons) ? record.review_reasons.join('; ') : '';
+    detail.textContent = [interval, record.notes || '', reasons].filter(Boolean).join(' · ');
+    const decisionCell = document.createElement('td');
+    const decision = document.createElement('select');
+    decision.className = 'form-select form-select-sm overtime-record-decision';
+    decision.dataset.recordId = record.record_id || '';
+    [['','Choose...'],['include','Include'],['exclude','Exclude']].forEach(([value,label]) => {
+      const option=document.createElement('option'); option.value=value; option.textContent=label; decision.appendChild(option);
+    });
+    decisionCell.appendChild(decision);
+    const hoursCell = document.createElement('td');
+    const hours = document.createElement('input');
+    hours.type = 'number'; hours.min = '0.01'; hours.max = '24'; hours.step = '0.25';
+    hours.className = 'form-control form-control-sm overtime-record-hours';
+    hours.dataset.recordId = record.record_id || '';
+    hours.value = record.duration_hours ?? record.suggested_duration_hours ?? '';
+    hoursCell.appendChild(hours);
+    tr.append(identity, detail, decisionCell, hoursCell);
+    recordBody.appendChild(tr);
+  });
+  document.getElementById('overtime-record-panel').classList.toggle('d-none', reviewRecords.length === 0);
+  const needsConfirmation = Boolean(result?.requires_confirmation || workbookWarnings(result).length || people.some(row => row.requires_confirmation));
+  document.getElementById('overtime-confirm-panel').classList.toggle('d-none', !result || !needsConfirmation);
+  if (!result || !needsConfirmation || status !== 'preview') {
+    document.getElementById('overtime-confirm-exceptions').checked = false;
+  }
+  document.getElementById('overtime-actions').classList.toggle(
+    'd-none', !result || ['applied', 'kept'].includes(status)
+  );
+}
+
+async function postWorkbookPreview(kind, inputId, cutoffId='') {
+  if (!monthlyDraftId || !monthlySourceValidationApplied) {
+    throw new Error('Apply Source Data Validation before uploading workforce data.');
+  }
+  const files = Array.from(document.getElementById(inputId).files || []);
+  if (!files.length) throw new Error('Choose at least one .xlsx workbook.');
+  const invalid = files.find(file => !file.name.toLowerCase().endsWith('.xlsx'));
+  if (invalid) throw new Error(`${invalid.name} is not an .xlsx workbook.`);
+  const form = new FormData();
+  files.forEach(file => form.append('files', file, file.name));
+  if (cutoffId) form.append('cutoff_date', document.getElementById(cutoffId).value || '');
+  const response = await fetch(`/monthly/workforce/${kind}/${encodeURIComponent(monthlyDraftId)}/preview`, {
+    method:'POST', body:form,
+  });
+  return responsePayload(response, `${kind} workbook could not be analyzed.`);
+}
+
+async function analyzeTimesheet() {
+  hideMonthlyAlert();
+  document.getElementById('timesheet-confirm-exceptions').checked = false;
+  setLoading('analyze-timesheet-btn', true, 'Analyzing...');
+  try {
+    const data = await postWorkbookPreview('timesheet', 'timesheet-files', 'timesheet-cutoff');
+    populateWorkforcePreservingReview(data.draft);
+    document.getElementById('timesheet-confirm-exceptions').checked = false;
+    showMonthlyAlert('Timesheet analyzed. Review the totals and warnings before applying it.', 'success');
+  } catch (error) { showMonthlyAlert(error.message, 'warning'); }
+  finally { setLoading('analyze-timesheet-btn', false); }
+}
+
+async function analyzeOvertime() {
+  hideMonthlyAlert();
+  document.getElementById('overtime-confirm-exceptions').checked = false;
+  setLoading('analyze-overtime-btn', true, 'Analyzing...');
+  try {
+    const data = await postWorkbookPreview('overtime', 'overtime-files');
+    populateWorkforcePreservingReview(data.draft);
+    document.getElementById('overtime-confirm-exceptions').checked = false;
+    showMonthlyAlert('Overtime analyzed. Confirm mappings and exceptions before applying it.', 'success');
+  } catch (error) { showMonthlyAlert(error.message, 'warning'); }
+  finally { setLoading('analyze-overtime-btn', false); }
+}
+
+function overtimeResolutionPayload() {
+  return Array.from(document.querySelectorAll('.overtime-person-resolution')).map(select => ({
+    key:select.dataset.key, category:select.value,
+  }));
+}
+
+function overtimeRecordResolutionPayload() {
+  const hourInputs = new Map(Array.from(document.querySelectorAll('.overtime-record-hours')).map(input => [input.dataset.recordId, input]));
+  return Array.from(document.querySelectorAll('.overtime-record-decision')).map(select => ({
+    record_id:select.dataset.recordId,
+    decision:select.value,
+    duration_hours:hourInputs.get(select.dataset.recordId)?.value || '',
+  }));
+}
+
+async function workforceDecision(kind, decision) {
+  if (!monthlyDraftId) return;
+  const body = {decision};
+  if (kind === 'timesheet') {
+    body.confirm_exceptions = document.getElementById('timesheet-confirm-exceptions').checked;
+  }
+  if (kind === 'overtime') {
+    body.resolutions = overtimeResolutionPayload();
+    body.record_resolutions = overtimeRecordResolutionPayload();
+    body.confirm_exceptions = document.getElementById('overtime-confirm-exceptions').checked;
+  }
+  const response = await fetch(`/monthly/workforce/${kind}/${encodeURIComponent(monthlyDraftId)}/decision`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body),
+  });
+  const data = await responsePayload(response, `${kind} decision could not be saved.`);
+  applyWorkforceDraftPreservingReview(data);
+}
+
+async function decideTimesheet(decision) {
+  try {
+    await workforceDecision('timesheet', decision);
+    showMonthlyAlert(decision === 'apply' ? 'Timesheet totals applied.' : 'Daily Report manpower kept.', 'success');
+  } catch (error) { showMonthlyAlert(error.message, 'warning'); }
+}
+
+async function decideOvertime(decision) {
+  try {
+    await workforceDecision('overtime', decision);
+    showMonthlyAlert(decision === 'apply' ? 'Confirmed overtime applied.' : 'Report kept without overtime.', 'success');
+  } catch (error) { showMonthlyAlert(error.message, 'warning'); }
+}
+
+async function resetWorkforceValidation() {
+  if (!monthlyDraftId || !confirm('Reset timesheet and overtime decisions to the Daily Report baseline?')) return;
+  try {
+    const response = await fetch(`/monthly/workforce/reset/${encodeURIComponent(monthlyDraftId)}`, {method:'POST'});
+    const data = await responsePayload(response, 'Workforce validation could not be reset.');
+    applyWorkforceDraftPreservingReview(data);
+    showMonthlyAlert('Timesheet and overtime reset to the Daily Report baseline.', 'success');
+  } catch (error) { showMonthlyAlert(error.message, 'warning'); }
+}
+
+function aiCitationRows(state) {
+  const direct = state?.suggestion?.citations;
+  if (Array.isArray(direct)) {
+    return direct.map((row, index) => ({
+      label:String(row?.label || row?.section || `Claim ${index + 1}`),
+      sourceIds:Array.isArray(row?.source_ids) ? row.source_ids.map(String) : [],
+      dates:Array.isArray(row?.dates) ? row.dates.map(String) : [],
+    })).filter(row => row.sourceIds.length || row.dates.length);
+  }
+
+  const provider = state?.provider_envelope?.suggestion;
+  if (!provider || typeof provider !== 'object') return [];
+  const rows = [];
+  const addClaim = (label, claim) => {
+    if (!claim || typeof claim !== 'object') return;
+    const sourceIds = Array.isArray(claim.source_ids) ? claim.source_ids.map(String) : [];
+    const dates = Array.isArray(claim.dates) ? claim.dates.map(String) : [];
+    if (sourceIds.length || dates.length) rows.push({label, sourceIds, dates});
+  };
+  [
+    ['Executive summary', provider.executive_summary],
+    ['Engineering', provider.engineering_summary],
+    ['Procurement', provider.procurement_summary],
+    ['Site summary', provider.site_summary],
+  ].forEach(([label, claim]) => addClaim(label, claim));
+  (Array.isArray(provider.concern_actions) ? provider.concern_actions : [])
+    .forEach((claim, index) => addClaim(`Concern / action ${index + 1}`, claim));
+  (Array.isArray(provider.lookahead) ? provider.lookahead : [])
+    .forEach((claim, index) => addClaim(`Look-ahead ${index + 1}`, claim));
+  (Array.isArray(provider.claims) ? provider.claims : [])
+    .forEach((claim, index) => addClaim(`Supporting claim ${index + 1}`, claim));
+  return rows;
+}
+
+function renderAiEvidence(state) {
+  const citations = aiCitationRows(state);
+  const missingData = Array.isArray(state?.suggestion?.missing_data)
+    ? state.suggestion.missing_data.map(String)
+    : (Array.isArray(state?.provider_envelope?.suggestion?.missing_data)
+        ? state.provider_envelope.suggestion.missing_data.map(String)
+        : []);
+  const panel = document.getElementById('ai-evidence-panel');
+  const citationList = document.getElementById('ai-citations-list');
+  const missingPanel = document.getElementById('ai-missing-data-panel');
+  const missingList = document.getElementById('ai-missing-data-list');
+  citationList.replaceChildren();
+  missingList.replaceChildren();
+  citations.forEach(row => {
+    const item = document.createElement('li');
+    const sources = row.sourceIds.length ? row.sourceIds.join(', ') : 'none';
+    const dates = row.dates.length ? row.dates.join(', ') : 'none';
+    item.textContent = `${row.label} — source IDs: ${sources}; dates: ${dates}`;
+    citationList.appendChild(item);
+  });
+  missingData.forEach(value => {
+    const item = document.createElement('li');
+    item.textContent = value;
+    missingList.appendChild(item);
+  });
+  citationList.classList.toggle('d-none', citations.length === 0);
+  missingPanel.classList.toggle('d-none', missingData.length === 0);
+  panel.classList.toggle('d-none', citations.length === 0 && missingData.length === 0);
+}
+
+function populateAiSummaryReview(draft) {
+  const state = draft.ai_summary || {};
+  monthlyAiSuggestion = state.suggestion || null;
+  const card = document.getElementById('ai-summary-card');
+  card.classList.toggle('d-none', !monthlySourceValidationApplied);
+  const status = document.getElementById('ai-summary-status');
+  const review = document.getElementById('ai-summary-review');
+  status.textContent = state.status ? `AI summary status: ${state.status}` : '';
+  status.classList.toggle('d-none', !state.status);
+  review.classList.toggle('d-none', !monthlyAiSuggestion || state.status !== 'suggested');
+  renderAiEvidence(state);
+  if (!monthlyAiSuggestion) return;
+  document.getElementById('ai-executive-summary').value = monthlyAiSuggestion.executive_summary || '';
+  document.getElementById('ai-engineering-summary').value = monthlyAiSuggestion.engineering_summary || '';
+  document.getElementById('ai-procurement-summary').value = monthlyAiSuggestion.procurement_summary || '';
+  document.getElementById('ai-site-summary').value = monthlyAiSuggestion.site_summary || '';
+  const concerns = Array.isArray(monthlyAiSuggestion.concerns) ? monthlyAiSuggestion.concerns : [];
+  document.getElementById('ai-concerns-summary').value = concerns.map(item =>
+    typeof item === 'string' ? item : `${item.concern || ''} | ${item.corrective_action || item.action || ''}`
+  ).join('\n');
+  const lookahead = Array.isArray(monthlyAiSuggestion.lookahead) ? monthlyAiSuggestion.lookahead : [monthlyAiSuggestion.lookahead];
+  document.getElementById('ai-lookahead-summary').value = lookahead.filter(Boolean).join('\n');
+}
+
+async function generateAiSummary() {
+  if (!monthlyDraftId || !monthlySourceValidationApplied) {
+    showMonthlyAlert('Apply Source Data Validation before generating AI suggestions.', 'warning'); return;
+  }
+  setLoading('generate-ai-summary-btn', true, 'Generating...');
+  try {
+    const response = await fetch(`/monthly/ai-summary/${encodeURIComponent(monthlyDraftId)}`, {method:'POST'});
+    const data = await responsePayload(response, 'AI summary could not be generated.');
+    applyAiDraftPreservingReview(data);
+    showMonthlyAlert('AI narrative suggestions are ready. Review and edit them before accepting.', 'success');
+  } catch (error) { showMonthlyAlert(error.message, 'warning'); }
+  finally { setLoading('generate-ai-summary-btn', false); }
+}
+
+function collectAiSuggestionReview() {
+  const concerns = document.getElementById('ai-concerns-summary').value.split('\n').map(line => {
+    const [concern, ...action] = line.split('|');
+    return {concern:concern.trim(), corrective_action:action.join('|').trim()};
+  }).filter(item => item.concern || item.corrective_action);
+  return {
+    executive_summary:document.getElementById('ai-executive-summary').value.trim(),
+    engineering_summary:document.getElementById('ai-engineering-summary').value.trim(),
+    procurement_summary:document.getElementById('ai-procurement-summary').value.trim(),
+    site_summary:document.getElementById('ai-site-summary').value.trim(),
+    concerns,
+    lookahead:document.getElementById('ai-lookahead-summary').value.split('\n').map(value => value.trim()).filter(Boolean),
+  };
+}
+
+async function decideAiSummary(decision) {
+  if (!monthlyDraftId) return;
+  try {
+    const response = await fetch(`/monthly/ai-summary/${encodeURIComponent(monthlyDraftId)}/decision`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({decision, suggestion:decision === 'accept' ? collectAiSuggestionReview() : {}}),
+    });
+    const data = await responsePayload(response, 'AI summary decision could not be saved.');
+    applyAiDraftPreservingReview(data, {preserveNarratives:decision !== 'accept'});
+    showMonthlyAlert(decision === 'accept' ? 'AI suggestions applied for final manual review.' : 'AI suggestions rejected.', 'success');
+  } catch (error) { showMonthlyAlert(error.message, 'warning'); }
 }
 
 function updatePhotoReviewCard() {
@@ -1642,6 +2314,13 @@ function numberOrZero(id) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function numberOrNull(id) {
+  const raw = document.getElementById(id).value.trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
 function collectMonthlyReview() {
   const progress = Array.from(document.querySelectorAll('#review-progress-table tbody tr')).map(tr => {
     const values = Array.from(tr.querySelectorAll('input')).map(input => input.value.trim());
@@ -1663,9 +2342,9 @@ function collectMonthlyReview() {
     executive_summary:document.getElementById('review-executive-summary').value.trim(),
     progress:{rows:progress},
     safety:{
-      total_manpower:numberOrZero('review-total-manpower'), total_man_hours:numberOrZero('review-man-hours'),
-      recordable_cases:numberOrZero('review-recordable'), lost_workdays:numberOrZero('review-lost-days'),
-      lost_time_injuries:numberOrZero('review-lti'),
+      total_manpower:numberOrNull('review-total-manpower'), total_man_hours:numberOrNull('review-man-hours'),
+      recordable_cases:numberOrNull('review-recordable'), lost_workdays:numberOrNull('review-lost-days'),
+      lost_time_injuries:numberOrNull('review-lti'),
     },
     engineering:{summary:document.getElementById('review-engineering').value.trim()},
     procurement:{summary:document.getElementById('review-procurement').value.trim()},

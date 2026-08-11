@@ -8,14 +8,17 @@ import re
 import shutil
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from flask import jsonify, request, send_file, session, url_for
 
 from .aggregate import aggregate_monthly_records
+from .ai_summary import AISummaryError, generate_ai_summary
 from .importer import DEFAULT_LIMITS, PDFImportError, import_daily_report_pdf
+from .overtime import parse_overtime_workbooks
 from .photos import (
     DEFAULT_PHOTO_LIMITS,
     attach_canonical_photo_candidates,
@@ -27,10 +30,20 @@ from .photos import (
 )
 from .renderer import render_monthly_report
 from .storage import list_canonical_records
+from .timesheet import TimesheetError, compile_timesheets
 from .validation import (
     build_source_validation,
     resolve_duplicate_records,
     resolve_project_records,
+)
+from .workforce import (
+    decide_overtime,
+    decide_timesheet,
+    ensure_workforce_state,
+    has_pending_workforce_review,
+    reset_workforce,
+    set_overtime_preview,
+    set_timesheet_preview,
 )
 
 
@@ -46,6 +59,13 @@ _MAX_REVIEW_TEXT = 30_000
 _REPORT_TYPES = {"monthly", "weekly"}
 _MAX_PHOTO_REVIEW_BYTES = 128 * 1024
 _STORED_PHOTO_WARNING_PREFIX = "Stored JSON photo:"
+_MAX_WORKBOOK_FILES = 6
+_MAX_WORKBOOK_FILE_BYTES = 16 * 1024 * 1024
+_MAX_WORKBOOK_REQUEST_BYTES = 48 * 1024 * 1024
+_AI_COOLDOWN_SECONDS = 20
+_AI_DRAFT_LOCK_STALE_SECONDS = 5 * 60
+_AI_DRAFT_LOCK_RETRY_SECONDS = 5
+_MAKASSAR_TIMEZONE = ZoneInfo("Asia/Makassar")
 
 
 def _report_type(value: Any) -> str:
@@ -101,6 +121,134 @@ def _monthly_user_dir(data_dir: str | Path, username: str) -> Path:
     (directory / "reports").mkdir(parents=True, exist_ok=True)
     (directory / "drafts").mkdir(parents=True, exist_ok=True)
     return directory
+
+
+def _makassar_issue_date(now: datetime | None = None) -> str:
+    """Return the report issue date in the project's local timezone."""
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current.astimezone(_MAKASSAR_TIMEZONE).date().isoformat()
+
+
+def _ai_draft_lock_path(data_dir: str | Path, username: str, draft_id: str) -> Path:
+    if not _DRAFT_ID_RE.fullmatch(str(draft_id or "")):
+        raise ValueError("Invalid report draft ID")
+    return _monthly_user_dir(data_dir, username) / "drafts" / f".{draft_id}.ai.lock"
+
+
+def _acquire_ai_draft_lock(
+    data_dir: str | Path,
+    username: str,
+    draft_id: str,
+) -> tuple[Path, str] | None:
+    """Atomically acquire one paid-AI operation lock for a report draft."""
+
+    lock_path = _ai_draft_lock_path(data_dir, username, draft_id)
+    for attempt in range(2):
+        token = uuid.uuid4().hex
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)
+        try:
+            descriptor = os.open(lock_path, flags, 0o600)
+        except FileExistsError:
+            try:
+                stale = lock_path.stat().st_mtime < (
+                    time.time() - _AI_DRAFT_LOCK_STALE_SECONDS
+                )
+            except FileNotFoundError:
+                continue
+            except OSError:
+                stale = False
+            if attempt == 0 and stale:
+                try:
+                    lock_path.unlink()
+                    continue
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    pass
+            return None
+        payload = json.dumps(
+            {
+                "token": token,
+                "draft_id": draft_id,
+                "username": username,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "pid": os.getpid(),
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+        except Exception:
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+            raise
+        return lock_path, token
+    return None
+
+
+def _release_ai_draft_lock(lock: tuple[Path, str] | None) -> None:
+    """Release only the lock created by this request."""
+
+    if lock is None:
+        return
+    lock_path, token = lock
+    try:
+        with lock_path.open(encoding="utf-8") as handle:
+            value = json.load(handle)
+        if not isinstance(value, dict) or value.get("token") != token:
+            return
+        lock_path.unlink()
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return
+
+
+def _ai_cooldown_remaining(draft: dict[str, Any], now: datetime | None = None) -> int:
+    """Return whole retry seconds for a persisted per-draft AI cooldown."""
+
+    control = draft.get("ai_request_control")
+    control = control if isinstance(control, dict) else {}
+    timestamp = str(control.get("last_started_at") or "")
+    if not timestamp:
+        previous = draft.get("ai_summary")
+        previous = previous if isinstance(previous, dict) else {}
+        timestamp = str(previous.get("requested_at") or "")
+    if not timestamp:
+        return 0
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if parsed.tzinfo is None:
+        # Legacy drafts stored server-local naive timestamps. Compare them
+        # with the current server-local clock to preserve their short cooldown.
+        elapsed = (datetime.now() - parsed).total_seconds()
+    else:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        elapsed = (current.astimezone(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+    remaining = _AI_COOLDOWN_SECONDS - elapsed
+    if remaining <= 0:
+        return 0
+    return max(1, int(remaining) + (0 if remaining.is_integer() else 1))
+
+
+def _ai_retry_response(message: str, *, code: str, status: int, retry_after: int):
+    response = jsonify({
+        "error": message,
+        "code": code,
+        "retryable": True,
+        "retry_after_seconds": max(1, int(retry_after)),
+    })
+    response.status_code = status
+    response.headers["Retry-After"] = str(max(1, int(retry_after)))
+    return response
 
 
 def _draft_photo_dir(
@@ -436,6 +584,31 @@ def _number(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _optional_number(value: Any) -> float | None:
+    """Return a finite numeric value without turning missing data into zero."""
+
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = float(text.replace("%", "").replace(",", ""))
+    except ValueError:
+        return None
+    if parsed != parsed or parsed in (float("inf"), float("-inf")):
+        return None
+    return parsed
+
+
+def _optional_non_negative(value: Any, *, integer: bool = False) -> int | float | None:
+    parsed = _optional_number(value)
+    if parsed is None:
+        return None
+    parsed = max(0.0, parsed)
+    return int(parsed) if integer else parsed
+
+
 def _clean_text(value: Any, maximum: int = _MAX_REVIEW_TEXT) -> str:
     return str(value or "").replace("\x00", "").strip()[:maximum]
 
@@ -535,7 +708,9 @@ def _prepare_draft(
     draft["project_name"] = project_title
     draft["vendor_project_no"] = project_no
     draft["reporting_period"] = f"{date_from} to {date_to}"
-    draft["issued_date"] = date_to
+    # The issue date is the date the periodic draft was compiled, not the
+    # Daily Report cutoff date. It can still be reviewed before final issue.
+    draft["issued_date"] = _makassar_issue_date()
     draft["company_name"] = context.get("company_name", "PT. GARUDA PRIMA AKSARA")
     draft["customer"] = context.get("customer", "PT. KERTAS NUSANTARA")
     draft["location"] = context.get("location", "")
@@ -592,9 +767,14 @@ def _prepare_draft(
     draft.setdefault("safety", {
         "total_manpower": manpower_totals.get("peak_headcount", 0),
         "total_man_hours": manpower_totals.get("total_man_hours", 0),
-        "recordable_cases": 0,
-        "lost_workdays": 0,
-        "lost_time_injuries": 0,
+        # Absence of an incident field in a Daily Report is not evidence of
+        # zero incidents. Keep these values explicitly unsupplied until a
+        # reviewer enters verified HSE data.
+        "recordable_cases": None,
+        "lost_workdays": None,
+        "lost_time_injuries": None,
+        "severity_rate": None,
+        "average_day_away": None,
     })
     draft.setdefault("engineering", {"summary": f"Manual {kind} input required."})
     draft.setdefault("procurement", {"summary": f"Manual {kind} input required."})
@@ -1010,6 +1190,11 @@ def _apply_review(draft: dict[str, Any], review: dict[str, Any]) -> dict[str, An
                 raise ValueError("Duplicate source choices changed. Apply Source Data Validation again.")
             stored_validation["notes"] = incoming_validation["notes"]
         value["source_validation"] = stored_validation
+    if has_pending_workforce_review(value):
+        raise ValueError("Apply or keep every timesheet/overtime preview before Preview or Generate.")
+    ai_summary = value.get("ai_summary")
+    if isinstance(ai_summary, dict) and ai_summary.get("status") == "suggested":
+        raise ValueError("Accept or reject the pending AI narrative suggestions before Preview or Generate.")
     value["report_type"] = kind
     value["report_title"] = f"{_report_name(kind)} Progress Report"
     value["report_mode"] = mode
@@ -1020,18 +1205,47 @@ def _apply_review(draft: dict[str, Any], review: dict[str, Any]) -> dict[str, An
     current_safety = value.get("safety") if isinstance(value.get("safety"), dict) else {}
     safety_review = review.get("safety") if isinstance(review.get("safety"), dict) else {}
     safety = {
-        "total_manpower": max(0, int(_number(safety_review.get("total_manpower", current_safety.get("total_manpower"))))),
-        "total_man_hours": max(0.0, _number(safety_review.get("total_man_hours", current_safety.get("total_man_hours")))),
-        "recordable_cases": max(0, int(_number(safety_review.get("recordable_cases", current_safety.get("recordable_cases"))))),
-        "lost_workdays": max(0, int(_number(safety_review.get("lost_workdays", current_safety.get("lost_workdays"))))),
-        "lost_time_injuries": max(0, int(_number(safety_review.get("lost_time_injuries", current_safety.get("lost_time_injuries"))))),
+        "total_manpower": _optional_non_negative(
+            safety_review.get("total_manpower", current_safety.get("total_manpower")),
+            integer=True,
+        ),
+        "total_man_hours": _optional_non_negative(
+            safety_review.get("total_man_hours", current_safety.get("total_man_hours")),
+        ),
+        "recordable_cases": _optional_non_negative(
+            safety_review.get("recordable_cases", current_safety.get("recordable_cases")),
+            integer=True,
+        ),
+        "lost_workdays": _optional_non_negative(
+            safety_review.get("lost_workdays", current_safety.get("lost_workdays")),
+            integer=True,
+        ),
+        "lost_time_injuries": _optional_non_negative(
+            safety_review.get("lost_time_injuries", current_safety.get("lost_time_injuries")),
+            integer=True,
+        ),
     }
-    safety["severity_rate"] = round(
-        safety["lost_workdays"] * 1_000_000 / safety["total_man_hours"], 2
-    ) if safety["total_man_hours"] else 0
-    safety["average_day_away"] = round(
-        safety["lost_workdays"] / safety["lost_time_injuries"], 2
-    ) if safety["lost_time_injuries"] else 0
+    workforce = value.get("workforce_validation")
+    effective = workforce.get("effective") if isinstance(workforce, dict) and isinstance(workforce.get("effective"), dict) else {}
+    if effective.get("source") == "timesheet":
+        # Reviewed workbook facts are deterministic and cannot be changed by
+        # an editable text/number field or by an AI suggestion.  Apply these
+        # values before calculating rates so the denominator stays coherent.
+        safety["total_manpower"] = int(_number(effective.get("peak_headcount")))
+        safety["total_man_hours"] = max(0.0, _number(effective.get("total_man_hours")))
+    lost_days = safety["lost_workdays"]
+    man_hours = safety["total_man_hours"]
+    injuries = safety["lost_time_injuries"]
+    safety["severity_rate"] = (
+        round(float(lost_days) * 1_000_000 / float(man_hours), 2)
+        if lost_days is not None and man_hours not in (None, 0)
+        else None
+    )
+    safety["average_day_away"] = (
+        round(float(lost_days) / float(injuries), 2)
+        if lost_days is not None and injuries not in (None, 0)
+        else None
+    )
     value["safety"] = safety
 
     for key in ("engineering", "procurement"):
@@ -1106,6 +1320,290 @@ def _monthly_filename(draft: dict[str, Any], revision: int) -> str:
 def _draft_report_type(draft: dict[str, Any]) -> str:
     """Read new report types while treating every legacy draft as monthly."""
     return _report_type(draft.get("report_type") or "monthly")
+
+
+def _require_applied_source_validation(draft: dict[str, Any]) -> None:
+    validation = draft.get("source_validation")
+    if not isinstance(validation, dict) or not validation.get("applied") or not validation.get("confirmed"):
+        raise ValueError("Apply Source Data Validation before reviewing workforce data or AI suggestions.")
+
+
+def _workbook_uploads() -> list[tuple[str, bytes]]:
+    if request.content_length is not None and request.content_length > _MAX_WORKBOOK_REQUEST_BYTES:
+        raise ValueError("The workbook upload request exceeds 48 MB.")
+    files = request.files.getlist("files")
+    if not files:
+        raise ValueError("Choose at least one .xlsx workbook.")
+    if len(files) > _MAX_WORKBOOK_FILES:
+        raise ValueError(f"Choose no more than {_MAX_WORKBOOK_FILES} workbooks at once.")
+    result: list[tuple[str, bytes]] = []
+    total = 0
+    for upload in files:
+        filename = os.path.basename(str(upload.filename or ""))
+        if not filename.lower().endswith(".xlsx"):
+            raise ValueError(f"{filename or 'Upload'} is not an .xlsx workbook.")
+        payload = upload.stream.read(_MAX_WORKBOOK_FILE_BYTES + 1)
+        if len(payload) > _MAX_WORKBOOK_FILE_BYTES:
+            raise ValueError(f"{filename} exceeds the 16 MB workbook limit.")
+        if not payload:
+            raise ValueError(f"{filename} is empty.")
+        total += len(payload)
+        if total > _MAX_WORKBOOK_REQUEST_BYTES:
+            raise ValueError("The combined workbook upload exceeds 48 MB.")
+        result.append((filename, payload))
+    return result
+
+
+def _ai_admin_only() -> bool:
+    return str(os.environ.get("ANTHROPIC_AI_ADMIN_ONLY", "true")).strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+
+def _claim_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return _clean_text(value.get("text"), 4_000)
+    return _clean_text(value, 4_000)
+
+
+def _clean_ai_references(value: Any) -> dict[str, list[str]]:
+    row = value if isinstance(value, dict) else {}
+    source_ids = []
+    for item in row.get("source_ids", [])[:40] if isinstance(row.get("source_ids"), list) else []:
+        text = _clean_text(item, 300)
+        if text and text not in source_ids:
+            source_ids.append(text)
+    dates = []
+    for item in row.get("dates", [])[:40] if isinstance(row.get("dates"), list) else []:
+        text = _clean_text(item, 10)
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) and text not in dates:
+            dates.append(text)
+    return {"source_ids": source_ids, "dates": dates}
+
+
+def _clean_ai_missing_data(value: Any) -> list[str]:
+    rows = value if isinstance(value, list) else []
+    result = []
+    for row in rows[:75]:
+        text = _clean_text(row, 500)
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _clean_ai_citation_evidence(value: Any) -> dict[str, Any]:
+    evidence = value if isinstance(value, dict) else {}
+    result = {
+        key: _clean_ai_references(evidence.get(key))
+        for key in (
+            "executive_summary",
+            "engineering_summary",
+            "procurement_summary",
+            "site_summary",
+        )
+    }
+    for key in ("concern_actions", "lookahead", "claims"):
+        rows = evidence.get(key) if isinstance(evidence.get(key), list) else []
+        result[key] = [_clean_ai_references(row) for row in rows[:75]]
+    return result
+
+
+def _clean_ai_review(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("AI suggestion review must be an object.")
+    concerns = []
+    for row in value.get("concerns", [])[:100] if isinstance(value.get("concerns"), list) else []:
+        if not isinstance(row, dict):
+            continue
+        concern = _clean_text(row.get("concern"), 2_000)
+        action = _clean_text(row.get("corrective_action"), 2_000)
+        if concern or action:
+            concerns.append({"concern": concern, "corrective_action": action})
+    lookahead = [
+        _clean_text(row, 2_000)
+        for row in (value.get("lookahead", [])[:250] if isinstance(value.get("lookahead"), list) else [])
+        if _clean_text(row, 2_000)
+    ]
+    return {
+        "executive_summary": _clean_text(value.get("executive_summary"), 4_000),
+        "engineering_summary": _clean_text(value.get("engineering_summary"), 4_000),
+        "procurement_summary": _clean_text(value.get("procurement_summary"), 4_000),
+        "site_summary": _clean_text(value.get("site_summary"), 4_000),
+        "concerns": concerns,
+        "lookahead": lookahead,
+    }
+
+
+def _audit_source_manifest(value: Any) -> list[dict[str, Any]]:
+    """Keep content hashes needed for an audit without retaining upload names."""
+
+    rows = value if isinstance(value, list) else []
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item = {
+            key: copy.deepcopy(row.get(key))
+            for key in ("source_id", "sha256", "size_bytes", "status")
+            if row.get(key) not in (None, "")
+        }
+        if item:
+            result.append(item)
+    return result
+
+
+def _workforce_issue_audit(value: Any) -> dict[str, Any] | None:
+    """Remove employee-level workbook data from an issued report JSON.
+
+    Full previews remain in the owner's editable draft.  The issued artifact
+    needs only reproducible source hashes, deterministic totals, decisions,
+    and reviewer metadata; names, per-day attendance statuses, raw overtime
+    rows, and workbook filenames are not report content.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, Any] = {
+        "version": value.get("version"),
+        "privacy_compacted": True,
+        "effective": copy.deepcopy(value.get("effective", {})),
+    }
+
+    timesheet = value.get("timesheet") if isinstance(value.get("timesheet"), dict) else {}
+    timesheet_preview = (
+        timesheet.get("preview") if isinstance(timesheet.get("preview"), dict) else {}
+    )
+    timesheet_audit = {
+        key: copy.deepcopy(timesheet.get(key))
+        for key in (
+            "status", "reviewed_by", "reviewed_at", "decided_by", "decided_at",
+            "confirmed_exceptions",
+        )
+        if timesheet.get(key) not in (None, "")
+    }
+    timesheet_audit.update({
+        "formula_version": timesheet_preview.get("formula_version"),
+        "hours_per_present_day": timesheet_preview.get("hours_per_present_day"),
+        "period": copy.deepcopy(timesheet_preview.get("period", {})),
+        "coverage": copy.deepcopy(timesheet_preview.get("coverage", {})),
+        "totals": copy.deepcopy(timesheet_preview.get("totals", {})),
+        "source_manifest": _audit_source_manifest(timesheet_preview.get("source_manifest")),
+        "warning_count": len(timesheet_preview.get("warnings", []))
+        if isinstance(timesheet_preview.get("warnings"), list) else 0,
+        "unresolved_count": len(timesheet_preview.get("unresolved", []))
+        if isinstance(timesheet_preview.get("unresolved"), list) else 0,
+    })
+    result["timesheet"] = timesheet_audit
+
+    overtime = value.get("overtime") if isinstance(value.get("overtime"), dict) else {}
+    overtime_preview = (
+        overtime.get("preview") if isinstance(overtime.get("preview"), dict) else {}
+    )
+    overtime_manifest = (
+        overtime_preview.get("manifest")
+        if isinstance(overtime_preview.get("manifest"), dict)
+        else {}
+    )
+    resolution_rows = []
+    resolutions = overtime.get("resolutions") if isinstance(overtime.get("resolutions"), dict) else {}
+    for employee_key, decision in sorted(resolutions.items()):
+        resolution_rows.append({
+            "employee_hash": hashlib.sha256(str(employee_key).encode("utf-8")).hexdigest(),
+            "decision": str(decision),
+        })
+    accepted_ids = sorted({
+        str(row.get("record_id"))
+        for row in overtime.get("accepted_records", [])
+        if isinstance(row, dict) and row.get("record_id")
+    }) if isinstance(overtime.get("accepted_records"), list) else []
+    record_resolution_rows = []
+    record_resolutions = (
+        overtime.get("record_resolutions")
+        if isinstance(overtime.get("record_resolutions"), dict)
+        else {}
+    )
+    for record_id, decision in sorted(record_resolutions.items()):
+        if not isinstance(decision, dict):
+            continue
+        record_resolution_rows.append({
+            "record_id": str(record_id),
+            "decision": str(decision.get("decision") or ""),
+            "duration_hours": decision.get("duration_hours"),
+        })
+    overtime_audit = {
+        key: copy.deepcopy(overtime.get(key))
+        for key in (
+            "status", "reviewed_by", "reviewed_at", "decided_by", "decided_at",
+            "confirmed_exceptions",
+        )
+        if overtime.get(key) not in (None, "")
+    }
+    overtime_audit.update({
+        "formula_version": overtime_preview.get("formula_version"),
+        "calculation_policy": copy.deepcopy(overtime_preview.get("calculation_policy", {})),
+        "period": copy.deepcopy(overtime_preview.get("period", {})),
+        "coverage": copy.deepcopy(overtime_preview.get("coverage", {})),
+        "totals": copy.deepcopy(overtime_preview.get("totals", {})),
+        "source_manifest": _audit_source_manifest(overtime_manifest.get("files")),
+        "warning_count": len(overtime_preview.get("warnings", []))
+        if isinstance(overtime_preview.get("warnings"), list) else 0,
+        "conflict_count": len(overtime_preview.get("conflicts", []))
+        if isinstance(overtime_preview.get("conflicts"), list) else 0,
+        "resolutions": resolution_rows,
+        "record_resolutions": record_resolution_rows,
+        "accepted_record_ids": accepted_ids,
+    })
+    result["overtime"] = overtime_audit
+    return result
+
+
+def _ai_issue_audit(value: Any) -> dict[str, Any] | None:
+    """Keep provider accounting metadata but not the raw suggestion envelope."""
+
+    if not isinstance(value, dict):
+        return None
+    envelope = value.get("provider_envelope") if isinstance(value.get("provider_envelope"), dict) else {}
+    result = {
+        key: copy.deepcopy(value.get(key))
+        for key in ("status", "requested_at", "requested_by", "decided_at", "decided_by")
+        if value.get(key) not in (None, "")
+    }
+    result.update({
+        key: copy.deepcopy(envelope.get(key))
+        for key in (
+            "version", "prompt", "prompt_version", "model", "input_hash",
+            "generated_at", "usage", "request_id",
+        )
+        if envelope.get(key) not in (None, "")
+    })
+    suggestion = value.get("suggestion") if isinstance(value.get("suggestion"), dict) else {}
+    evidence = suggestion.get("citation_evidence")
+    if isinstance(evidence, dict):
+        result["citation_evidence"] = _clean_ai_citation_evidence(evidence)
+    missing_data = _clean_ai_missing_data(suggestion.get("missing_data"))
+    if missing_data:
+        result["missing_data"] = missing_data
+    result["privacy_compacted"] = True
+    return result
+
+
+def _issued_report_copy(report: dict[str, Any]) -> dict[str, Any]:
+    """Create the persistent report artifact without draft-only sensitive data."""
+
+    value = copy.deepcopy(report)
+    value.pop("_source_records", None)
+    value.pop("ai_request_control", None)
+    workforce = _workforce_issue_audit(value.get("workforce_validation"))
+    if workforce is None:
+        value.pop("workforce_validation", None)
+    else:
+        value["workforce_validation"] = workforce
+    ai_audit = _ai_issue_audit(value.get("ai_summary"))
+    if ai_audit is None:
+        value.pop("ai_summary", None)
+    else:
+        value["ai_summary"] = ai_audit
+    return value
 
 
 def _render(
@@ -2116,6 +2614,340 @@ def register_monthly_routes(
             app.logger.exception("Source validation failed for report draft %s", draft_id)
             return jsonify({"error": "Source validation failed. Retry or check the server logs."}), 500
 
+    @app.post("/monthly/workforce/timesheet/<draft_id>/preview")
+    def preview_monthly_timesheet(draft_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        username = session["username"]
+        draft = _load_draft(data_dir, username, draft_id)
+        if draft is None:
+            return jsonify({"error": "Report draft not found."}), 404
+        try:
+            _require_applied_source_validation(draft)
+            period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
+            preview = compile_timesheets(
+                _workbook_uploads(),
+                start_date=period.get("start"),
+                end_date=period.get("end"),
+                cutoff_date=request.form.get("cutoff_date") or None,
+            )
+            set_timesheet_preview(draft, preview, actor=username)
+            draft.pop("ai_summary", None)
+            _update_draft(data_dir, username, draft)
+            if activity_logger:
+                activity_logger(username, "periodic_timesheet_reviewed", f"draft={draft_id}")
+            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+        except (TimesheetError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception:
+            app.logger.exception("Timesheet preview failed for draft %s", draft_id)
+            return jsonify({"error": "Timesheet could not be analyzed. Check the workbook format."}), 500
+
+    @app.post("/monthly/workforce/timesheet/<draft_id>/decision")
+    def decide_monthly_timesheet(draft_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        username = session["username"]
+        draft = _load_draft(data_dir, username, draft_id)
+        if draft is None:
+            return jsonify({"error": "Report draft not found."}), 404
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify({"error": "Invalid timesheet decision."}), 400
+        try:
+            _require_applied_source_validation(draft)
+            decide_timesheet(
+                draft,
+                str(body.get("decision") or ""),
+                confirm_exceptions=bool(body.get("confirm_exceptions")),
+                actor=username,
+            )
+            draft.pop("ai_summary", None)
+            _update_draft(data_dir, username, draft)
+            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.post("/monthly/workforce/overtime/<draft_id>/preview")
+    def preview_monthly_overtime(draft_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        username = session["username"]
+        draft = _load_draft(data_dir, username, draft_id)
+        if draft is None:
+            return jsonify({"error": "Report draft not found."}), 404
+        try:
+            _require_applied_source_validation(draft)
+            period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
+            preview = parse_overtime_workbooks(
+                _workbook_uploads(),
+                period_start=period.get("start"),
+                period_end=period.get("end"),
+            )
+            set_overtime_preview(draft, preview, actor=username)
+            draft.pop("ai_summary", None)
+            _update_draft(data_dir, username, draft)
+            if activity_logger:
+                activity_logger(username, "periodic_overtime_reviewed", f"draft={draft_id}")
+            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception:
+            app.logger.exception("Overtime preview failed for draft %s", draft_id)
+            return jsonify({"error": "Overtime workbook could not be analyzed."}), 500
+
+    @app.post("/monthly/workforce/overtime/<draft_id>/decision")
+    def decide_monthly_overtime(draft_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        username = session["username"]
+        draft = _load_draft(data_dir, username, draft_id)
+        if draft is None:
+            return jsonify({"error": "Report draft not found."}), 404
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify({"error": "Invalid overtime decision."}), 400
+        try:
+            _require_applied_source_validation(draft)
+            decide_overtime(
+                draft,
+                str(body.get("decision") or ""),
+                resolutions=body.get("resolutions"),
+                record_resolutions=body.get("record_resolutions"),
+                confirm_exceptions=bool(body.get("confirm_exceptions")),
+                actor=username,
+            )
+            draft.pop("ai_summary", None)
+            _update_draft(data_dir, username, draft)
+            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.post("/monthly/workforce/reset/<draft_id>")
+    def reset_monthly_workforce(draft_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        username = session["username"]
+        draft = _load_draft(data_dir, username, draft_id)
+        if draft is None:
+            return jsonify({"error": "Report draft not found."}), 404
+        reset_workforce(draft)
+        draft.pop("ai_summary", None)
+        _update_draft(data_dir, username, draft)
+        return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+
+    @app.post("/monthly/ai-summary/<draft_id>")
+    def generate_monthly_ai_summary(draft_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        if _ai_admin_only() and not bool(session.get("is_admin")):
+            return jsonify({"error": "Only an administrator may use the paid AI summary service."}), 403
+        username = session["username"]
+        draft = _load_draft(data_dir, username, draft_id)
+        if draft is None:
+            return jsonify({"error": "Report draft not found."}), 404
+        ai_lock: tuple[Path, str] | None = None
+        try:
+            _require_applied_source_validation(draft)
+            if has_pending_workforce_review(draft):
+                raise ValueError("Apply or keep every timesheet/overtime preview before generating AI suggestions.")
+            ai_lock = _acquire_ai_draft_lock(data_dir, username, draft_id)
+            if ai_lock is None:
+                return _ai_retry_response(
+                    "AI summary generation is already running for this report draft.",
+                    code="ai_generation_in_progress",
+                    status=409,
+                    retry_after=_AI_DRAFT_LOCK_RETRY_SECONDS,
+                )
+
+            # Reload after taking the cross-process lock. Another request may
+            # have updated validation or workforce decisions while this
+            # request was waiting to acquire it.
+            draft = _load_draft(data_dir, username, draft_id)
+            if draft is None:
+                return jsonify({"error": "Report draft not found."}), 404
+            _require_applied_source_validation(draft)
+            if has_pending_workforce_review(draft):
+                raise ValueError("Apply or keep every timesheet/overtime preview before generating AI suggestions.")
+
+            remaining = _ai_cooldown_remaining(draft)
+            if remaining:
+                return _ai_retry_response(
+                    f"Wait {remaining} seconds before retrying AI for this report draft.",
+                    code="ai_cooldown_active",
+                    status=429,
+                    retry_after=remaining,
+                )
+
+            # Persist the cooldown before the billable provider request. This
+            # prevents rapid retries after timeouts/provider failures and also
+            # closes the race between multiple Railway workers.
+            started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            draft["ai_request_control"] = {
+                "version": "periodic-ai-request-control/1",
+                "last_started_at": started_at,
+                "last_started_by": username,
+                "attempt_id": uuid.uuid4().hex,
+            }
+            _update_draft(data_dir, username, draft)
+            envelope = generate_ai_summary(draft)
+            raw = envelope.get("suggestion") if isinstance(envelope.get("suggestion"), dict) else {}
+            concerns = []
+            concern_evidence = []
+            concern_actions = (
+                raw.get("concern_actions")
+                if isinstance(raw.get("concern_actions"), list)
+                else []
+            )
+            for row in concern_actions[:75]:
+                if not isinstance(row, dict):
+                    continue
+                concern = _clean_text(row.get("concern"), 2_000)
+                action = _clean_text(row.get("corrective_action"), 2_000)
+                if concern or action:
+                    references = _clean_ai_references(row)
+                    concerns.append({
+                        "concern": concern,
+                        "corrective_action": action,
+                        **references,
+                    })
+                    concern_evidence.append(references)
+            lookahead = []
+            lookahead_evidence = []
+            for row in raw.get("lookahead", [])[:75] if isinstance(raw.get("lookahead"), list) else []:
+                text = _claim_text(row)
+                if text:
+                    lookahead.append(text)
+                    lookahead_evidence.append(_clean_ai_references(row))
+            claim_evidence = [
+                _clean_ai_references(row)
+                for row in (raw.get("claims", [])[:75] if isinstance(raw.get("claims"), list) else [])
+            ]
+            citation_evidence = {
+                key: _clean_ai_references(raw.get(key))
+                for key in (
+                    "executive_summary",
+                    "engineering_summary",
+                    "procurement_summary",
+                    "site_summary",
+                )
+            }
+            citation_evidence.update({
+                "concern_actions": concern_evidence,
+                "lookahead": lookahead_evidence,
+                "claims": claim_evidence,
+            })
+            display = {
+                "executive_summary": _claim_text(raw.get("executive_summary")),
+                "engineering_summary": _claim_text(raw.get("engineering_summary")),
+                "procurement_summary": _claim_text(raw.get("procurement_summary")),
+                "site_summary": _claim_text(raw.get("site_summary")),
+                "concerns": concerns,
+                "lookahead": lookahead,
+                "citation_evidence": citation_evidence,
+                "missing_data": _clean_ai_missing_data(raw.get("missing_data")),
+            }
+            draft["ai_summary"] = {
+                "status": "suggested",
+                "requested_at": started_at,
+                "requested_by": username,
+                "suggestion": display,
+                "provider_envelope": envelope,
+            }
+            _update_draft(data_dir, username, draft)
+            if activity_logger:
+                activity_logger(username, "periodic_ai_suggestion_generated", f"draft={draft_id} model={envelope.get('model', '')}")
+            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except AISummaryError as exc:
+            app.logger.warning("AI summary failed code=%s retryable=%s", exc.code, exc.retryable)
+            if exc.code == "rate_limited":
+                return _ai_retry_response(
+                    str(exc),
+                    code="rate_limited",
+                    status=429,
+                    retry_after=30,
+                )
+            status = 503 if exc.code in {"missing_api_key", "billing_required"} else 502
+            return jsonify({"error": str(exc), "code": exc.code, "retryable": exc.retryable}), status
+        except Exception:
+            app.logger.exception("AI summary failed for draft %s", draft_id)
+            return jsonify({"error": "AI summary failed unexpectedly. The report content is unchanged."}), 500
+        finally:
+            _release_ai_draft_lock(ai_lock)
+
+    @app.post("/monthly/ai-summary/<draft_id>/decision")
+    def decide_monthly_ai_summary(draft_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        username = session["username"]
+        draft = _load_draft(data_dir, username, draft_id)
+        if draft is None:
+            return jsonify({"error": "Report draft not found."}), 404
+        state = draft.get("ai_summary") if isinstance(draft.get("ai_summary"), dict) else None
+        if state is None or state.get("status") != "suggested":
+            return jsonify({"error": "Generate an AI suggestion before saving a decision."}), 400
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or body.get("decision") not in {"accept", "reject"}:
+            return jsonify({"error": "AI decision must be accept or reject."}), 400
+        decision = str(body["decision"])
+        if decision == "accept":
+            try:
+                accepted = _clean_ai_review(body.get("suggestion"))
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+            draft["executive_summary"] = accepted["executive_summary"]
+            engineering = draft.get("engineering") if isinstance(draft.get("engineering"), dict) else {}
+            procurement = draft.get("procurement") if isinstance(draft.get("procurement"), dict) else {}
+            site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
+            engineering["summary"] = accepted["engineering_summary"]
+            procurement["summary"] = accepted["procurement_summary"]
+            site["summary"] = accepted["site_summary"]
+            # AI suggestions may improve wording, but accepting them must not
+            # erase deterministic constraints or look-ahead items already
+            # extracted from the Daily Reports.
+            existing_concerns = site.get("concerns") if isinstance(site.get("concerns"), list) else []
+            merged_concerns = copy.deepcopy(existing_concerns)
+            seen_concerns = {
+                (_clean_text(row.get("concern") if isinstance(row, dict) else row, 2_000).casefold(),
+                 _clean_text(row.get("corrective_action") if isinstance(row, dict) else "", 2_000).casefold())
+                for row in merged_concerns
+            }
+            for row in accepted["concerns"]:
+                key = (row["concern"].casefold(), row["corrective_action"].casefold())
+                if key not in seen_concerns:
+                    merged_concerns.append(row)
+                    seen_concerns.add(key)
+            existing_lookahead = site.get("next_period_activities", site.get("next_month_activities", []))
+            merged_lookahead = _list_text(existing_lookahead)
+            seen_lookahead = {item.casefold() for item in merged_lookahead}
+            for item in accepted["lookahead"]:
+                if item.casefold() not in seen_lookahead:
+                    merged_lookahead.append(item)
+                    seen_lookahead.add(item.casefold())
+            site["concerns"] = merged_concerns
+            site["next_month_activities"] = merged_lookahead
+            site["next_period_activities"] = merged_lookahead
+            if _draft_report_type(draft) == "weekly":
+                site["next_week_activities"] = merged_lookahead
+            draft["engineering"] = engineering
+            draft["procurement"] = procurement
+            draft["site"] = site
+            state["accepted_values"] = accepted
+        state["status"] = "accepted" if decision == "accept" else "rejected"
+        state["decided_by"] = username
+        state["decided_at"] = datetime.now().isoformat(timespec="seconds")
+        _update_draft(data_dir, username, draft)
+        return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+
     @app.get("/monthly/photos/<draft_id>/<asset_id>")
     def get_monthly_draft_photo(draft_id: str, asset_id: str):
         auth = require_login_json()
@@ -2300,7 +3132,7 @@ def register_monthly_routes(
             reviewed["revision"] = revision
             reviewed["generated_at"] = datetime.now().isoformat(timespec="seconds")
             reviewed["filename"] = filename
-            _atomic_json(json_path, reviewed)
+            _atomic_json(json_path, _issued_report_copy(reviewed))
             entry = {
                 "monthly_report_id": reviewed["monthly_report_id"],
                 "report_id": reviewed["monthly_report_id"],
