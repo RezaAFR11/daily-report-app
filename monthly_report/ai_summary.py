@@ -39,7 +39,8 @@ MAX_CLAIM_CHARS = 1_500
 MAX_CLAIMS_PER_SECTION = 75
 MAX_REFERENCES_PER_CLAIM = 40
 DEFAULT_MAX_TOKENS = 4_096
-DEFAULT_TIMEOUT_SECONDS = 45.0
+DEFAULT_TIMEOUT_SECONDS = 180.0
+DEFAULT_MAX_RETRIES = 2
 
 _NOT_SUPPLIED = "Not supplied"
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -766,7 +767,7 @@ def generate_ai_summary(
         ) from exc
 
     if client is None:
-        client = anthropic.Anthropic(api_key=key, max_retries=0)
+        client = anthropic.Anthropic(api_key=key, max_retries=DEFAULT_MAX_RETRIES)
 
     source_json = _canonical_json(compact)
     request_kwargs = {
