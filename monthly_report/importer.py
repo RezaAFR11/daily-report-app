@@ -26,7 +26,7 @@ from typing import Any, BinaryIO, Iterable, Mapping, Sequence
 
 
 SCHEMA_VERSION = "daily-report-import/1"
-PARSER_VERSION = "monthly-pdf-importer/1.1"
+PARSER_VERSION = "monthly-pdf-importer/1.2"
 
 
 class PDFImportError(Exception):
@@ -449,7 +449,17 @@ def _parse_date_value(value: str) -> tuple[str | None, str | None]:
 
 def _extract_date(
     pages: Sequence[str],
+    *,
+    filename: str = "",
 ) -> tuple[str | None, dict[str, Any] | None, list[dict[str, Any]]]:
+    """Extract the report date with deterministic fallbacks.
+
+    The generated Daily Report layout can be flattened differently by pypdf
+    versions (for example ``Date: ... Day: ...`` may lose the table separator).
+    A failed labelled parse therefore no longer aborts all fallbacks.  Exact ISO
+    dates in the PDF and filename can be used with an explicit review warning.
+    """
+
     warnings: list[dict[str, Any]] = []
     raw, provenance = _extract_labeled_value(pages, "date")
     if raw is not None:
@@ -461,37 +471,144 @@ def _extract_date(
         warnings.append(
             _warning(
                 error or "invalid_date",
-                f"Labeled report date could not be accepted: {raw}",
-                severity="error",
+                f"Labeled report date could not be accepted directly: {raw}",
                 field="date",
                 page=provenance.get("page") if provenance else None,
             )
         )
-        return None, provenance, warnings
 
-    candidates: dict[str, tuple[int, str]] = {}
+    # Layout-mode extraction may join adjacent table cells without the vertical
+    # separator expected by _LABEL_PATTERNS.  Parse the tail after a Date label
+    # and stop at the next known label.
+    for page_number, page in enumerate(pages, start=1):
+        for line in page.splitlines():
+            compact_line = _compact(line)
+            match = re.search(r"\b(?:Report\s+)?Date\b\s*:?\s*(.+)$", compact_line, re.I)
+            if not match:
+                continue
+            tail = match.group(1).strip()
+            tail = re.split(
+                r"\s*(?:\||\bWorking\s+Day\b\s*:|\bDay(?:\s*(?:No\.?|Number))?\b\s*:|"
+                r"\bProject\s*(?:No\.?|Number|Name|Title)\b\s*:)",
+                tail,
+                maxsplit=1,
+                flags=re.I,
+            )[0].strip(" -|,;")
+            parsed, error = _parse_date_value(tail)
+            if parsed:
+                warnings.append(
+                    _warning(
+                        "date_recovered_from_joined_label",
+                        "Date was recovered from a flattened Date/Day row and must be reviewed",
+                        field="date",
+                        page=page_number,
+                    )
+                )
+                return parsed, {
+                    "method": "joined_label_regex",
+                    "page": page_number,
+                    "raw": tail,
+                    "normalized": parsed,
+                }, warnings
+            if tail:
+                warnings.append(
+                    _warning(
+                        error or "invalid_date",
+                        f"Date-like labelled value could not be accepted: {tail}",
+                        field="date",
+                        page=page_number,
+                    )
+                )
+
+    candidate_counts: dict[str, int] = {}
+    candidate_first_page: dict[str, int] = {}
     for page_number, page in enumerate(pages, start=1):
         for match in re.finditer(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)", page):
             parsed, _ = _parse_date_value(match.group(1))
             if parsed:
-                candidates.setdefault(parsed, (page_number, match.group(1)))
-    if len(candidates) == 1:
-        parsed, (page, raw_value) = next(iter(candidates.items()))
+                candidate_counts[parsed] = candidate_counts.get(parsed, 0) + 1
+                candidate_first_page.setdefault(parsed, page_number)
+
+    filename_match = re.search(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)", str(filename or ""))
+    filename_date = None
+    if filename_match:
+        filename_date, _ = _parse_date_value(filename_match.group(1))
+
+    # Strong deterministic tie-breaker: the exact date encoded in the generated
+    # filename also appears somewhere in the PDF text.
+    if filename_date and filename_date in candidate_counts:
+        warnings.append(
+            _warning(
+                "date_confirmed_by_filename",
+                "Report date was selected from PDF date candidates using the exact filename date and must be reviewed",
+                field="date",
+                page=candidate_first_page.get(filename_date),
+            )
+        )
+        return filename_date, {
+            "method": "filename_confirmed_iso",
+            "page": candidate_first_page.get(filename_date),
+            "raw": filename_match.group(1) if filename_match else filename_date,
+            "normalized": filename_date,
+        }, warnings
+
+    if len(candidate_counts) == 1:
+        parsed = next(iter(candidate_counts))
         warnings.append(
             _warning(
                 "date_inferred_without_label",
                 "Date was inferred from the only ISO date in the PDF and must be reviewed",
                 field="date",
-                page=page,
+                page=candidate_first_page.get(parsed),
             )
         )
         return parsed, {
             "method": "unique_iso_regex",
-            "page": page,
-            "raw": raw_value,
+            "page": candidate_first_page.get(parsed),
+            "raw": parsed,
             "normalized": parsed,
         }, warnings
-    if len(candidates) > 1:
+
+    # If several dates exist, prefer a uniquely dominant repeated date.  Report
+    # headers repeat the report date on multiple pages, while incidental dates
+    # usually occur once.
+    if candidate_counts:
+        ranked = sorted(candidate_counts.items(), key=lambda item: (-item[1], item[0]))
+        best_date, best_count = ranked[0]
+        second_count = ranked[1][1] if len(ranked) > 1 else 0
+        if best_count >= 2 and best_count > second_count:
+            warnings.append(
+                _warning(
+                    "date_inferred_from_repeated_header",
+                    "Date was inferred from the uniquely repeated ISO date in the PDF and must be reviewed",
+                    field="date",
+                    page=candidate_first_page.get(best_date),
+                )
+            )
+            return best_date, {
+                "method": "repeated_iso_regex",
+                "page": candidate_first_page.get(best_date),
+                "raw": best_date,
+                "normalized": best_date,
+            }, warnings
+
+    # Last-resort deterministic filename recovery keeps the file visible in the
+    # review flow instead of silently creating a false missing-date gap.
+    if filename_date:
+        warnings.append(
+            _warning(
+                "date_inferred_from_filename",
+                "Report date was inferred from the exact ISO date in the filename; confirm it during source review",
+                field="date",
+            )
+        )
+        return filename_date, {
+            "method": "filename_iso_regex",
+            "raw": filename_match.group(1) if filename_match else filename_date,
+            "normalized": filename_date,
+        }, warnings
+
+    if len(candidate_counts) > 1:
         warnings.append(
             _warning(
                 "ambiguous_date_candidates",
@@ -500,7 +617,17 @@ def _extract_date(
                 field="date",
             )
         )
-    return None, None, warnings
+    else:
+        warnings.append(
+            _warning(
+                "missing_date",
+                "Report date could not be deterministically extracted",
+                severity="error",
+                field="date",
+            )
+        )
+    return None, provenance, warnings
+
 
 
 def _extract_day_number(
@@ -1180,11 +1307,16 @@ def _field_confidence(
     method = provenance.get("method")
     if method == "label_regex":
         return 1.0
-    if method in {"unique_iso_regex", "unique_day_regex"}:
+    if method == "joined_label_regex":
+        return 0.95
+    if method in {"unique_iso_regex", "repeated_iso_regex", "filename_confirmed_iso", "unique_day_regex"}:
         return 0.8
+    if method == "filename_iso_regex":
+        return 0.7
     if method == "master_data_from_exact_project_no":
         return 1.0
     return 0.7
+
 
 
 def _deduplicate_warnings(warnings: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1227,7 +1359,10 @@ def parse_daily_report_pages(
     warnings: list[dict[str, Any]] = []
     provenance: dict[str, dict[str, Any]] = {}
 
-    report_date, date_provenance, date_warnings = _extract_date(normalized_pages)
+    report_date, date_provenance, date_warnings = _extract_date(
+        normalized_pages,
+        filename=str((source_metadata or {}).get("filename") or ""),
+    )
     warnings.extend(date_warnings)
     if date_provenance:
         provenance["date"] = date_provenance
