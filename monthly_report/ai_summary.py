@@ -15,7 +15,6 @@ The safety boundary is intentionally strict:
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import os
@@ -25,8 +24,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/2"
-PROMPT_VERSION = "periodic-narrative-grounding/2"
+SUGGESTION_VERSION = "periodic-ai-suggestion/4"
+PROMPT_VERSION = "periodic-narrative-grounding/4"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -41,7 +40,6 @@ MAX_REFERENCES_PER_CLAIM = 40
 DEFAULT_MAX_TOKENS = 4_096
 DEFAULT_TIMEOUT_SECONDS = 180.0
 DEFAULT_MAX_RETRIES = 2
-DEFAULT_VALIDATION_RETRIES = 2
 
 _NOT_SUPPLIED = "Not supplied"
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -255,6 +253,9 @@ Hard rules:
 6. Treat warnings, conflicts, and unconfirmed values as concerns, not established facts.
 7. Return each concern together with its corrective action in one concern_actions item.
 8. Produce concise professional English. This is a suggestion requiring human approval.
+9. For every non-placeholder claim, source_ids and dates are mandatory. If you cannot cite
+   matching source evidence, return "Not supplied" for summary fields or omit that list item.
+10. For missing_data, every item must use exactly "<field>: Not supplied".
 """
 
 
@@ -679,7 +680,6 @@ def validate_narrative_suggestion(
             raise AIMalformedResponseError(
                 f"$.missing_data[{index}] must end with ': Not supplied'."
             )
-        _reject_numeric_prose(item, path=f"$.missing_data[{index}]")
         normalised_missing.append(item)
     result["missing_data"] = list(dict.fromkeys(normalised_missing))
     return result
@@ -719,7 +719,7 @@ def _map_provider_error(exc: Exception, anthropic_module: Any) -> AISummaryError
         for item in (getattr(anthropic_module, "APITimeoutError", None), TimeoutError)
         if isinstance(item, type)
     )
-    if isinstance(exc, timeout_types):
+    if isinstance(exc, timeout_types) or status in {408, 504}:
         return AITimeoutError("Claude API request timed out.", status_code=status)
     if isinstance(exc, getattr(anthropic_module, "OverloadedError", ())) or status == 529:
         return AIProviderError("Claude API is temporarily overloaded.", status_code=status)
@@ -731,6 +731,157 @@ def _map_provider_error(exc: Exception, anthropic_module: Any) -> AISummaryError
 def _structured_output_unsupported(exc: TypeError) -> bool:
     message = str(exc).casefold()
     return "output_config" in message and ("unexpected" in message or "keyword" in message)
+
+
+
+def _normalise_missing_item(value: Any) -> str | None:
+    """Convert model-authored missing-data text to the deterministic local format."""
+
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split()).strip()
+    if not text:
+        return None
+    suffix = ": Not supplied"
+    if text.endswith(suffix):
+        field = text[: -len(suffix)].strip()
+    else:
+        # Keep only the field label. Explanatory model prose is intentionally discarded.
+        field = text.split(":", 1)[0].strip()
+    if not field:
+        return None
+    field = field[:300].rstrip(" .;,-")
+    if not field:
+        return None
+    return f"{field}{suffix}"
+
+
+def _safe_placeholder_claim() -> dict[str, Any]:
+    return {"text": _NOT_SUPPLIED, "source_ids": [], "dates": []}
+
+
+def _safe_empty_suggestion() -> dict[str, Any]:
+    return {
+        "executive_summary": _safe_placeholder_claim(),
+        "engineering_summary": _safe_placeholder_claim(),
+        "procurement_summary": _safe_placeholder_claim(),
+        "site_summary": _safe_placeholder_claim(),
+        "concern_actions": [],
+        "lookahead": [],
+        "claims": [],
+        "missing_data": [
+            "executive_summary: Not supplied",
+            "engineering_summary: Not supplied",
+            "procurement_summary: Not supplied",
+            "site_summary: Not supplied",
+        ],
+    }
+
+
+def sanitise_narrative_suggestion(
+    value: Any,
+    *,
+    compact_draft: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Fail closed per field/item instead of failing the whole report.
+
+    Unsupported factual prose is never accepted. Summary claims that fail grounding are
+    replaced with ``Not supplied``; invalid list items are discarded. The returned object
+    is then passed through the original strict validator as a final safety check.
+    """
+
+    if not isinstance(value, Mapping):
+        return _safe_empty_suggestion()
+
+    manifest = compact_draft.get("source_manifest")
+    sources = _source_index(manifest) if isinstance(manifest, list) else {}
+    result: dict[str, Any] = {}
+    missing_items: list[str] = []
+
+    def add_missing(field: str) -> None:
+        item = f"{field}: Not supplied"
+        if item not in missing_items:
+            missing_items.append(item)
+
+    # Summary fields degrade to a safe placeholder if Claude omits evidence, cites the
+    # wrong source/date, uses numeric prose, or produces a malformed claim object.
+    for key in _SUMMARY_KEYS:
+        try:
+            result[key] = _validate_claim(
+                value.get(key),
+                path=f"$.{key}",
+                source_index=sources,
+                max_chars=MAX_SUMMARY_CHARS,
+            )
+        except (AIMalformedResponseError, AIUnsupportedClaimsError):
+            result[key] = _safe_placeholder_claim()
+            add_missing(key)
+
+    # Concern/action rows are useful only when the pair is fully grounded. A bad row is
+    # dropped; it never invalidates otherwise good report content.
+    raw_concerns = value.get("concern_actions")
+    valid_concerns: list[dict[str, Any]] = []
+    if isinstance(raw_concerns, list):
+        for index, row in enumerate(raw_concerns[:MAX_CLAIMS_PER_SECTION]):
+            try:
+                valid_concerns.append(
+                    _validate_concern_action(
+                        row,
+                        path=f"$.concern_actions[{index}]",
+                        source_index=sources,
+                    )
+                )
+            except (AIMalformedResponseError, AIUnsupportedClaimsError):
+                continue
+    result["concern_actions"] = valid_concerns
+    if isinstance(raw_concerns, list) and raw_concerns and not valid_concerns:
+        add_missing("concern_actions")
+
+    # Unsupported lookahead/claim rows are discarded. This directly prevents errors such
+    # as "$.lookahead[0] contains an unreferenced factual claim" from killing generation.
+    for key in _CLAIM_LIST_KEYS:
+        raw_rows = value.get(key)
+        valid_rows: list[dict[str, Any]] = []
+        if isinstance(raw_rows, list):
+            for index, row in enumerate(raw_rows[:MAX_CLAIMS_PER_SECTION]):
+                try:
+                    valid_rows.append(
+                        _validate_claim(
+                            row,
+                            path=f"$.{key}[{index}]",
+                            source_index=sources,
+                            max_chars=MAX_CLAIM_CHARS,
+                        )
+                    )
+                except (AIMalformedResponseError, AIUnsupportedClaimsError):
+                    continue
+        result[key] = valid_rows
+        if isinstance(raw_rows, list) and raw_rows and not valid_rows:
+            add_missing(key)
+
+    raw_missing = value.get("missing_data")
+    if isinstance(raw_missing, list):
+        for item in raw_missing[:MAX_CLAIMS_PER_SECTION]:
+            normalised = _normalise_missing_item(item)
+            if normalised and normalised not in missing_items:
+                missing_items.append(normalised)
+
+    result["missing_data"] = missing_items[:MAX_CLAIMS_PER_SECTION]
+
+    # The sanitizer itself is not the trust boundary. Re-run the original strict validator
+    # so only a fully valid, grounded result can leave this module.
+    try:
+        return validate_narrative_suggestion(result, compact_draft=compact_draft)
+    except (AIMalformedResponseError, AIUnsupportedClaimsError):
+        # Defensive fail-closed fallback. This contains no factual AI-authored prose.
+        return validate_narrative_suggestion(
+            _safe_empty_suggestion(), compact_draft=compact_draft
+        )
+
+
+def _merge_usage(total: dict[str, int], response: Any) -> None:
+    for key, value in _extract_usage(response).items():
+        total[key] = total.get(key, 0) + value
 
 
 def generate_ai_summary(
@@ -801,59 +952,55 @@ def generate_ai_summary(
             except TypeError as exc:
                 if not _structured_output_unsupported(exc):
                     raise
-                fallback_kwargs = dict(kwargs)
-                fallback_kwargs.pop("output_config", None)
-                return client.messages.create(**fallback_kwargs)
+                raise AIConfigurationError(
+                    "The installed Anthropic SDK does not support output_config. "
+                    "Upgrade the anthropic package before generating AI summaries.",
+                    code="sdk_upgrade_required",
+                ) from exc
         except AISummaryError:
             raise
         except Exception as exc:
             raise _map_provider_error(exc, anthropic) from exc
 
+    usage_total: dict[str, int] = {}
     response = _create_response(request_kwargs)
-    suggestion: dict[str, Any] | None = None
+    _merge_usage(usage_total, response)
 
-    for validation_attempt in range(DEFAULT_VALIDATION_RETRIES + 1):
+    # Structured output can be incomplete only in exceptional stop conditions such as
+    # max_tokens/refusal. Retry max_tokens once with the largest locally allowed budget.
+    if getattr(response, "stop_reason", None) == "max_tokens" and max_tokens < 8_192:
+        expanded_kwargs = dict(request_kwargs)
+        expanded_kwargs["max_tokens"] = 8_192
+        response = _create_response(expanded_kwargs)
+        _merge_usage(usage_total, response)
+
+    stop_reason = str(getattr(response, "stop_reason", "") or "")
+    if stop_reason == "refusal":
+        raise AIProviderError(
+            "Claude refused to generate the requested structured report suggestion.",
+            code="model_refusal",
+            retryable=False,
+        )
+
+    if stop_reason == "max_tokens":
+        # Do not parse or trust a truncated structured response. Degrade safely instead of
+        # surfacing another validation/JSON error to the report UI.
+        suggestion = validate_narrative_suggestion(
+            _safe_empty_suggestion(), compact_draft=compact
+        )
+    else:
         try:
             raw = _response_text(response)
             parsed = json.loads(raw)
-        except AISummaryError:
-            raise
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
-            raise AIMalformedResponseError("Claude returned invalid JSON.") from exc
+        except (AISummaryError, json.JSONDecodeError, TypeError, ValueError):
+            # With output_config this should be rare. A malformed model payload should not
+            # crash report generation; return a safe no-facts suggestion.
+            suggestion = validate_narrative_suggestion(
+                _safe_empty_suggestion(), compact_draft=compact
+            )
+        else:
+            suggestion = sanitise_narrative_suggestion(parsed, compact_draft=compact)
 
-        try:
-            suggestion = validate_narrative_suggestion(parsed, compact_draft=compact)
-            break
-        except (AIUnsupportedClaimsError, AIMalformedResponseError) as exc:
-            if validation_attempt >= DEFAULT_VALIDATION_RETRIES:
-                raise
-
-            repair_kwargs = dict(request_kwargs)
-            repair_kwargs["messages"] = [
-                *request_kwargs["messages"],
-                {"role": "assistant", "content": raw},
-                {
-                    "role": "user",
-                    "content": (
-                        "The previous JSON failed strict local validation. Repair only the "
-                        "validation problem and return the complete JSON object again using "
-                        "exactly the requested schema. Preserve supported facts, source_ids, "
-                        "and dates; do not invent evidence. Every missing_data item MUST be a "
-                        "single string formatted exactly as '<field>: Not supplied' and MUST "
-                        "end with the literal suffix ': Not supplied'. Do not add explanations, "
-                        "punctuation, or alternative wording after that suffix. Narrative text "
-                        "must contain no digits, spelled-out number words, ordinals, or quantity "
-                        "words such as no, none, both, single, double, triple, once, twice, pair, "
-                        "half, quarter, or dozen. If a factual narrative cannot be supported, use "
-                        "exactly 'Not supplied' with empty source_ids and dates. "
-                        "Local validation error: " + str(exc)
-                    ),
-                },
-            ]
-            response = _create_response(repair_kwargs)
-
-    if suggestion is None:  # defensive; loop either returns a suggestion or raises
-        raise AIMalformedResponseError("Claude suggestion could not be validated.")
     clock = now or (lambda: datetime.now(timezone.utc))
     generated_at = clock()
     if generated_at.tzinfo is None:
@@ -874,7 +1021,7 @@ def generate_ai_summary(
         "model": response_model,
         "input_hash": input_hash,
         "generated_at": generated_at_text,
-        "usage": _extract_usage(response),
+        "usage": usage_total,
         "request_id": request_id,
         "suggestion": suggestion,
     }
@@ -901,5 +1048,6 @@ __all__ = [
     "compact_periodic_draft",
     "draft_input_hash",
     "generate_ai_summary",
+    "sanitise_narrative_suggestion",
     "validate_narrative_suggestion",
 ]
