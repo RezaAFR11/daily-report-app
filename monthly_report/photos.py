@@ -198,6 +198,52 @@ def _iter_page_images(page: Any) -> Iterable[bytes]:
     return result
 
 
+
+def _looks_like_signature_or_line_art(content: bytes) -> bool:
+    """Conservatively identify sparse monochrome signatures/line art.
+
+    New Daily Report layouts can place SIGN-OFF and PHOTO DOCUMENTATION on the
+    same page. pypdf exposes page image resources without reliable section
+    coordinates, so page-level filtering alone may include signatures as photos.
+    """
+
+    try:
+        from PIL import Image
+    except ImportError:
+        return False
+
+    try:
+        with Image.open(io.BytesIO(content)) as opened:
+            image = opened.convert("RGB")
+            image.thumbnail((256, 256))
+            pixels = list(image.getdata())
+    except Exception:
+        return False
+
+    if not pixels:
+        return False
+
+    total = len(pixels)
+    white = 0
+    dark = 0
+    chromatic = 0
+    for red, green, blue in pixels:
+        low = min(red, green, blue)
+        high = max(red, green, blue)
+        if low >= 235:
+            white += 1
+        if high <= 120:
+            dark += 1
+        if high - low >= 30:
+            chromatic += 1
+
+    return (
+        (white / total) >= 0.85
+        and (dark / total) <= 0.18
+        and (chromatic / total) <= 0.06
+    )
+
+
 def extract_pdf_photo_candidates(
     source: bytes | bytearray | memoryview | str | os.PathLike[str] | BinaryIO,
     *,
@@ -242,6 +288,7 @@ def extract_pdf_photo_candidates(
     digest_pages: dict[str, set[int]] = {}
     normalized_cache: dict[str, tuple[bytes, int, int] | None] = {}
     skipped_unsafe = 0
+    skipped_signature_like = 0
 
     for page_number, page in enumerate(pages, start=1):
         for raw in _iter_page_images(page):
@@ -253,6 +300,11 @@ def extract_pdf_photo_candidates(
                 skipped_unsafe += 1
                 continue
             content, width, height = normalized
+            # In split-layout reports SIGN-OFF and PHOTO DOCUMENTATION can share
+            # one page. Keep signature resources out of the activity appendix.
+            if page_number in photo_pages and _looks_like_signature_or_line_art(content):
+                skipped_signature_like += 1
+                continue
             digest = hashlib.sha256(content).hexdigest()
             digest_pages.setdefault(digest, set()).add(page_number)
             candidates.append({
@@ -319,6 +371,10 @@ def extract_pdf_photo_candidates(
     if skipped_unsafe:
         warnings.append(
             f"{filename}: {skipped_unsafe} small, oversized, or unsupported image occurrence(s) were ignored."
+        )
+    if skipped_signature_like:
+        warnings.append(
+            f"{filename}: {skipped_signature_like} signature/line-art image occurrence(s) were excluded from Photo Documentation."
         )
     if candidates and not useful:
         warnings.append(f"{filename}: no useful Photo Documentation images remained after filtering.")
