@@ -229,6 +229,11 @@ def _styles() -> dict[str, ParagraphStyle]:
             textColor=BLACK, leftIndent=28.3, spaceBefore=5, spaceAfter=6,
             keepWithNext=True,
         ),
+        "activity_area": ParagraphStyle(
+            "MonthlyActivityArea", fontName="Helvetica-Bold", fontSize=10.5, leading=13,
+            textColor=BLACK, leftIndent=14, spaceBefore=5, spaceAfter=2,
+            keepWithNext=True,
+        ),
         "appendix_item": ParagraphStyle(
             "MonthlyAppendixItem", fontName="Helvetica-Bold", fontSize=11.5,
             leading=15, textColor=BLACK, leftIndent=20, firstLineIndent=-20,
@@ -884,6 +889,57 @@ def _content_flowables(
             ))
         else:
             rendered.append(_paragraph(text, styles["body"]))
+    if not rendered:
+        rendered.append(_paragraph(empty_message, styles["placeholder"]))
+    return rendered
+
+
+def _activity_flowables(
+    value: Any,
+    styles: Mapping[str, ParagraphStyle],
+    *,
+    empty_message: str,
+) -> list[Flowable]:
+    """Render AI-condensed activities grouped by area when structured rows exist."""
+
+    rows = _as_list(value)
+    structured = [
+        row for row in rows
+        if isinstance(row, Mapping) and _plain(_value(row, "area", "location"))
+        and _plain(_value(row, "text", "description", "activity"))
+    ]
+    if not structured:
+        return _content_flowables(value, styles, empty_message=empty_message, bullets=True)
+
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    loose: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            text = _plain(row)
+            if text:
+                loose.append(text)
+            continue
+        area = _plain(_value(row, "area", "location"))
+        text = _plain(_value(row, "text", "description", "activity"))
+        if not text:
+            continue
+        if not area:
+            loose.append(text)
+            continue
+        if area not in groups:
+            groups[area] = []
+            order.append(area)
+        if text not in groups[area]:
+            groups[area].append(text)
+
+    rendered: list[Flowable] = []
+    for area in order:
+        rendered.append(_paragraph(area, styles["activity_area"], default=""))
+        for text in groups[area]:
+            rendered.append(Paragraph(f"&#8226;&nbsp;&nbsp;{_xml(text)}", styles["body"]))
+    for text in loose:
+        rendered.append(Paragraph(f"&#8226;&nbsp;&nbsp;{_xml(text)}", styles["body"]))
     if not rendered:
         rendered.append(_paragraph(empty_message, styles["placeholder"]))
     return rendered
@@ -1607,9 +1663,9 @@ def _build_story(
         empty_message="See the overall schedule appendix when supplied.",
     ))
     story.append(_heading(current_heading, styles["h2"], 1))
-    story.extend(_content_flowables(
+    story.extend(_activity_flowables(
         current_activities,
-        styles, empty_message=current_empty, bullets=True,
+        styles, empty_message=current_empty,
     ))
     story.append(_heading(next_heading, styles["h2"], 1))
     story.extend(_content_flowables(
