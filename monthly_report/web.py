@@ -691,11 +691,64 @@ def _latest_report_context(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+_FILENAME_ISO_DATE_RE = re.compile(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)")
+
+
+def _valid_iso_date_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
+    except (TypeError, ValueError):
+        return ""
+
+
+def _date_from_filename(value: Any) -> str:
+    match = _FILENAME_ISO_DATE_RE.search(str(value or ""))
+    return _valid_iso_date_text(match.group(1)) if match else ""
+
+
+def _imported_report_date(imported: dict[str, Any], filename: str = "") -> tuple[str, str]:
+    """Resolve parser date across current/legacy envelope shapes.
+
+    The importer historically exposed report date both at envelope level and in
+    ``data``.  Keeping this boundary tolerant prevents a parser-shape change from
+    appearing in Review Weekly/Monthly Draft as a false Missing Date.
+    """
+
+    containers = [
+        ("imported.report_date", imported),
+        ("imported.date", imported),
+        ("imported.data.date", imported.get("data") if isinstance(imported.get("data"), dict) else {}),
+        ("imported.payload.date", imported.get("payload") if isinstance(imported.get("payload"), dict) else {}),
+    ]
+    keys = ["report_date", "date", "date", "date"]
+    for (method, container), key in zip(containers, keys):
+        parsed = _valid_iso_date_text(container.get(key) if isinstance(container, dict) else "")
+        if parsed:
+            return parsed, method
+
+    source = imported.get("source") if isinstance(imported.get("source"), dict) else {}
+    parsed = _date_from_filename(filename or source.get("filename"))
+    if parsed:
+        return parsed, "filename_iso_fallback"
+    return "", "missing"
+
+
 def _record_date(record: dict[str, Any]) -> str:
-    value = record.get("report_date", record.get("date", ""))
-    if not value:
-        value = _payload(record).get("date", "")
-    return str(value or "")
+    candidates = (
+        record.get("report_date"),
+        record.get("date"),
+        (_payload(record).get("date") if isinstance(_payload(record), dict) else ""),
+        (record.get("data", {}).get("date") if isinstance(record.get("data"), dict) else ""),
+    )
+    for value in candidates:
+        parsed = _valid_iso_date_text(value)
+        if parsed:
+            return parsed
+    source = record.get("source") if isinstance(record.get("source"), dict) else {}
+    return _date_from_filename(source.get("filename"))
 
 
 def _prepare_draft(
@@ -814,6 +867,10 @@ def _prepare_draft(
         )
     if not site.get("concerns"):
         site["concerns"] = draft.get("concerns", draft.get("constraints", []))
+    if isinstance(draft.get("constraint_reporting"), dict):
+        site["constraint_reporting"] = copy.deepcopy(draft["constraint_reporting"])
+    if isinstance(draft.get("weather"), list):
+        site["weather"] = copy.deepcopy(draft["weather"])
     # Generic aliases let the renderer and review UI use period-neutral labels
     # while legacy monthly keys continue to support archived drafts.
     site["current_period_activities"] = site.get("this_month_activities", [])
@@ -901,15 +958,15 @@ def _record_from_uploaded_pdf(
     if project_title:
         data["project_title"] = project_title
 
-    report_date = str(data.get("date") or imported.get("report_date") or "")
+    report_date, date_method = _imported_report_date(imported, filename)
     if not report_date:
         warnings.append(f"{filename}: report date was not detected; file requires manual import and was skipped.")
         return None, warnings
-    try:
-        datetime.strptime(report_date, "%Y-%m-%d")
-    except ValueError:
-        warnings.append(f"{filename}: report date {report_date!r} is invalid; file was skipped.")
-        return None, warnings
+    data["date"] = report_date
+    if date_method == "filename_iso_fallback":
+        warnings.append(
+            f"{filename}: report date {report_date} was recovered from the filename; confirm it in Source Data Validation."
+        )
     if _report_type(report_type) != "weekly" and not (date_from <= report_date <= date_to):
         warnings.append(f"{filename}: date {report_date} is outside the selected period; file skipped.")
         return None, warnings
@@ -1444,7 +1501,7 @@ def _clean_ai_citation_evidence(value: Any) -> dict[str, Any]:
             "site_summary",
         )
     }
-    for key in ("concern_actions", "lookahead", "claims"):
+    for key in ("current_activities", "concern_actions", "lookahead", "claims"):
         rows = evidence.get(key) if isinstance(evidence.get(key), list) else []
         result[key] = [_clean_ai_references(row) for row in rows[:75]]
     return result
