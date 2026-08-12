@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/3"
-PROMPT_VERSION = "periodic-narrative-grounding/3"
+SUGGESTION_VERSION = "periodic-ai-suggestion/4"
+PROMPT_VERSION = "periodic-narrative-grounding/4"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -186,6 +186,22 @@ def _concern_action_schema() -> dict[str, Any]:
     }
 
 
+def _activity_claim_schema() -> dict[str, Any]:
+    """Source-grounded activity bullet with an explicit construction area."""
+
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "area": {"type": "string"},
+            "text": {"type": "string"},
+            "source_ids": {"type": "array", "items": {"type": "string"}},
+            "dates": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["area", "text", "source_ids", "dates"],
+    }
+
+
 AI_NARRATIVE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -194,6 +210,7 @@ AI_NARRATIVE_SCHEMA: dict[str, Any] = {
         "engineering_summary": _claim_schema(),
         "procurement_summary": _claim_schema(),
         "site_summary": _claim_schema(),
+        "current_activities": {"type": "array", "items": _activity_claim_schema()},
         "concern_actions": {"type": "array", "items": _concern_action_schema()},
         "lookahead": {"type": "array", "items": _claim_schema()},
         "claims": {"type": "array", "items": _claim_schema()},
@@ -204,6 +221,7 @@ AI_NARRATIVE_SCHEMA: dict[str, Any] = {
         "engineering_summary",
         "procurement_summary",
         "site_summary",
+        "current_activities",
         "concern_actions",
         "lookahead",
         "claims",
@@ -218,6 +236,7 @@ _SUMMARY_KEYS = (
     "site_summary",
 )
 _CLAIM_LIST_KEYS = ("lookahead", "claims")
+_ACTIVITY_LIST_KEY = "current_activities"
 
 _SYSTEM_PROMPT = """You are a construction reporting editor. Create a concise,
 professional narrative suggestion for a weekly or monthly progress report.
@@ -245,17 +264,27 @@ Reporting rules:
 7. site_summary: consolidate repeated daily activities into a short coherent
    summary. Preserve project terminology and abbreviations such as LO, CO,
    wiremesh, flushing, reservoir, and equipment names when present.
-8. engineering_summary and procurement_summary: use only facts explicitly
+8. current_activities: create concise client-facing bullets for the current report
+   period. Group repeated/continuing work instead of copying every Daily Report
+   line. Use the exact area/equipment label from source data when available.
+   Preserve technical terms, quantities, durations, dates, and unit/equipment
+   identifiers exactly when they are relevant and source-backed. Do not infer
+   completion or progress. Consolidate repeated "Stand by" entries into a single
+   supported status bullet per affected area rather than repeating it by day.
+   Do not omit meaningful current work merely because site_summary also mentions it.
+9. engineering_summary and procurement_summary: use only facts explicitly
    belonging to those subjects. Do not relabel site work as engineering or
    procurement. Use Not supplied when evidence is absent.
-9. concern_actions: include only real construction/project concerns supported by
-   source data. A corrective action must also be explicitly supported. If an
-   action is not supplied, do not invent one; omit that item and record missing
-   data instead. Internal data-quality or project-identity validation warnings are
-   not project concerns.
-10. lookahead: use only explicitly supplied next-period, tomorrow, or planned
+10. concern_actions: include only real construction/project concerns supported by
+    source data. A corrective action must also be explicitly supported. If an
+    action is not supplied, do not invent one; omit that item and record missing
+    data instead. Internal data-quality or project-identity validation warnings are
+    not project concerns.
+11. lookahead: use only explicitly supplied next-period, tomorrow, or planned
     activities. Do not turn current activities into future plans.
-11. Avoid repetitive bullet-by-bullet copying. Merge duplicates and write concise
+12. claims is optional supporting narrative evidence for the review UI. Do not add
+    "claims: Not supplied" to missing_data when no extra claims are needed.
+13. Avoid repetitive bullet-by-bullet copying. Merge duplicates and write concise
     professional English suitable for a client-facing construction report.
 """
 
@@ -489,6 +518,9 @@ def _normalise_missing_data_items(value: Any) -> list[str]:
             if not label or label.casefold() == _NOT_SUPPLIED.casefold():
                 label = "data"
             item = f"{label}: Not supplied"
+        label_key = item.split(":", 1)[0].strip().casefold().replace(" ", "_")
+        if label_key in {"claims", "claim"}:
+            continue
         if item not in result:
             result.append(item)
     return result
@@ -584,6 +616,37 @@ def _validate_claim(
 
 
 
+def _validate_activity_claim(
+    raw: Any,
+    *,
+    path: str,
+    source_index: Mapping[str, set[str]],
+) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise AIMalformedResponseError(f"{path} must be an object.")
+    _strict_keys(raw, {"area", "text", "source_ids", "dates"}, path)
+    area = " ".join(str(raw.get("area") or "").split())
+    if not area:
+        raise AIMalformedResponseError(f"{path}.area must be a non-empty string.")
+    if len(area) > 200:
+        raise AIMalformedResponseError(f"{path}.area exceeds 200 characters.")
+    claim = _validate_claim(
+        {
+            "text": raw.get("text"),
+            "source_ids": raw.get("source_ids"),
+            "dates": raw.get("dates"),
+        },
+        path=path,
+        source_index=source_index,
+        max_chars=MAX_CLAIM_CHARS,
+    )
+    if claim["text"] == _NOT_SUPPLIED:
+        raise AIUnsupportedClaimsError(
+            f"{path} must be omitted instead of using Not supplied."
+        )
+    return {"area": area, **claim}
+
+
 def _validate_concern_action(
     raw: Any,
     *,
@@ -642,6 +705,7 @@ def validate_narrative_suggestion(
     if not isinstance(value, Mapping):
         raise AIMalformedResponseError("Claude response must be a JSON object.")
     expected = set(_SUMMARY_KEYS) | set(_CLAIM_LIST_KEYS) | {
+        _ACTIVITY_LIST_KEY,
         "concern_actions",
         "missing_data",
     }
@@ -659,6 +723,20 @@ def validate_narrative_suggestion(
             source_index=sources,
             max_chars=MAX_SUMMARY_CHARS,
         )
+
+    activity_rows = value[_ACTIVITY_LIST_KEY]
+    if not isinstance(activity_rows, list):
+        raise AIMalformedResponseError(f"$.{_ACTIVITY_LIST_KEY} must be an array.")
+    if len(activity_rows) > MAX_CLAIMS_PER_SECTION:
+        raise AIMalformedResponseError(f"$.{_ACTIVITY_LIST_KEY} has too many entries.")
+    result[_ACTIVITY_LIST_KEY] = [
+        _validate_activity_claim(
+            row,
+            path=f"$.{_ACTIVITY_LIST_KEY}[{index}]",
+            source_index=sources,
+        )
+        for index, row in enumerate(activity_rows)
+    ]
 
     concern_actions = value["concern_actions"]
     if not isinstance(concern_actions, list):
@@ -729,6 +807,21 @@ def _safe_validated_suggestion(
         except (AIMalformedResponseError, AIUnsupportedClaimsError) as exc:
             result[key] = _placeholder_claim()
             warnings.append(str(exc))
+
+    current_activities: list[dict[str, Any]] = []
+    rows = raw.get(_ACTIVITY_LIST_KEY) if isinstance(raw.get(_ACTIVITY_LIST_KEY), list) else []
+    for index, row in enumerate(rows[:MAX_CLAIMS_PER_SECTION]):
+        try:
+            current_activities.append(
+                _validate_activity_claim(
+                    row,
+                    path=f"$.{_ACTIVITY_LIST_KEY}[{index}]",
+                    source_index=sources,
+                )
+            )
+        except (AIMalformedResponseError, AIUnsupportedClaimsError) as exc:
+            warnings.append(str(exc))
+    result[_ACTIVITY_LIST_KEY] = current_activities
 
     concerns: list[dict[str, Any]] = []
     rows = raw.get("concern_actions") if isinstance(raw.get("concern_actions"), list) else []
