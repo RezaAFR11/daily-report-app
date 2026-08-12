@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/5"
-PROMPT_VERSION = "periodic-narrative-grounding/5"
+SUGGESTION_VERSION = "periodic-ai-suggestion/6"
+PROMPT_VERSION = "periodic-narrative-grounding/6"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -265,6 +265,10 @@ Reporting rules:
    progress/status explicitly stated in the source, genuine project constraints,
    and supported look-ahead. Explicit activity status values such as Finished,
    Completed, Ongoing, or In progress are valid only when present in source data.
+    When describing coverage, use the official report period from source_data.period.
+    If Daily Report coverage is partial, state the available Daily Report dates
+    separately; never redefine the official weekly/monthly period as only the
+    dates currently supplied.
    Prefer useful project narrative over administrative boilerplate. Do not mention
    parsers, normalization, uploads, source validation, application warnings, or
    instructions to review the report.
