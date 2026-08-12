@@ -113,6 +113,33 @@ def _iter_text_values(value: Any) -> Iterable[str]:
             yield from _iter_text_values(item)
 
 
+def _activity_status_map(area: Mapping[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    rows = area.get("activity_statuses")
+    if not isinstance(rows, list):
+        return result
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        description = _clean_text(row.get("description"))
+        status = _clean_text(row.get("status"))
+        if description and status:
+            result[_normalise_text(description)] = status
+    return result
+
+
+def _weather_row(payload: Mapping[str, Any], report_date: str) -> dict[str, str] | None:
+    weather = payload.get("weather")
+    if not isinstance(weather, Mapping):
+        return None
+    item = {"date": report_date}
+    for key in ("morning", "afternoon", "evening", "wind", "temperature", "impact"):
+        value = _clean_text(weather.get(key))
+        if value:
+            item[key] = value
+    return item if len(item) > 1 else None
+
+
 def _dedupe_entries(entries: list[dict[str, Any]], *keys: str) -> list[dict[str, Any]]:
     seen: set[tuple[str, ...]] = set()
     result = []
@@ -579,10 +606,19 @@ def aggregate_monthly_records(
     activities = []
     constraints = []
     remarks = []
+    weather_daily = []
+    constraint_daily = []
     daily_manpower = []
     role_rows = []
     for report_date, record in selected:
         payload = _payload(record)
+        weather_item = _weather_row(payload, report_date)
+        if weather_item is not None:
+            weather_daily.append(weather_item)
+        constraint_state = _clean_text(payload.get("constraint_status"))
+        if constraint_state not in {"none_reported", "reported", "not_supplied"}:
+            constraint_state = "not_supplied"
+        constraint_daily.append({"date": report_date, "status": constraint_state})
         areas = payload.get("areas")
         if not isinstance(areas, list):
             areas = []
@@ -590,10 +626,13 @@ def aggregate_monthly_records(
             if not isinstance(area, Mapping):
                 continue
             area_name = _clean_text(area.get("id")) or "Unspecified"
+            status_map = _activity_status_map(area)
             for description in _iter_text_values(area.get("activities_today")):
-                activities.append(
-                    {"date": report_date, "area": area_name, "description": description}
-                )
+                item = {"date": report_date, "area": area_name, "description": description}
+                status = status_map.get(_normalise_text(description))
+                if status:
+                    item["status"] = status
+                activities.append(item)
             for text in _iter_text_values(area.get("constraints")):
                 constraints.append({"date": report_date, "area": area_name, "text": text})
             for text in _iter_text_values(area.get("remarks")):
@@ -608,9 +647,10 @@ def aggregate_monthly_records(
 
     activities_by_area: dict[str, list[dict[str, str]]] = defaultdict(list)
     for item in activities:
-        activities_by_area[item["area"]].append(
-            {"date": item["date"], "description": item["description"]}
-        )
+        row = {"date": item["date"], "description": item["description"]}
+        if item.get("status"):
+            row["status"] = item["status"]
+        activities_by_area[item["area"]].append(row)
 
     tomorrow_activities = []
     last_report_date = covered[-1] if covered else None
@@ -629,6 +669,13 @@ def aggregate_monthly_records(
     tomorrow_activities = _dedupe_entries(
         tomorrow_activities, "source_date", "area", "description"
     )
+
+    constraint_reporting = {
+        "daily": constraint_daily,
+        "none_reported_dates": [row["date"] for row in constraint_daily if row["status"] == "none_reported"],
+        "reported_dates": [row["date"] for row in constraint_daily if row["status"] == "reported"],
+        "not_supplied_dates": [row["date"] for row in constraint_daily if row["status"] == "not_supplied"],
+    }
 
     role_summary: dict[str, dict[str, Any]] = {}
     for row in role_rows:
@@ -729,6 +776,8 @@ def aggregate_monthly_records(
         "tomorrow_activities": tomorrow_activities,
         "constraints": constraints,
         "remarks": remarks,
+        "weather": weather_daily,
+        "constraint_reporting": constraint_reporting,
         "manpower": {
             "daily": daily_manpower,
             "totals": manpower_totals,
