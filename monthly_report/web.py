@@ -637,12 +637,17 @@ def _clean_activity_rows(value: Any, maximum_items: int = 250) -> list[dict[str,
     result: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for item in rows[:maximum_items]:
+        status = ""
         if isinstance(item, str):
             area = ""
             text = _clean_text(item, 2_000)
         elif isinstance(item, dict):
             area = _clean_text(item.get("area"), 200)
-            text = _clean_text(item.get("text", item.get("activity", item.get("description", ""))), 2_000)
+            text = _clean_text(
+                item.get("text", item.get("activity", item.get("description", ""))),
+                2_000,
+            )
+            status = _clean_text(item.get("status"), 100)
         else:
             continue
         if not text or text.casefold() == "not supplied":
@@ -651,9 +656,106 @@ def _clean_activity_rows(value: Any, maximum_items: int = 250) -> list[dict[str,
         if key in seen:
             continue
         seen.add(key)
-        result.append({"area": area or "Site", "text": text})
+        row = {"area": area or "Site", "text": text}
+        if status and status.casefold() not in text.casefold():
+            row["status"] = status
+        result.append(row)
     return result
 
+
+_ACTIVITY_EQUIPMENT_ID_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<prefix>\d{1,3})\s*[- ]\s*"
+    r"(?P<tag>[A-Za-z]{2,8})\s*[- ]\s*(?P<number>\d{2,6})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def _activity_match_text(value: Any) -> str:
+    text = _clean_text(value, 2_000).casefold()
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
+
+
+def _activity_equipment_ids(value: Any) -> set[str]:
+    result: set[str] = set()
+    text = _clean_text(value, 2_000)
+    for match in _ACTIVITY_EQUIPMENT_ID_RE.finditer(text):
+        result.add(
+            f"{match.group('prefix')}-{match.group('tag').upper()}-{match.group('number')}"
+        )
+    return result
+
+
+def _source_activity_status_rows(draft: dict[str, Any]) -> list[dict[str, str]]:
+    """Return deterministic source activities carrying an explicit status."""
+
+    rows = draft.get("activities") if isinstance(draft.get("activities"), list) else []
+    result: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        description = _clean_text(row.get("description", row.get("text", "")), 2_000)
+        status = _clean_text(row.get("status"), 100)
+        if not description or not status:
+            continue
+        result.append({
+            "area": _clean_text(row.get("area"), 200),
+            "description": description,
+            "status": status,
+        })
+    return result
+
+
+def _enrich_activity_statuses(
+    rows: Any,
+    draft: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Restore source-backed status when Claude omits it from a condensed bullet."""
+
+    cleaned = _clean_activity_rows(rows)
+    sources = _source_activity_status_rows(draft)
+    if not cleaned or not sources:
+        return cleaned
+
+    for row in cleaned:
+        if row.get("status"):
+            continue
+
+        text = row.get("text", "")
+        area_key = _activity_match_text(row.get("area", ""))
+        text_key = _activity_match_text(text)
+        equipment_ids = _activity_equipment_ids(text)
+
+        matches: list[dict[str, str]] = []
+        for source in sources:
+            source_area = _activity_match_text(source.get("area", ""))
+            if area_key and source_area and area_key != source_area:
+                continue
+
+            source_text = _activity_match_text(source.get("description", ""))
+            source_ids = _activity_equipment_ids(source.get("description", ""))
+            text_match = (
+                bool(source_text)
+                and (
+                    source_text == text_key
+                    or source_text in text_key
+                    or text_key in source_text
+                )
+            )
+            id_match = bool(
+                equipment_ids
+                and source_ids
+                and equipment_ids.intersection(source_ids)
+            )
+            if text_match or id_match:
+                matches.append(source)
+
+        statuses = {item["status"] for item in matches if item.get("status")}
+        if len(statuses) == 1:
+            status = next(iter(statuses))
+            if status.casefold() not in text.casefold():
+                row["status"] = status
+
+    return cleaned
 
 def _payload(record: dict[str, Any]) -> dict[str, Any]:
     value = record.get("payload", record.get("data", {}))
@@ -2942,6 +3044,9 @@ def register_monthly_routes(
                     })
                     current_activity_evidence.append(references)
 
+            # Preserve deterministic source status even when Claude omits it.
+            current_activities = _enrich_activity_statuses(current_activities, draft)
+
             claim_evidence = [
                 _clean_ai_references(row)
                 for row in (raw.get("claims", [])[:75] if isinstance(raw.get("claims"), list) else [])
@@ -3051,7 +3156,10 @@ def register_monthly_routes(
             # Once explicitly accepted, the site section may use Claude's
             # source-grounded, de-duplicated bullets for the client-facing 5.2 section.
             if accepted["current_activities"]:
-                ai_activities = copy.deepcopy(accepted["current_activities"])
+                ai_activities = _enrich_activity_statuses(
+                    copy.deepcopy(accepted["current_activities"]),
+                    draft,
+                )
                 site["this_month_activities"] = ai_activities
                 site["current_period_activities"] = ai_activities
                 site["this_period_activities"] = ai_activities
