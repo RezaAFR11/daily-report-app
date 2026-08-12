@@ -630,6 +630,31 @@ def _list_text(value: Any, maximum_items: int = 500) -> list[str]:
     return result
 
 
+def _clean_activity_rows(value: Any, maximum_items: int = 250) -> list[dict[str, str]]:
+    """Keep AI-condensed activity bullets structured by area for rendering."""
+
+    rows = value if isinstance(value, list) else []
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in rows[:maximum_items]:
+        if isinstance(item, str):
+            area = ""
+            text = _clean_text(item, 2_000)
+        elif isinstance(item, dict):
+            area = _clean_text(item.get("area"), 200)
+            text = _clean_text(item.get("text", item.get("activity", item.get("description", ""))), 2_000)
+        else:
+            continue
+        if not text or text.casefold() == "not supplied":
+            continue
+        key = (area.casefold(), text.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"area": area or "Site", "text": text})
+    return result
+
+
 def _payload(record: dict[str, Any]) -> dict[str, Any]:
     value = record.get("payload", record.get("data", {}))
     return value if isinstance(value, dict) else {}
@@ -1441,11 +1466,13 @@ def _clean_ai_review(value: Any) -> dict[str, Any]:
         for row in (value.get("lookahead", [])[:250] if isinstance(value.get("lookahead"), list) else [])
         if _clean_text(row, 2_000)
     ]
+    current_activities = _clean_activity_rows(value.get("current_activities"))
     return {
         "executive_summary": _clean_text(value.get("executive_summary"), 4_000),
         "engineering_summary": _clean_text(value.get("engineering_summary"), 4_000),
         "procurement_summary": _clean_text(value.get("procurement_summary"), 4_000),
         "site_summary": _clean_text(value.get("site_summary"), 4_000),
+        "current_activities": current_activities,
         "concerns": concerns,
         "lookahead": lookahead,
     }
@@ -2842,6 +2869,22 @@ def register_monthly_routes(
                 if text:
                     lookahead.append(text)
                     lookahead_evidence.append(_clean_ai_references(row))
+            current_activities = []
+            current_activity_evidence = []
+            for row in raw.get("current_activities", [])[:75] if isinstance(raw.get("current_activities"), list) else []:
+                if not isinstance(row, dict):
+                    continue
+                text = _claim_text(row)
+                area = _clean_text(row.get("area"), 200)
+                if text:
+                    references = _clean_ai_references(row)
+                    current_activities.append({
+                        "area": area or "Site",
+                        "text": text,
+                        **references,
+                    })
+                    current_activity_evidence.append(references)
+
             claim_evidence = [
                 _clean_ai_references(row)
                 for row in (raw.get("claims", [])[:75] if isinstance(raw.get("claims"), list) else [])
@@ -2856,6 +2899,7 @@ def register_monthly_routes(
                 )
             }
             citation_evidence.update({
+                "current_activities": current_activity_evidence,
                 "concern_actions": concern_evidence,
                 "lookahead": lookahead_evidence,
                 "claims": claim_evidence,
@@ -2874,6 +2918,7 @@ def register_monthly_routes(
                 or _clean_text(current_procurement.get("summary"), 4_000),
                 "site_summary": _usable_ai_text(raw.get("site_summary"))
                 or _clean_text(current_site.get("summary"), 4_000),
+                "current_activities": current_activities,
                 "concerns": concerns,
                 "lookahead": lookahead,
                 "citation_evidence": citation_evidence,
@@ -2944,6 +2989,18 @@ def register_monthly_routes(
                 procurement["summary"] = accepted["procurement_summary"]
             if accepted["site_summary"] and accepted["site_summary"].casefold() != "not supplied":
                 site["summary"] = accepted["site_summary"]
+
+            # The original deterministic activities remain in draft["activities"].
+            # Once explicitly accepted, the site section may use Claude's
+            # source-grounded, de-duplicated bullets for the client-facing 5.2 section.
+            if accepted["current_activities"]:
+                ai_activities = copy.deepcopy(accepted["current_activities"])
+                site["this_month_activities"] = ai_activities
+                site["current_period_activities"] = ai_activities
+                site["this_period_activities"] = ai_activities
+                if _draft_report_type(draft) == "weekly":
+                    site["this_week_activities"] = ai_activities
+
             # AI suggestions may improve wording, but accepting them must not
             # erase deterministic constraints or look-ahead items already
             # extracted from the Daily Reports.
