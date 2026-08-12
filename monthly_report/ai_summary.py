@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/4"
-PROMPT_VERSION = "periodic-narrative-grounding/4"
+SUGGESTION_VERSION = "periodic-ai-suggestion/5"
+PROMPT_VERSION = "periodic-narrative-grounding/5"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -57,6 +57,9 @@ _COMPACT_KEYS = (
     "project_no",
     "project_title",
     "project_name",
+    "customer",
+    "location",
+    "equipment",
     "period",
     "report_mode",
     "coverage",
@@ -72,8 +75,10 @@ _COMPACT_KEYS = (
     "tomorrow_activities",
     "planned_activities",
     "constraints",
+    "constraint_reporting",
     "concerns",
     "remarks",
+    "weather",
     "manpower",
 )
 
@@ -258,28 +263,36 @@ Grounding rules:
 Reporting rules:
 6. executive_summary: synthesize the most important work performed, meaningful
    progress/status explicitly stated in the source, genuine project constraints,
-   and supported look-ahead. Prefer useful project narrative over administrative
-   boilerplate. Do not mention parsers, normalization, uploads, source validation,
-   application warnings, or instructions to review the report.
+   and supported look-ahead. Explicit activity status values such as Finished,
+   Completed, Ongoing, or In progress are valid only when present in source data.
+   Prefer useful project narrative over administrative boilerplate. Do not mention
+   parsers, normalization, uploads, source validation, application warnings, or
+   instructions to review the report.
 7. site_summary: consolidate repeated daily activities into a short coherent
-   summary. Preserve project terminology and abbreviations such as LO, CO,
-   wiremesh, flushing, reservoir, and equipment names when present.
+   summary. Preserve project terminology, area/equipment labels, abbreviations,
+   and explicit completion/status. When weather observations are supplied, include
+   one short sentence summarizing the reported conditions and work impact. If report
+   coverage is partial, describe weather only for the available reporting days.
+   Never infer a weather impact that is not supplied.
 8. current_activities: create concise client-facing bullets for the current report
    period. Group repeated/continuing work instead of copying every Daily Report
    line. Use the exact area/equipment label from source data when available.
-   Preserve technical terms, quantities, durations, dates, and unit/equipment
-   identifiers exactly when they are relevant and source-backed. Do not infer
-   completion or progress. Consolidate repeated "Stand by" entries into a single
-   supported status bullet per affected area rather than repeating it by day.
-   Do not omit meaningful current work merely because site_summary also mentions it.
+   Preserve technical terms, quantities, durations, dates, unit/equipment
+   identifiers, and explicit activity status when source-backed. If a source
+   activity has status Finished/Completed, keep that status visible in the bullet.
+   Do not infer completion from a photograph or from an activity disappearing on a
+   later day. Consolidate repeated "Stand by" entries into a single supported
+   status bullet per affected area rather than repeating it by day.
 9. engineering_summary and procurement_summary: use only facts explicitly
    belonging to those subjects. Do not relabel site work as engineering or
    procurement. Use Not supplied when evidence is absent.
 10. concern_actions: include only real construction/project concerns supported by
     source data. A corrective action must also be explicitly supported. If an
     action is not supplied, do not invent one; omit that item and record missing
-    data instead. Internal data-quality or project-identity validation warnings are
-    not project concerns.
+    data instead. An explicit constraint_reporting status of none_reported is
+    valid information, not missing data, and must not be turned into a concern.
+    Internal data-quality or project-identity validation warnings are not project
+    concerns.
 11. lookahead: use only explicitly supplied next-period, tomorrow, or planned
     activities. Do not turn current activities into future plans.
 12. claims is optional supporting narrative evidence for the review UI. Do not add
