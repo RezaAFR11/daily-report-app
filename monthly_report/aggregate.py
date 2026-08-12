@@ -578,6 +578,7 @@ def aggregate_monthly_records(
 
     activities = []
     constraints = []
+    remarks = []
     daily_manpower = []
     role_rows = []
     for report_date, record in selected:
@@ -595,12 +596,15 @@ def aggregate_monthly_records(
                 )
             for text in _iter_text_values(area.get("constraints")):
                 constraints.append({"date": report_date, "area": area_name, "text": text})
+            for text in _iter_text_values(area.get("remarks")):
+                remarks.append({"date": report_date, "area": area_name, "text": text})
         day, day_roles = _daily_manpower(payload, report_date)
         daily_manpower.append(day)
         role_rows.extend(day_roles)
 
     activities = _dedupe_entries(activities, "date", "area", "description")
     constraints = _dedupe_entries(constraints, "date", "area", "text")
+    remarks = _dedupe_entries(remarks, "date", "area", "text")
 
     activities_by_area: dict[str, list[dict[str, str]]] = defaultdict(list)
     for item in activities:
@@ -724,6 +728,7 @@ def aggregate_monthly_records(
         ],
         "tomorrow_activities": tomorrow_activities,
         "constraints": constraints,
+        "remarks": remarks,
         "manpower": {
             "daily": daily_manpower,
             "totals": manpower_totals,
