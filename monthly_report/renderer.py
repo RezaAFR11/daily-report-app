@@ -869,6 +869,39 @@ def _activity_display_text(value: Mapping[str, Any]) -> str:
     return text
 
 
+def _client_facing_missing_summary(value: Any, *, section: str) -> Any:
+    """Replace internal manual-input placeholders with client-facing wording."""
+
+    section_key = str(section or "").strip().casefold()
+    message = (
+        "No engineering status data was supplied in the available Daily Reports."
+        if section_key == "engineering"
+        else "No procurement status data was supplied in the available Daily Reports."
+    )
+    placeholders = {
+        "",
+        "not supplied",
+        "manual input required",
+        "manual input required.",
+        "manual weekly input required",
+        "manual weekly input required.",
+        "manual monthly input required",
+        "manual monthly input required.",
+    }
+
+    if isinstance(value, Mapping):
+        result = dict(value)
+        summary = _plain(result.get("summary")).strip()
+        if summary.casefold() in placeholders:
+            result["summary"] = message
+        return result
+
+    plain = _plain(value).strip()
+    if plain.casefold() in placeholders:
+        return message
+    return value
+
+
 def _content_flowables(
     value: Any,
     styles: Mapping[str, ParagraphStyle],
@@ -1639,12 +1672,17 @@ def _build_story(
     story.append(_heading("3. Engineering", styles["h1"], 0))
     story.append(_heading("3.1 Status Engineering", styles["h2"], 1))
     story.extend(_content_flowables(
-        report.get("engineering"), styles,
-        empty_message="No engineering status information supplied.", bullets=True,
+        _client_facing_missing_summary(report.get("engineering"), section="engineering"),
+        styles,
+        empty_message="No engineering status data was supplied in the available Daily Reports.",
+        bullets=True,
     ))
     story.append(PageBreak())
 
-    procurement = report.get("procurement")
+    procurement = _client_facing_missing_summary(
+        report.get("procurement"),
+        section="procurement",
+    )
     summary, po_rows, embedded_equipment, embedded_shipments = _po_rows(procurement)
     if _plain(summary):
         procurement_intro = [_paragraph(summary, styles["body"]), Spacer(1, 3)]
