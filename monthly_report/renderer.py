@@ -846,10 +846,10 @@ def _mapping_summary(value: Any) -> Any:
 
 
 def _describe_mapping(value: Mapping[str, Any]) -> str:
-    preferred = _value(value, "text", "description", "activity", "title", "name")
+    preferred = _activity_display_text(value)
     if preferred:
         area = _plain(_value(value, "area", "location"))
-        return f"{area}: {_plain(preferred)}" if area else _plain(preferred)
+        return f"{area}: {preferred}" if area else preferred
     pairs = []
     for key, item in value.items():
         if item in (None, "", [], {}):
@@ -857,6 +857,16 @@ def _describe_mapping(value: Mapping[str, Any]) -> str:
         label = str(key).replace("_", " ").strip().title()
         pairs.append(f"{label}: {_plain(item)}")
     return "; ".join(pairs)
+
+
+def _activity_display_text(value: Mapping[str, Any]) -> str:
+    text = _plain(_value(value, "text", "description", "activity", "title", "name"))
+    if not text:
+        return ""
+    status = _plain(value.get("status"))
+    if status and status.casefold() not in text.casefold():
+        return f"{text} — {status}"
+    return text
 
 
 def _content_flowables(
@@ -906,7 +916,7 @@ def _activity_flowables(
     structured = [
         row for row in rows
         if isinstance(row, Mapping) and _plain(_value(row, "area", "location"))
-        and _plain(_value(row, "text", "description", "activity"))
+        and _activity_display_text(row)
     ]
     if not structured:
         return _content_flowables(value, styles, empty_message=empty_message, bullets=True)
@@ -921,7 +931,7 @@ def _activity_flowables(
                 loose.append(text)
             continue
         area = _plain(_value(row, "area", "location"))
-        text = _plain(_value(row, "text", "description", "activity"))
+        text = _activity_display_text(row)
         if not text:
             continue
         if not area:
@@ -1069,6 +1079,20 @@ def _shipment_table(rows: list[Mapping[str, Any]], styles: Mapping[str, Paragrap
         commands.append(("SPAN", (0, 1), (-1, 1)))
     table.setStyle(TableStyle(commands))
     return table
+
+
+def _constraint_reporting_message(report: Mapping[str, Any], site: Mapping[str, Any]) -> str:
+    reporting = site.get("constraint_reporting")
+    if not isinstance(reporting, Mapping):
+        reporting = report.get("constraint_reporting")
+    if not isinstance(reporting, Mapping):
+        return "Concern and closeout information was not supplied."
+    none_dates = _as_list(reporting.get("none_reported_dates"))
+    reported_dates = _as_list(reporting.get("reported_dates"))
+    missing_dates = _as_list(reporting.get("not_supplied_dates"))
+    if none_dates and not reported_dates and not missing_dates:
+        return "No constraints or issues were reported in the available Daily Reports."
+    return "Concern and closeout information was not supplied."
 
 
 def _concerns_table(rows: list[Any], styles: Mapping[str, ParagraphStyle]) -> LongTable | None:
@@ -1236,24 +1260,34 @@ class _SCurveFlowable(Flowable):
 
 
 def _normalise_appendices(value: Any, *, has_s_curve: bool) -> list[dict[str, Any]]:
+    # ``source_number`` is the stable internal appendix slot.  ``number`` is the
+    # display number and may later be reassigned after hidden appendices are
+    # removed.  Keeping both lets future data still map to the original 6.1-6.8
+    # definitions without forcing gaps in the issued report numbering.
     appendices = [
-        {"number": number, "title": title, "status": "Not supplied", "content": None}
+        {
+            "source_number": number,
+            "number": number,
+            "title": title,
+            "status": "Not supplied",
+            "content": None,
+        }
         for number, title in DEFAULT_APPENDICES
     ]
-    by_number = {item["number"]: item for item in appendices}
+    by_source_number = {item["source_number"]: item for item in appendices}
     next_index = 9
     for raw in _as_list(value):
         if isinstance(raw, Mapping):
-            number = _plain(raw.get("number"))
+            source_number = _plain(raw.get("source_number") or raw.get("number"))
             title = _plain(_value(raw, "title", "name", "description"))
             status = _plain(raw.get("status"))
             content = _value(raw, "content", "items", "notes", default=None)
         else:
-            number, title, status, content = "", _plain(raw), "", None
-        if not title and not number:
+            source_number, title, status, content = "", _plain(raw), "", None
+        if not title and not source_number:
             continue
-        if number in by_number:
-            item = by_number[number]
+        if source_number in by_source_number:
+            item = by_source_number[source_number]
             if title:
                 item["title"] = title
             if status:
@@ -1263,18 +1297,37 @@ def _normalise_appendices(value: Any, *, has_s_curve: bool) -> list[dict[str, An
                 if not status:
                     item["status"] = "Included"
             continue
+        source_number = source_number or f"6.{next_index}"
         item = {
-            "number": number or f"6.{next_index}",
+            "source_number": source_number,
+            "number": source_number,
             "title": title or "Appendix",
             "status": status or ("Included" if content else "Not supplied"),
             "content": content,
         }
         next_index += 1
         appendices.append(item)
-        by_number[item["number"]] = item
-    if has_s_curve:
-        by_number["6.2"]["status"] = "Included (generated)"
+        by_source_number[source_number] = item
+    if has_s_curve and "6.2" in by_source_number:
+        by_source_number["6.2"]["status"] = "Included (generated)"
     return appendices
+
+
+def _appendix_source_number(item: Mapping[str, Any]) -> str:
+    return _plain(item.get("source_number") or item.get("number"))
+
+
+def _renumber_visible_appendices(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Assign contiguous display numbers to appendices that will be rendered.
+
+    The stable ``source_number`` remains unchanged, so internal mapping still
+    knows that manpower originated from slot 6.5, photographs from 6.6, etc.
+    Only the client-facing number is compacted to 6.1, 6.2, ... .
+    """
+
+    for index, item in enumerate(items, start=1):
+        item["number"] = f"6.{index}"
+    return items
 
 
 def _appendix_label(item: Mapping[str, Any]) -> str:
@@ -1285,6 +1338,26 @@ def _appendix_label(item: Mapping[str, Any]) -> str:
     if status:
         label += f"  [{status}]"
     return label
+
+
+def _appendix_is_visible(item: Mapping[str, Any]) -> bool:
+    """Return True when an appendix should be shown in the issued report.
+
+    Appendix definitions are intentionally retained even when they are not
+    supplied.  This keeps the fixed 6.1-6.8 structure available for future
+    reports, while preventing empty ``[Not supplied]`` rows from cluttering the
+    current report and its table of contents.
+
+    Content always wins over a stale status value: if an appendix has actual
+    content, it remains visible even if its status was not updated correctly.
+    """
+
+    content = item.get("content")
+    if content not in (None, "", [], {}):
+        return True
+
+    status = _plain(item.get("status")).strip().casefold()
+    return status not in {"", "not supplied"}
 
 
 def _photo_grid_flowables(
@@ -1497,17 +1570,25 @@ def _build_story(
     manpower_totals = manpower.get("totals") if isinstance(manpower.get("totals"), Mapping) else {}
     if manpower.get("daily") or manpower_totals:
         for item in appendices:
-            if item.get("number") == "6.5":
+            if _appendix_source_number(item) == "6.5":
                 item["status"] = "Attached"
                 item["content"] = "__reviewed_manpower__"
                 break
     photos = [item for item in _as_list(report.get("photo_documentation")) if isinstance(item, Mapping)]
     if photos:
         for item in appendices:
-            if item.get("number") == "6.6":
+            if _appendix_source_number(item) == "6.6":
                 item["status"] = "Attached"
                 item["content"] = "__reviewed_photos__"
                 break
+
+    # Keep all appendix definitions in ``appendices`` for future data, but only
+    # render appendices that are actually available for this report.  Hidden
+    # entries are therefore also omitted automatically from the TOC because no
+    # heading flowable is emitted for them.
+    visible_appendices = _renumber_visible_appendices(
+        [item for item in appendices if _appendix_is_visible(item)]
+    )
 
     story: list[Flowable] = [
         Spacer(1, 1),
@@ -1691,25 +1772,35 @@ def _build_story(
     concern_rows = _as_list(_value(site, "concerns", "constraints", default=report.get("constraints")))
     concerns_table = _concerns_table(concern_rows, styles)
     if concerns_table is None:
-        story.append(_paragraph("Concern and closeout information was not supplied.", styles["placeholder"]))
+        story.append(_paragraph(_constraint_reporting_message(report, site), styles["placeholder"]))
     else:
         story.append(concerns_table)
     story.append(PageBreak())
 
-    story.append(_heading("6. Appendices", styles["h1"], 0))
-    for item in appendices:
-        story.append(_heading(_appendix_label(item), styles["appendix_item"], 1))
+    if visible_appendices:
+        story.append(_heading("6. Appendices", styles["h1"], 0))
+        for item in visible_appendices:
+            story.append(_heading(_appendix_label(item), styles["appendix_item"], 1))
 
     if curve is not None:
         labels, planned, actual, illustrative = curve
+        curve_item = next(
+            (item for item in visible_appendices if _appendix_source_number(item) == "6.2"),
+            None,
+        )
+        curve_number = _plain(curve_item.get("number")) if curve_item else "6.1"
+        curve_title = _plain(curve_item.get("title"), "Progress S-Curve") if curve_item else "Progress S-Curve"
         story.extend([
             PageBreak(),
-            Paragraph("Appendix 6.2 - Progress S-Curve", styles["h1"]),
+            Paragraph(
+                escape(f"Appendix {curve_number} - {curve_title}", quote=False),
+                styles["h1"],
+            ),
             Spacer(1, 10),
             _SCurveFlowable(labels, planned, actual, illustrative=illustrative),
         ])
 
-    for item in appendices:
+    for item in visible_appendices:
         content = item.get("content")
         if content in (None, "", [], {}):
             continue
