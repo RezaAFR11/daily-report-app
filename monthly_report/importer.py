@@ -1058,6 +1058,91 @@ def _empty_area(area_id: str) -> dict[str, Any]:
     }
 
 
+def _note_text(value: Any) -> str:
+    text = _compact(str(value or "")).strip()
+    if not text or not text.strip("-\u2013\u2014_"):
+        return ""
+    return text
+
+
+def _merge_area_note(area: dict[str, Any], key: str, value: Any) -> None:
+    """Merge a source note without changing the legacy string field shape."""
+
+    text = _note_text(value)
+    if not text:
+        return
+    current = _note_text(area.get(key))
+    if not current:
+        area[key] = text
+        return
+    existing = [item.strip() for item in current.split("; ") if item.strip()]
+    if text.casefold() not in {item.casefold() for item in existing}:
+        area[key] = "; ".join([*existing, text])
+
+
+def _inline_area_notes(lines: Sequence[str]) -> tuple[list[str], list[str]]:
+    constraints: list[str] = []
+    remarks: list[str] = []
+    for raw in lines:
+        text = _compact(raw)
+        match = re.match(r"^Constraints?\s*:\s*(.+?)\s*$", text, re.IGNORECASE)
+        if match:
+            note = _note_text(match.group(1))
+            if note:
+                constraints.append(note)
+            continue
+        match = re.match(r"^Remarks?\s*:\s*(.+?)\s*$", text, re.IGNORECASE)
+        if match:
+            note = _note_text(match.group(1))
+            if note:
+                remarks.append(note)
+    return constraints, remarks
+
+
+def _section_area_notes(
+    section: str,
+    *,
+    area_ids: Sequence[str],
+    kind: str,
+) -> list[tuple[str, str]]:
+    """Map a Constraints/Remarks section back to known area labels conservatively."""
+
+    if not section.strip():
+        return []
+    result: list[tuple[str, str]] = []
+    known = sorted((_note_text(value) for value in area_ids if _note_text(value)), key=len, reverse=True)
+    for raw in section.splitlines():
+        text = _note_text(raw)
+        if not text:
+            continue
+        folded = text.casefold()
+        if kind == "constraints":
+            if folded in {"area constraint / issue", "area constraint issue", "constraint / issue", "constraint issue"}:
+                continue
+            if folded.startswith("no constraints reported") or folded.startswith("no constraint reported"):
+                continue
+        elif kind == "remarks" and folded in {"remarks", "remark"}:
+            continue
+
+        matched_area = ""
+        note = text
+        for area in known:
+            if folded == area.casefold():
+                matched_area = area
+                note = ""
+                break
+            prefix = area.casefold() + " "
+            if folded.startswith(prefix):
+                matched_area = area
+                note = text[len(area):].lstrip(" :|-\u2013\u2014")
+                break
+        note = _note_text(note)
+        if not note:
+            continue
+        result.append((matched_area or "Imported PDF", note))
+    return result
+
+
 def _extract_daily_content(
     sections: Mapping[str, str],
 ) -> tuple[
@@ -1092,12 +1177,17 @@ def _extract_daily_content(
             area_id=area_id,
             source_section="daily_activities",
         )
-        if today or tomorrow or metadata["rows_extracted"]:
+        inline_constraints, inline_remarks = _inline_area_notes(lines)
+        if today or tomorrow or metadata["rows_extracted"] or inline_constraints or inline_remarks:
             area = ensure_area(area_id)
             area["activities_today"].extend(today)
             area["activities_tomorrow"].extend(tomorrow)
             area["manpower"].extend(parsed_rows["direct"])
             area["indirect_manpower"].extend(parsed_rows["indirect"])
+            for note in inline_constraints:
+                _merge_area_note(area, "constraints", note)
+            for note in inline_remarks:
+                _merge_area_note(area, "remarks", note)
         manpower_metadata.append(metadata)
         provenance_rows.extend(metadata.pop("row_provenance"))
         warnings.extend(row_warnings)
@@ -1117,6 +1207,16 @@ def _extract_daily_content(
         manpower_metadata.append(metadata)
         provenance_rows.extend(metadata.pop("row_provenance"))
         warnings.extend(row_warnings)
+
+    # Some Daily Report templates repeat area constraints in a dedicated section.
+    # Map those rows back to the already discovered area labels; unknown/global
+    # notes remain visible under a neutral Imported PDF area instead of being lost.
+    for area_id, note in _section_area_notes(
+        sections.get("constraints", ""),
+        area_ids=[area.get("id", "") for area in areas],
+        kind="constraints",
+    ):
+        _merge_area_note(ensure_area(area_id), "constraints", note)
 
     global_section = sections.get("indirect_manpower", "")
     global_rows, global_metadata, global_warnings = _parse_manpower_lines(
