@@ -240,8 +240,8 @@ def _styles() -> dict[str, ParagraphStyle]:
             spaceAfter=4, keepWithNext=False,
         ),
         "toc_title": ParagraphStyle(
-            "MonthlyTOCTitle", fontName="Helvetica-Bold", fontSize=14, leading=17,
-            alignment=TA_CENTER, textColor=BLACK, spaceAfter=10,
+            "MonthlyTOCTitle", fontName="Helvetica-Bold", fontSize=14, leading=16,
+            alignment=TA_LEFT, textColor=BLACK, spaceAfter=6,
         ),
         "toc_subtitle": ParagraphStyle(
             "MonthlyTOCSubtitle", fontName="Helvetica", fontSize=16, leading=19,
@@ -1514,18 +1514,31 @@ def _build_story(
         NextPageTemplate("body"),
         PageBreak(),
         Paragraph("Table of Contents", styles["toc_title"]),
-        Paragraph("Table of Contents", styles["toc_subtitle"]),
     ]
     toc = TableOfContents()
     toc.dotsMinLevel = 0
     toc.levelStyles = [
         ParagraphStyle(
-            "MonthlyTOCLevel0", fontName="Helvetica", fontSize=11.5, leading=14,
-            leftIndent=10, firstLineIndent=-10, spaceBefore=3, textColor=BLACK,
+            "MonthlyTOCLevel0",
+            fontName="Helvetica",
+            fontSize=10.5,
+            leading=11.5,
+            leftIndent=10,
+            firstLineIndent=-10,
+            spaceBefore=1,
+            spaceAfter=0,
+            textColor=BLACK,
         ),
         ParagraphStyle(
-            "MonthlyTOCLevel1", fontName="Helvetica", fontSize=10.5, leading=13,
-            leftIndent=30, firstLineIndent=-10, spaceBefore=1, textColor=BLACK,
+            "MonthlyTOCLevel1",
+            fontName="Helvetica",
+            fontSize=9.5,
+            leading=10.5,
+            leftIndent=26,
+            firstLineIndent=-10,
+            spaceBefore=0,
+            spaceAfter=0,
+            textColor=BLACK,
         ),
     ]
     story.extend([toc, PageBreak()])
