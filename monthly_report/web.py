@@ -66,6 +66,8 @@ _AI_COOLDOWN_SECONDS = 20
 _AI_DRAFT_LOCK_STALE_SECONDS = 5 * 60
 _AI_DRAFT_LOCK_RETRY_SECONDS = 5
 _MAKASSAR_TIMEZONE = ZoneInfo("Asia/Makassar")
+_PROVISIONAL_PROJECT_TITLE_SIMILARITY = 80.0
+_DAILY_REPORT_DOCUMENT_NO_RE = re.compile(r"^PC[-/].*[-/]DAR$", re.IGNORECASE)
 
 
 def _report_type(value: Any) -> str:
@@ -1009,7 +1011,19 @@ def _source_manifest(records: list[dict[str, Any]], method: str) -> list[dict[st
             if isinstance(record.get("source_identity"), dict)
             else {}
         )
+        source_id = _clean_text(record.get("report_id"), 300)
+        if not source_id and source.get("sha256"):
+            source_id = f"sha256:{_clean_text(source.get('sha256'), 128)}"
+        if not source_id:
+            legacy_identity = "\0".join((
+                _clean_text(record.get("username", record.get("owner", "")), 200),
+                _record_date(record),
+                _clean_text(source.get("filename", record.get("pdf_filename", "")), 500),
+                str(record.get("revision", 1)),
+            ))
+            source_id = f"legacy:{hashlib.sha256(legacy_identity.encode('utf-8')).hexdigest()}"
         row = {
+            "source_id": source_id,
             "report_id": record.get("report_id"),
             "revision": record.get("revision", 1),
             "report_date": _record_date(record),
@@ -1232,13 +1246,12 @@ def _provisional_project_records(
     project_no: str,
     project_title: str,
 ) -> list[dict[str, Any]]:
-    """Provisionally merge uploaded project identities for the review preview.
+    """Preview exact/plausible legacy identities without mixing other projects.
 
-    Source Data Validation remains unapplied/unconfirmed, so the reviewer must
-    still decide Merge vs Keep separate before Final issue.  Including all
-    uploaded identities in the provisional preview prevents a project-number
-    mismatch from being misreported as a *missing date* when the Daily Report
-    for that date was actually uploaded and parsed successfully.
+    Source Data Validation remains unapplied/unconfirmed.  Exact number/title
+    matches and strong legacy-title variants are shown provisionally so daily
+    document-number changes do not appear as missing dates. Clearly unrelated
+    identities remain excluded until the reviewer explicitly merges them.
     """
 
     groups = validation.get("project_groups") if isinstance(validation, dict) else []
@@ -1246,9 +1259,37 @@ def _provisional_project_records(
     for group in groups if isinstance(groups, list) else []:
         if not isinstance(group, dict) or not group.get("key"):
             continue
+        # Preview only identities with deterministic evidence that they may be
+        # the selected project.  A legacy Daily Report number may differ on
+        # every day, so an exact/high-similarity title remains reviewable.  A
+        # clearly unrelated project must not pollute coverage or photo assets.
+        source_no = _clean_text(group.get("project_no"), 250)
+        selected_no = _clean_text(project_no, 250)
+        number_conflict = bool(
+            source_no
+            and selected_no
+            and source_no.casefold() != selected_no.casefold()
+        )
+        daily_document_number = bool(
+            _DAILY_REPORT_DOCUMENT_NO_RE.fullmatch(source_no)
+            or _DAILY_REPORT_DOCUMENT_NO_RE.fullmatch(selected_no)
+        )
+        plausible_title = bool(
+            group.get("title_matches_selected")
+            or float(group.get("title_similarity") or 0)
+            >= _PROVISIONAL_PROJECT_TITLE_SIMILARITY
+        )
+        plausible_match = bool(
+            group.get("matches_selected")
+            or group.get("number_matches_selected")
+            or (
+                plausible_title
+                and (not number_conflict or daily_document_number)
+            )
+        )
         resolutions.append({
             "group_key": group["key"],
-            "decision": "merge",
+            "decision": "merge" if plausible_match else "separate",
         })
     try:
         included, _ = resolve_project_records(

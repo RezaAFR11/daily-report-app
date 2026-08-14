@@ -93,6 +93,17 @@ def _record_sort_key(record: Mapping[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _record_source_id(record: Mapping[str, Any]) -> str:
+    """Return the stable source identifier exposed to narrative consumers."""
+
+    report_id = _clean_text(record.get("report_id"))
+    if report_id:
+        return report_id
+    source = record.get("source") if isinstance(record.get("source"), Mapping) else {}
+    digest = _clean_text(source.get("sha256"))
+    return f"sha256:{digest}" if digest else ""
+
+
 def _date_sequence(start: str, end: str) -> list[str]:
     current = date.fromisoformat(start)
     last = date.fromisoformat(end)
@@ -612,13 +623,19 @@ def aggregate_monthly_records(
     role_rows = []
     for report_date, record in selected:
         payload = _payload(record)
+        source_id = _record_source_id(record)
         weather_item = _weather_row(payload, report_date)
         if weather_item is not None:
+            if source_id:
+                weather_item["source_id"] = source_id
             weather_daily.append(weather_item)
         constraint_state = _clean_text(payload.get("constraint_status"))
         if constraint_state not in {"none_reported", "reported", "not_supplied"}:
             constraint_state = "not_supplied"
-        constraint_daily.append({"date": report_date, "status": constraint_state})
+        constraint_daily_item = {"date": report_date, "status": constraint_state}
+        if source_id:
+            constraint_daily_item["source_id"] = source_id
+        constraint_daily.append(constraint_daily_item)
         areas = payload.get("areas")
         if not isinstance(areas, list):
             areas = []
@@ -629,14 +646,22 @@ def aggregate_monthly_records(
             status_map = _activity_status_map(area)
             for description in _iter_text_values(area.get("activities_today")):
                 item = {"date": report_date, "area": area_name, "description": description}
+                if source_id:
+                    item["source_id"] = source_id
                 status = status_map.get(_normalise_text(description))
                 if status:
                     item["status"] = status
                 activities.append(item)
             for text in _iter_text_values(area.get("constraints")):
-                constraints.append({"date": report_date, "area": area_name, "text": text})
+                item = {"date": report_date, "area": area_name, "text": text}
+                if source_id:
+                    item["source_id"] = source_id
+                constraints.append(item)
             for text in _iter_text_values(area.get("remarks")):
-                remarks.append({"date": report_date, "area": area_name, "text": text})
+                item = {"date": report_date, "area": area_name, "text": text}
+                if source_id:
+                    item["source_id"] = source_id
+                remarks.append(item)
         day, day_roles = _daily_manpower(payload, report_date)
         daily_manpower.append(day)
         role_rows.extend(day_roles)
@@ -656,6 +681,7 @@ def aggregate_monthly_records(
     last_report_date = covered[-1] if covered else None
     if selected:
         last_date, last_record = selected[-1]
+        last_source_id = _record_source_id(last_record)
         areas = _payload(last_record).get("areas")
         if isinstance(areas, list):
             for area in areas:
@@ -663,9 +689,14 @@ def aggregate_monthly_records(
                     continue
                 area_name = _clean_text(area.get("id")) or "Unspecified"
                 for description in _iter_text_values(area.get("activities_tomorrow")):
-                    tomorrow_activities.append(
-                        {"source_date": last_date, "area": area_name, "description": description}
-                    )
+                    item = {
+                        "source_date": last_date,
+                        "area": area_name,
+                        "description": description,
+                    }
+                    if last_source_id:
+                        item["source_id"] = last_source_id
+                    tomorrow_activities.append(item)
     tomorrow_activities = _dedupe_entries(
         tomorrow_activities, "source_date", "area", "description"
     )

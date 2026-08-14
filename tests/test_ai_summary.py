@@ -19,6 +19,7 @@ from monthly_report.ai_summary import (
     compact_periodic_draft,
     draft_input_hash,
     generate_ai_summary,
+    validate_narrative_suggestion,
 )
 
 
@@ -47,13 +48,25 @@ def _draft():
         "procurement": {"summary": ""},
         "site": {
             "current_period_activities": [
-                {"date": "2026-08-10", "description": "Turbine alignment"}
+                {
+                    "date": "2026-08-10",
+                    "source_id": "daily-a",
+                    "description": "Turbine alignment",
+                }
             ],
             "next_period_activities": [
-                {"source_date": "2026-08-11", "description": "Continue alignment"}
+                {
+                    "source_date": "2026-08-11",
+                    "source_id": "daily-b",
+                    "description": "Continue alignment",
+                }
             ],
             "concerns": [
-                {"date": "2026-08-11", "text": "Waiting for permit"}
+                {
+                    "date": "2026-08-11",
+                    "source_id": "daily-b",
+                    "text": "Waiting for permit",
+                }
             ],
         },
     }
@@ -81,6 +94,12 @@ def _valid_suggestion():
         "site_summary": _claim(
             "Turbine alignment was recorded.", ["daily-a"], ["2026-08-10"]
         ),
+        "current_activities": [{
+            "area": "Turbine",
+            "text": "Turbine alignment was recorded.",
+            "source_ids": ["daily-a"],
+            "dates": ["2026-08-10"],
+        }],
         "concern_actions": [
             {
                 "concern": "Waiting for permit.",
@@ -183,19 +202,22 @@ class AISummaryTests(unittest.TestCase):
             generate_ai_summary(draft, client=_FakeClient())
         self.assertEqual(raised.exception.code, "source_validation_required")
 
-    def test_invalid_json_and_invalid_schema_are_rejected(self):
+    def test_invalid_json_and_invalid_schema_are_salvaged_after_one_repair(self):
         invalid_json = SimpleNamespace(
             content=[SimpleNamespace(type="text", text="not-json")],
             usage=None,
         )
-        with self.assertRaises(AIMalformedResponseError):
-            generate_ai_summary(_draft(), client=_FakeClient(response=invalid_json))
+        invalid_json_client = _FakeClient(response=invalid_json)
+        result = generate_ai_summary(_draft(), client=invalid_json_client)
+        self.assertEqual(len(invalid_json_client.messages.calls), 2)
+        self.assertEqual(result["suggestion"]["executive_summary"]["text"], "Not supplied")
 
         invalid_schema = _valid_suggestion()
         invalid_schema.pop("claims")
         with self.assertRaises(AIMalformedResponseError):
-            generate_ai_summary(
-                _draft(), client=_FakeClient(response=_response(invalid_schema))
+            validate_narrative_suggestion(
+                invalid_schema,
+                compact_draft=compact_periodic_draft(_draft()),
             )
 
     def test_unknown_sources_are_rejected(self):
@@ -204,7 +226,10 @@ class AISummaryTests(unittest.TestCase):
             "Turbine alignment was recorded.", ["made-up"], ["2026-08-10"]
         )
         with self.assertRaises(AIUnsupportedClaimsError) as raised:
-            generate_ai_summary(_draft(), client=_FakeClient(response=_response(unknown)))
+            validate_narrative_suggestion(
+                unknown,
+                compact_draft=compact_periodic_draft(_draft()),
+            )
         self.assertEqual(raised.exception.code, "unsupported_claims")
 
     def test_all_numeric_prose_is_rejected_even_when_present_in_source(self):
@@ -227,16 +252,148 @@ class AISummaryTests(unittest.TestCase):
                     AIUnsupportedClaimsError,
                     "numeric prose",
                 ):
-                    generate_ai_summary(
-                        _draft(),
-                        client=_FakeClient(response=_response(numeric)),
+                    validate_narrative_suggestion(
+                        numeric,
+                        compact_draft=compact_periodic_draft(_draft()),
                     )
 
-    def test_numeric_missing_data_labels_are_rejected(self):
+    def test_numeric_missing_data_labels_are_normalised_as_metadata(self):
         numeric = _valid_suggestion()
         numeric["missing_data"] = ["Appendix 2: Not supplied"]
+        result = validate_narrative_suggestion(
+            numeric,
+            compact_draft=compact_periodic_draft(_draft()),
+        )
+        self.assertEqual(result["missing_data"], ["Appendix 2: Not supplied"])
+
+    def test_numeric_activity_is_allowed_only_from_its_cited_source(self):
+        draft = _draft()
+        draft["site"]["current_period_activities"][0]["description"] = (
+            "Install 4 valve accessories at 81-HCV-231"
+        )
+        suggestion = _valid_suggestion()
+        suggestion["current_activities"][0]["text"] = (
+            "Installed 4 valve accessories at 81-HCV-231."
+        )
+        validated = validate_narrative_suggestion(
+            suggestion,
+            compact_draft=compact_periodic_draft(draft),
+        )
+        self.assertIn("81-HCV-231", validated["current_activities"][0]["text"])
+
+    def test_cited_date_and_full_equipment_tag_are_allowed(self):
+        draft = _draft()
+        draft["site"]["current_period_activities"][0]["description"] = (
+            "Install 4 valve accessories at 81-HCV-231"
+        )
+        suggestion = _valid_suggestion()
+        suggestion["current_activities"][0]["text"] = (
+            "On 2026-08-10, installed 4 valve accessories at 81-HCV-231."
+        )
+        validated = validate_narrative_suggestion(
+            suggestion,
+            compact_draft=compact_periodic_draft(draft),
+        )
+        self.assertIn("2026-08-10", validated["current_activities"][0]["text"])
+
+    def test_equipment_tag_number_cannot_be_repurposed_as_a_quantity(self):
+        draft = _draft()
+        draft["site"]["current_period_activities"][0]["description"] = (
+            "Install 4 valve accessories at 81-HCV-231"
+        )
+        suggestion = _valid_suggestion()
+        suggestion["current_activities"][0]["text"] = (
+            "Installed 231 valve accessories in Area 81."
+        )
         with self.assertRaisesRegex(AIUnsupportedClaimsError, "numeric prose"):
-            generate_ai_summary(_draft(), client=_FakeClient(response=_response(numeric)))
+            validate_narrative_suggestion(
+                suggestion,
+                compact_draft=compact_periodic_draft(draft),
+            )
+
+    def test_none_reported_constraint_supports_no_constraints_narrative(self):
+        draft = _draft()
+        draft["constraint_reporting"] = {
+            "daily": [{
+                "date": "2026-08-10",
+                "source_id": "daily-a",
+                "status": "none_reported",
+            }]
+        }
+        suggestion = _valid_suggestion()
+        suggestion["executive_summary"] = _claim(
+            "No constraints were reported.",
+            ["daily-a"],
+            ["2026-08-10"],
+        )
+        validated = validate_narrative_suggestion(
+            suggestion,
+            compact_draft=compact_periodic_draft(draft),
+        )
+        self.assertEqual(
+            validated["executive_summary"]["text"],
+            "No constraints were reported.",
+        )
+
+    def test_none_reported_constraint_cannot_prove_no_safety_incidents(self):
+        draft = _draft()
+        draft["constraint_reporting"] = {
+            "daily": [{
+                "date": "2026-08-10",
+                "source_id": "daily-a",
+                "status": "none_reported",
+            }]
+        }
+        suggestion = _valid_suggestion()
+        suggestion["executive_summary"] = _claim(
+            "No safety incidents were recorded.",
+            ["daily-a"],
+            ["2026-08-10"],
+        )
+        with self.assertRaisesRegex(AIUnsupportedClaimsError, "numeric prose"):
+            validate_narrative_suggestion(
+                suggestion,
+                compact_draft=compact_periodic_draft(draft),
+            )
+
+    def test_each_cited_source_requires_its_matching_date(self):
+        draft = _draft()
+        draft["site"]["next_period_activities"][0]["description"] = "Install 999 bolts"
+        suggestion = _valid_suggestion()
+        suggestion["current_activities"][0].update({
+            "text": "Install 999 bolts.",
+            "source_ids": ["daily-a", "daily-b"],
+            "dates": ["2026-08-10"],
+        })
+        with self.assertRaisesRegex(AIUnsupportedClaimsError, "without its matching report date"):
+            validate_narrative_suggestion(
+                suggestion,
+                compact_draft=compact_periodic_draft(draft),
+            )
+
+    def test_one_missing_reference_half_is_completed_from_exact_manifest_pair(self):
+        suggestion = _valid_suggestion()
+        suggestion["lookahead"][0]["source_ids"] = []
+        suggestion["claims"][0]["dates"] = []
+        validated = validate_narrative_suggestion(
+            suggestion,
+            compact_draft=compact_periodic_draft(_draft()),
+        )
+        self.assertEqual(validated["lookahead"][0]["source_ids"], ["daily-b"])
+        self.assertEqual(validated["claims"][0]["dates"], ["2026-08-10"])
+
+    def test_unreferenced_lookahead_is_dropped_without_a_second_provider_call(self):
+        suggestion = _valid_suggestion()
+        suggestion["lookahead"][0]["source_ids"] = []
+        suggestion["lookahead"][0]["dates"] = []
+        client = _FakeClient(response=_response(suggestion))
+        result = generate_ai_summary(_draft(), client=client)
+        self.assertEqual(len(client.messages.calls), 1)
+        self.assertEqual(result["suggestion"]["lookahead"], [])
+        self.assertIn(
+            "One AI look-ahead item was ignored because its Daily Report source could not be verified.",
+            result["validation_warnings"],
+        )
 
     def test_legacy_separate_concerns_and_actions_schema_is_rejected(self):
         legacy = _valid_suggestion()
@@ -248,21 +405,26 @@ class AISummaryTests(unittest.TestCase):
             _claim("Continue alignment.", ["daily-b"], ["2026-08-11"])
         ]
         with self.assertRaises(AIMalformedResponseError):
-            generate_ai_summary(_draft(), client=_FakeClient(response=_response(legacy)))
+            validate_narrative_suggestion(
+                legacy,
+                compact_draft=compact_periodic_draft(_draft()),
+            )
 
     def test_concern_action_requires_a_complete_grounded_pair(self):
         unpaired = _valid_suggestion()
         unpaired["concern_actions"][0]["corrective_action"] = "Not supplied"
         with self.assertRaisesRegex(AIUnsupportedClaimsError, "must pair"):
-            generate_ai_summary(
-                _draft(), client=_FakeClient(response=_response(unpaired))
+            validate_narrative_suggestion(
+                unpaired,
+                compact_draft=compact_periodic_draft(_draft()),
             )
 
         unknown = _valid_suggestion()
         unknown["concern_actions"][0]["source_ids"] = ["made-up"]
         with self.assertRaisesRegex(AIUnsupportedClaimsError, "unknown source IDs"):
-            generate_ai_summary(
-                _draft(), client=_FakeClient(response=_response(unknown))
+            validate_narrative_suggestion(
+                unknown,
+                compact_draft=compact_periodic_draft(_draft()),
             )
 
     def test_prompt_injection_is_delimited_as_untrusted_data(self):
@@ -278,7 +440,7 @@ class AISummaryTests(unittest.TestCase):
 
         call = client.messages.calls[0]
         self.assertIn("UNTRUSTED DATA", call["system"])
-        self.assertIn("Never put numbers in narrative text", call["system"])
+        self.assertIn("Never calculate, estimate, extrapolate", call["system"])
         self.assertIn("concern_actions", call["system"])
         user_content = call["messages"][0]["content"]
         self.assertIn("<source_data>", user_content)

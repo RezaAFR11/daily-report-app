@@ -19,15 +19,16 @@ def _pdf_text(pdf_bytes: bytes) -> str:
 
 
 class MonthlyReportRendererTests(unittest.TestCase):
-    def test_minimal_report_returns_rewound_seven_page_pdf(self):
+    def test_minimal_report_omits_empty_appendix_page(self):
         result = render_monthly_report({})
 
         self.assertIsInstance(result, io.BytesIO)
         self.assertEqual(result.tell(), 0)
         self.assertTrue(result.getvalue().startswith(b"%PDF-"))
-        # Cover, TOC, executive/safety, engineering, procurement, site,
-        # appendices.  The blank eighth source-template page is not emitted.
-        self.assertEqual(_page_count(result.getvalue()), 7)
+        # Cover, TOC, executive/safety, engineering, procurement, and site.
+        # Empty appendix definitions are intentionally hidden, so an empty
+        # appendix register and the blank source-template page are not emitted.
+        self.assertEqual(_page_count(result.getvalue()), 6)
 
     def test_review_schema_progress_adds_generated_s_curve_page(self):
         report = {
@@ -121,7 +122,7 @@ class MonthlyReportRendererTests(unittest.TestCase):
 
         result = render_monthly_report(report)
 
-        self.assertEqual(_page_count(result.getvalue()), 7)
+        self.assertEqual(_page_count(result.getvalue()), 6)
 
     def test_long_runtime_text_and_tables_split_without_layout_error(self):
         long_text = "Wrapped runtime text with XML chars & < > " * 350

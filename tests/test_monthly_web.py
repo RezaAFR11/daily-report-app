@@ -15,8 +15,10 @@ from monthly_report.importer import DEFAULT_LIMITS, PDFImportError
 from monthly_report.web import (
     _normalize_progress,
     _prepare_draft,
+    _provisional_project_records,
     register_monthly_routes,
 )
+from monthly_report.validation import build_source_validation
 
 
 PROJECT_NO = "001/KN-GPA/EPC-2F-P2/IV/2025"
@@ -186,6 +188,61 @@ class MonthlyWebUnitTests(unittest.TestCase):
         self.assertEqual(draft["site"]["concerns"], aggregate["constraints"])
         self.assertEqual(draft["safety"]["total_manpower"], 12)
         self.assertEqual(draft["safety"]["total_man_hours"], 224.5)
+
+    def test_provisional_preview_does_not_merge_similar_titles_with_distinct_project_numbers(self):
+        records = [
+            {
+                "report_id": "project-a",
+                "date": "2026-08-09",
+                "project_no": "P-A",
+                "project_title": "Valve Repair Unit A",
+                "payload": {"date": "2026-08-09"},
+            },
+            {
+                "report_id": "project-b",
+                "date": "2026-08-10",
+                "project_no": "P-B",
+                "project_title": "Valve Repair Unit B",
+                "payload": {"date": "2026-08-10"},
+            },
+        ]
+        validation = build_source_validation(
+            records,
+            selected_project_no="P-A",
+            selected_project_title="Valve Repair Unit A",
+        )
+
+        selected = _provisional_project_records(
+            records,
+            validation,
+            project_no="P-A",
+            project_title="Valve Repair Unit A",
+        )
+
+        self.assertEqual([record["report_id"] for record in selected], ["project-a"])
+
+    def test_provisional_preview_keeps_legacy_daily_document_number_with_matching_title(self):
+        records = [{
+            "report_id": "legacy-day",
+            "date": "2026-06-17",
+            "project_no": "PC-26-006-KN-GPA-360-DAR",
+            "project_title": "RE-ACTIVATION TURBINES AND GENERATORS",
+            "payload": {"date": "2026-06-17"},
+        }]
+        validation = build_source_validation(
+            records,
+            selected_project_no=PROJECT_NO,
+            selected_project_title=PROJECT_TITLE,
+        )
+
+        selected = _provisional_project_records(
+            records,
+            validation,
+            project_no=PROJECT_NO,
+            project_title=PROJECT_TITLE,
+        )
+
+        self.assertEqual([record["report_id"] for record in selected], ["legacy-day"])
 
 
 class MonthlyWebRouteTests(unittest.TestCase):
@@ -385,6 +442,7 @@ class MonthlyWebRouteTests(unittest.TestCase):
                     "area": "Turbine Unit 2",
                     "description": "Start loop test",
                     "source_date": "2026-07-02",
+                    "source_id": "day-2",
                 }
             ],
         )

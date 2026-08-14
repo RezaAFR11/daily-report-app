@@ -218,7 +218,12 @@ class MonthlyAggregationTests(unittest.TestCase):
         self.assertEqual(descriptions, ["Old activity", "Function test"])
         self.assertEqual(
             result["tomorrow_activities"],
-            [{"source_date": "2026-07-02", "area": "Turbine 2", "description": "Stroking test"}],
+            [{
+                "source_date": "2026-07-02",
+                "area": "Turbine 2",
+                "description": "Stroking test",
+                "source_id": "day-2-r2",
+            }],
         )
         self.assertEqual(result["constraints"][0]["text"], "Oil seepage")
 

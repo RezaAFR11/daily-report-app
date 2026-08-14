@@ -1520,6 +1520,12 @@ def _extract_daily_content(
         area_ids=[area.get("id", "") for area in areas],
         kind="remarks",
     ):
+        # A remark without an explicit area is already preserved in
+        # data.global_remarks.  Creating an extra "Imported PDF" area here
+        # duplicates the same text and makes old/new layouts aggregate
+        # differently.
+        if _area_key(area_id) == _area_key("Imported PDF"):
+            continue
         _merge_area_note(ensure_area(area_id), "remarks", note)
 
     global_section = sections.get("indirect_manpower", "")

@@ -1351,15 +1351,15 @@ def _appendix_source_number(item: Mapping[str, Any]) -> str:
 
 
 def _renumber_visible_appendices(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Assign contiguous display numbers to appendices that will be rendered.
+    """Keep the KN procedure's fixed 6.1-6.8 appendix numbering.
 
-    The stable ``source_number`` remains unchanged, so internal mapping still
-    knows that manpower originated from slot 6.5, photographs from 6.6, etc.
-    Only the client-facing number is compacted to 6.1, 6.2, ... .
+    Empty appendices may be hidden, but their reserved numbers must not be
+    reassigned.  In particular, manpower remains 6.5 and photographs remain
+    6.6 across weekly/monthly reports and all Daily Report input formats.
     """
 
-    for index, item in enumerate(items, start=1):
-        item["number"] = f"6.{index}"
+    for item in items:
+        item["number"] = _appendix_source_number(item)
     return items
 
 

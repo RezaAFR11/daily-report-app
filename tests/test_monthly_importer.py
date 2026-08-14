@@ -6,6 +6,8 @@ from unittest.mock import patch
 from monthly_report.importer import (
     DEFAULT_LIMITS,
     ImportLimits,
+    LAYOUT_PROFILE_CURRENT_SPLIT,
+    LAYOUT_PROFILE_LEGACY_COMBINED,
     PDFDependencyError,
     PDFExtractionError,
     PDFValidationError,
@@ -220,6 +222,7 @@ class MonthlyPDFImporterTests(unittest.TestCase):
                     "indirect_manpower": [],
                     "constraints": "",
                     "remarks": "",
+                    "activity_statuses": [],
                     "photos": [],
                 }
             ],
@@ -276,7 +279,7 @@ class MonthlyPDFImporterTests(unittest.TestCase):
             ],
         )
         extraction = result["extraction"]["manpower"]
-        self.assertEqual(extraction["profile"], "combined_activities_manpower")
+        self.assertEqual(extraction["profile"], LAYOUT_PROFILE_LEGACY_COMBINED)
         self.assertTrue(extraction["completeness"]["global_indirect"]["complete"])
         self.assertTrue(extraction["completeness"]["direct_by_area"]["complete"])
         self.assertTrue(
@@ -311,7 +314,10 @@ class MonthlyPDFImporterTests(unittest.TestCase):
             [CURRENT_SPLIT_PAGE_1, CURRENT_SPLIT_PAGE_2]
         )
 
-        self.assertEqual(result["extraction"]["manpower"]["profile"], "split_sections")
+        self.assertEqual(
+            result["extraction"]["manpower"]["profile"],
+            LAYOUT_PROFILE_CURRENT_SPLIT,
+        )
         self.assertEqual(result["data"]["indirect_manpower"], [])
         self.assertEqual(
             [
@@ -331,6 +337,56 @@ class MonthlyPDFImporterTests(unittest.TestCase):
         self.assertTrue(completeness["global_indirect"]["complete"])
         self.assertEqual(completeness["global_indirect"]["rows_extracted"], 0)
         self.assertEqual(completeness["direct_by_area"]["rows_extracted"], 2)
+
+    def test_real_old_and_new_header_patterns_keep_report_dates(self):
+        current_cases = (("2026-08-09", "309"), ("2026-08-10", "310"))
+        for report_date, day_no in current_cases:
+            with self.subTest(profile="current", date=report_date):
+                page = "\n".join([
+                    "1. REPORT INFORMATION",
+                    "Project No. P01.0825.J075",
+                    "Project Name Repair & Services Control Valve & ON OFF Valve",
+                    f"Date: {report_date} | Day: {day_no} | Project: P01.0825.J075",
+                    f"Working Day Day {day_no}",
+                    "4. DAILY ACTIVITIES BY AREA",
+                    "■ MA-81",
+                    f"{'Activity Today':<44}Activity Tomorrow",
+                    "1. Check Accessories Valve",
+                    "5. DIRECT MANPOWER BY AREA",
+                    "■ MA-81",
+                    f"{'No.':<8}{'Name':<38}{'Role / Position':<34}Working Hours",
+                    f"{'1':<8}{'Worker':<38}{'Technician':<34}07:00 - 17:00",
+                    "6. CONSTRAINTS & ISSUES",
+                ])
+                result = parse_daily_report_pages([page])
+                self.assertEqual(result["report_date"], report_date)
+                self.assertEqual(result["day_no"], day_no)
+                self.assertEqual(result["data"]["layout_profile"], LAYOUT_PROFILE_CURRENT_SPLIT)
+                self.assertEqual(result["data"]["areas"][0]["id"], "MA-81")
+
+        legacy_cases = (("2026-06-17", "360"), ("2026-06-18", "361"))
+        for report_date, day_no in legacy_cases:
+            with self.subTest(profile="legacy", date=report_date):
+                page = "\n".join([
+                    "1. REPORT INFORMATION",
+                    f"Project No. PC-26-006-KN-GPA-{day_no}-DAR",
+                    "Project Name RE-ACTIVATION TURBINES AND GENERATORS",
+                    f"Date: {report_date} | Day: {day_no} | Project: PC-26-006-KN-GPA-{day_no}-DAR",
+                    f"Working Day Day {day_no}",
+                    "4. DAILY ACTIVITIES & MANPOWER BY AREA",
+                    "■ Turbine Unit 2",
+                    f"{'Activity Today':<44}Activity Tomorrow",
+                    "1. Continue Wiremesh replacement",
+                    "Direct Manpower — Turbine Unit 2",
+                    f"{'No.':<8}{'Name':<25}{'Position':<25}{'Task Today':<30}Hours",
+                    f"{'1':<8}{'Worker':<25}{'Technician':<25}{'Wiremesh':<30}07:00 - 17:00",
+                    "5. CONSTRAINTS & ISSUES",
+                ])
+                result = parse_daily_report_pages([page])
+                self.assertEqual(result["report_date"], report_date)
+                self.assertEqual(result["day_no"], day_no)
+                self.assertEqual(result["data"]["layout_profile"], LAYOUT_PROFILE_LEGACY_COMBINED)
+                self.assertEqual(result["data"]["areas"][0]["id"], "Turbine Unit 2")
 
     def test_invalid_magic_header_is_rejected_before_pdf_reader(self):
         with patch("monthly_report.importer._load_pdf_reader") as loader:
