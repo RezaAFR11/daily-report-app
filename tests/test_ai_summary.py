@@ -13,6 +13,7 @@ from monthly_report.ai_summary import (
     AIConfigurationError,
     AIInputError,
     AIMalformedResponseError,
+    AIProviderError,
     AIRateLimitError,
     AISourceValidationError,
     AITimeoutError,
@@ -727,6 +728,47 @@ class AISummaryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(AIInputError, "between 1 and 60 seconds"):
             generate_ai_summary(_draft(), client=_FakeClient(), timeout=61)
+
+    def test_api_side_structured_output_rejection_uses_bounded_prompt_fallback(self):
+        request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        response = httpx.Response(400, request=request)
+        error = anthropic.BadRequestError(
+            "bad request",
+            response=response,
+            body={"error": {"message": "output_config.format is not supported"}},
+        )
+
+        class SequenceMessages:
+            def __init__(self):
+                self.calls = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    raise error
+                return _response(_valid_suggestion())
+
+        messages = SequenceMessages()
+        result = generate_ai_summary(
+            _draft(),
+            client=SimpleNamespace(messages=messages),
+        )
+
+        self.assertEqual(len(messages.calls), 2)
+        self.assertIn("output_config", messages.calls[0])
+        self.assertNotIn("output_config", messages.calls[1])
+        self.assertIn("Return ONLY JSON matching this schema exactly", messages.calls[1]["messages"][0]["content"])
+        self.assertIn("validated JSON prompt fallback", result["validation_warnings"][0])
+
+        unrelated = anthropic.BadRequestError(
+            "model is invalid",
+            response=response,
+            body={"error": {"message": "unknown model"}},
+        )
+        client = _FakeClient(error=unrelated)
+        with self.assertRaises(AIProviderError):
+            generate_ai_summary(_draft(), client=client)
+        self.assertEqual(len(client.messages.calls), 1)
 
     def test_input_hash_is_deterministic_for_mapping_key_order(self):
         compact = compact_periodic_draft(_draft())

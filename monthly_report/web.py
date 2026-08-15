@@ -2152,7 +2152,7 @@ def _ai_issue_audit(value: Any) -> dict[str, Any] | None:
         for key in (
             "status", "requested_at", "requested_by", "decided_at", "decided_by",
             "generation_mode", "fallback_sections", "expected_missing_sections",
-            "fallback_reason_code",
+            "fallback_reason_code", "fallback_status_code",
             "validation_warnings",
         )
         if value.get(key) not in (None, "")
@@ -3471,7 +3471,12 @@ def register_monthly_routes(
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         except AISummaryError as exc:
-            app.logger.warning("AI summary failed code=%s retryable=%s", exc.code, exc.retryable)
+            app.logger.warning(
+                "AI summary failed code=%s status=%s retryable=%s",
+                exc.code,
+                exc.status_code,
+                exc.retryable,
+            )
             fallback_codes = {
                 "timeout",
                 "rate_limited",
@@ -3520,6 +3525,7 @@ def register_monthly_routes(
                         "lookahead",
                     ],
                     "fallback_reason_code": exc.code,
+                    "fallback_status_code": exc.status_code,
                     "validation_warnings": [_clean_text(str(exc), 500)],
                     "suggestion": display,
                 }
@@ -3535,6 +3541,7 @@ def register_monthly_routes(
                     "degraded": True,
                     "generation_mode": "deterministic_fallback",
                     "fallback_reason_code": exc.code,
+                    "fallback_status_code": exc.status_code,
                     "decision_token": decision_token,
                     "draft_id": draft_id,
                     "draft": draft,

@@ -197,6 +197,15 @@ class WorkforceWebTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_ai_review_actions_are_visible_before_collapsed_source_evidence(self):
+        template = (Path(__file__).resolve().parents[1] / "templates" / "reports.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertLess(template.index('id="ai-summary-actions"'), template.index('id="ai-evidence-panel"'))
+        self.assertIn('<details class="border rounded p-3 mt-3 d-none bg-light" id="ai-evidence-panel">', template)
+        self.assertIn('provider_error:', template)
+        self.assertIn('provider_call_limit:', template)
+
     def test_timesheet_overtime_apply_and_reset_routes(self):
         with patch("monthly_report.web.compile_timesheets", return_value=_timesheet()):
             response = self.client.post(
@@ -487,16 +496,29 @@ class WorkforceWebTests(unittest.TestCase):
                 "Claude rate limit was reached.",
                 code="rate_limited",
                 retryable=True,
+                status_code=429,
             ),
         ):
             response = self.client.post(f"/monthly/ai-summary/{self.draft_id}")
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertTrue(response.get_json()["degraded"])
         self.assertEqual(response.get_json()["fallback_reason_code"], "rate_limited")
+        self.assertEqual(response.get_json()["fallback_status_code"], 429)
         self.assertEqual(
             response.get_json()["draft"]["ai_summary"]["generation_mode"],
             "deterministic_fallback",
         )
+        state = response.get_json()["draft"]["ai_summary"]
+        accepted = self.client.post(
+            f"/monthly/ai-summary/{self.draft_id}/decision",
+            json={
+                "decision": "accept",
+                "decision_token": state["decision_token"],
+                "suggestion": state["suggestion"],
+            },
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.get_json())
+        self.assertEqual(accepted.get_json()["draft"]["ai_summary"]["status"], "accepted")
         self.assertFalse(_ai_draft_lock_path(str(self.data_dir), "reza", self.draft_id).exists())
 
     def test_input_too_large_returns_fallback_without_provider_call(self):

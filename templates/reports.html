@@ -523,8 +523,13 @@
               <div class="col-md-6"><label class="form-label small">Concerns / Actions</label><textarea class="form-control" rows="4" id="ai-concerns-summary"></textarea></div>
               <div class="col-md-6"><label class="form-label small">Look-ahead</label><textarea class="form-control" rows="4" id="ai-lookahead-summary"></textarea></div>
             </div>
-            <div class="border rounded p-3 mt-3 d-none bg-light" id="ai-evidence-panel">
-              <div class="section-label mb-2">Narrative Source References</div>
+            <div class="d-flex gap-2 flex-wrap mt-3" id="ai-summary-actions">
+              <button type="button" class="btn btn-sm btn-primary" onclick="decideAiSummary('accept')">Accept / Apply Edited Suggestions</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" onclick="decideAiSummary('reject')">Reject Suggestions</button>
+            </div>
+            <details class="border rounded p-3 mt-3 d-none bg-light" id="ai-evidence-panel">
+              <summary class="section-label mb-0" style="cursor:pointer;">Narrative Source References</summary>
+              <div class="mt-3">
               <ul class="small mb-0 ps-3 d-none" id="ai-citations-list"></ul>
               <div class="mt-3 d-none" id="ai-missing-data-panel">
                 <div class="fw-semibold small mb-1">Missing source data</div>
@@ -534,11 +539,8 @@
                 <div class="fw-semibold small mb-1">Validation notes</div>
                 <ul class="small mb-0 ps-3" id="ai-validation-warnings-list"></ul>
               </div>
-            </div>
-            <div class="d-flex gap-2 mt-3">
-              <button type="button" class="btn btn-sm btn-primary" onclick="decideAiSummary('accept')">Accept / Apply Edited Suggestions</button>
-              <button type="button" class="btn btn-sm btn-outline-secondary" onclick="decideAiSummary('reject')">Reject Suggestions</button>
-            </div>
+              </div>
+            </details>
           </div>
         </div>
 
@@ -1849,10 +1851,15 @@ function renderAiEvidence(state) {
   warningsList.replaceChildren();
   citations.forEach(row => {
     const item = document.createElement('li');
-    const facts = row.factIds?.length ? row.factIds.join(', ') : 'none';
-    const sources = row.sourceIds.length ? row.sourceIds.join(', ') : 'none';
+    const facts = row.factIds?.length
+      ? row.factIds.join(', ')
+      : (row.sourceIds.length ? 'source-linked fallback' : 'none');
+    const sources = row.sourceIds.length
+      ? `${row.sourceIds.length} selected Daily Report source(s)`
+      : 'none';
     const dates = row.dates.length ? row.dates.join(', ') : 'none';
     item.textContent = `${row.label} — verified facts: ${facts}; source IDs: ${sources}; dates: ${dates}`;
+    if (row.sourceIds.length) item.title = row.sourceIds.join(', ');
     citationList.appendChild(item);
   });
   missingData.forEach(value => {
@@ -1872,6 +1879,22 @@ function renderAiEvidence(state) {
     'd-none',
     citations.length === 0 && missingData.length === 0 && validationWarnings.length === 0,
   );
+}
+
+function aiFallbackStatusMessage(state) {
+  const reason = String(state?.fallback_reason_code || 'provider_error');
+  const statusCode = Number(state?.fallback_status_code || 0);
+  const statusSuffix = statusCode ? ` (HTTP ${statusCode})` : '';
+  const reasons = {
+    timeout:'Claude API request timed out.',
+    rate_limited:'Claude API rate limit was reached.',
+    input_too_large:'The compiled AI input was too large.',
+    unsupported_claims:'Claude returned claims that were not fully supported by the selected Daily Reports.',
+    malformed_response:'Claude returned an incomplete or invalid response.',
+    provider_call_limit:'Claude output could not be completed within the allowed repair attempts.',
+    provider_error:`Claude API request failed for a provider, model, or network reason${statusSuffix}.`,
+  };
+  return `${reasons[reason] || `Claude API request failed${statusSuffix}.`} A source-verified narrative is ready for review. Review or edit it, then Accept or Reject it to continue.`;
 }
 
 function populateAiSummaryReview(draft) {
@@ -1900,7 +1923,7 @@ function populateAiSummaryReview(draft) {
       status.className = 'alert py-2 small mt-3 alert-secondary';
     } else {
       status.textContent = mode === 'deterministic_fallback'
-        ? 'Claude was unavailable. A source-verified deterministic narrative is ready for review.'
+        ? aiFallbackStatusMessage(state)
         : (mode === 'hybrid'
             ? 'Claude output is ready; unsupported sections were replaced with verified fallback text.'
             : `Narrative suggestion status: ${state.status}`);
@@ -1942,16 +1965,8 @@ async function generateAiSummary() {
     applyAiDraftPreservingReview(data);
     const mode = String(data.generation_mode || data.draft?.ai_summary?.generation_mode || 'claude');
     const fallbackSections = data.draft?.ai_summary?.fallback_sections || [];
-    const fallbackReason = String(data.fallback_reason_code || data.draft?.ai_summary?.fallback_reason_code || '');
-    const fallbackMessages = {
-      timeout: 'Claude timed out. A source-verified deterministic narrative is ready for review.',
-      rate_limited: 'Claude rate limit was reached. A source-verified deterministic narrative is ready for review.',
-      input_too_large: 'The AI input was too large. A source-verified deterministic narrative is ready for review.',
-      unsupported_claims: 'Claude returned claims that were not fully supported by the Daily Reports. A verified narrative is ready for review.',
-      malformed_response: 'Claude returned an incomplete response. A source-verified deterministic narrative is ready for review.',
-    };
     const message = mode === 'deterministic_fallback'
-      ? (fallbackMessages[fallbackReason] || 'Claude was unavailable. A source-verified deterministic narrative is ready for review.')
+      ? aiFallbackStatusMessage(data.draft?.ai_summary || data)
       : mode === 'hybrid'
         ? `Claude summary is ready. ${fallbackSections.length || 'Some'} section(s) used verified fallback and should be reviewed.`
         : 'AI narrative suggestions are ready. Review and edit them before accepting.';
