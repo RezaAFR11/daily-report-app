@@ -314,6 +314,18 @@ class WorkforceWebTests(unittest.TestCase):
             ["day-1"],
         )
 
+    def test_repaired_validation_warning_does_not_mark_clean_output_degraded(self):
+        envelope = _ai_envelope()
+        envelope["validation_warnings"] = ["One unsupported sentence was removed."]
+        with patch("monthly_report.web.generate_ai_summary", return_value=envelope):
+            response = self.client.post(f"/monthly/ai-summary/{self.draft_id}")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertFalse(response.get_json()["degraded"])
+        state = response.get_json()["draft"]["ai_summary"]
+        self.assertEqual(state["generation_mode"], "claude")
+        self.assertEqual(state["validation_warnings"], envelope["validation_warnings"])
+
     def test_ai_reject_requires_and_accepts_current_decision_token(self):
         with patch("monthly_report.web.generate_ai_summary", return_value=_ai_envelope()):
             generated = self.client.post(f"/monthly/ai-summary/{self.draft_id}")

@@ -3433,7 +3433,9 @@ def register_monthly_routes(
                 )
                 if _clean_text(item, 500)
             ]
-            generation_mode = "hybrid" if fallback_sections or validation_warnings else "claude"
+            # Repaired/dropped sentence warnings remain available for audit, but
+            # only an actually substituted section makes the output hybrid.
+            generation_mode = "hybrid" if fallback_sections else "claude"
             decision_token = _ai_decision_token(
                 attempt_id=attempt_id,
                 input_hash=request_input_hash,

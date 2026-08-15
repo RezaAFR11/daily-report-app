@@ -666,14 +666,17 @@ class AISummaryTests(unittest.TestCase):
                 compact_draft=compact_periodic_draft(_draft()),
             )
 
-    def test_concern_action_requires_a_complete_grounded_pair(self):
+    def test_grounded_concern_allows_missing_corrective_action(self):
         unpaired = _valid_suggestion()
         unpaired["concern_actions"][0]["corrective_action"] = "Not supplied"
-        with self.assertRaisesRegex(AIUnsupportedClaimsError, "must pair"):
-            validate_narrative_suggestion(
-                unpaired,
-                compact_draft=compact_periodic_draft(_draft()),
-            )
+        validated = validate_narrative_suggestion(
+            unpaired,
+            compact_draft=compact_periodic_draft(_draft()),
+        )
+        self.assertEqual(
+            validated["concern_actions"][0]["corrective_action"],
+            "Not supplied",
+        )
 
         unknown = _valid_suggestion()
         unknown["concern_actions"][0]["fact_ids"] = []

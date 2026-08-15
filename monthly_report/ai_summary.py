@@ -347,10 +347,12 @@ Reporting rules:
    belonging to those subjects. Do not relabel site work as engineering or
    procurement. Use Not supplied when evidence is absent.
 12. concern_actions: include only real construction/project concerns supported by
-    source data. A corrective action must also be explicitly supported. If an
-    action is not supplied, do not invent one; omit that item and record missing
-    data instead. An explicit constraint_reporting status of none_reported is
-    valid information, not missing data, and must not be turned into a concern.
+    source data. A corrective action must also be explicitly supported. If the
+    concern is supported but no action is supplied, keep the concern and set
+    corrective_action exactly to "Not supplied"; never invent an action. Also
+    record the missing action in missing_data. An explicit constraint_reporting
+    status of none_reported is valid information, not missing data, and must not
+    be turned into a concern.
     Internal data-quality or project-identity validation warnings are not project
     concerns.
 13. lookahead: use only explicitly supplied next-period, tomorrow, or planned
@@ -1662,13 +1664,12 @@ def _validate_concern_action(
         _strict_keys(raw, required_keys | {"fact_ids"}, path)
     if not allow_legacy_factless and "fact_ids" not in actual_keys:
         raise AIMalformedResponseError(f"{path}.fact_ids is required for v8 AI output.")
-    for field in ("concern", "corrective_action"):
-        text = raw.get(field)
-        if isinstance(text, str) and " ".join(text.split()) == _NOT_SUPPLIED:
-            raise AIUnsupportedClaimsError(
-                f"{path} must pair a supported concern with a supported corrective action; "
-                "use missing_data when either value is unavailable."
-            )
+    concern_text = " ".join(str(raw.get("concern") or "").split())
+    if not concern_text or concern_text == _NOT_SUPPLIED:
+        raise AIUnsupportedClaimsError(
+            f"{path}.concern must contain a source-supported project concern."
+        )
+    action_text = " ".join(str(raw.get("corrective_action") or "").split())
     common = {
         "fact_ids": raw.get("fact_ids", []),
         "source_ids": raw.get("source_ids"),
@@ -1683,15 +1684,18 @@ def _validate_concern_action(
         max_chars=MAX_CLAIM_CHARS,
         allow_legacy_factless=allow_legacy_factless,
     )
-    corrective_action = _validate_claim(
-        {"text": raw.get("corrective_action"), **common},
-        path=f"{path}.corrective_action",
-        source_index=source_index,
-        source_evidence=source_evidence,
-        fact_index=fact_index,
-        max_chars=MAX_CLAIM_CHARS,
-        allow_legacy_factless=allow_legacy_factless,
-    )
+    if not action_text or action_text == _NOT_SUPPLIED:
+        corrective_action = {"text": _NOT_SUPPLIED}
+    else:
+        corrective_action = _validate_claim(
+            {"text": raw.get("corrective_action"), **common},
+            path=f"{path}.corrective_action",
+            source_index=source_index,
+            source_evidence=source_evidence,
+            fact_index=fact_index,
+            max_chars=MAX_CLAIM_CHARS,
+            allow_legacy_factless=allow_legacy_factless,
+        )
     return {
         "concern": concern["text"],
         "corrective_action": corrective_action["text"],

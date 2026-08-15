@@ -1940,12 +1940,22 @@ async function generateAiSummary() {
     const response = await fetch(`/monthly/ai-summary/${encodeURIComponent(monthlyDraftId)}`, {method:'POST'});
     const data = await responsePayload(response, 'AI summary could not be generated.');
     applyAiDraftPreservingReview(data);
-    showMonthlyAlert(
-      data.degraded
-        ? 'Claude was unavailable or returned an unsupported section. A verified fallback is ready for review.'
-        : 'AI narrative suggestions are ready. Review and edit them before accepting.',
-      data.degraded ? 'warning' : 'success',
-    );
+    const mode = String(data.generation_mode || data.draft?.ai_summary?.generation_mode || 'claude');
+    const fallbackSections = data.draft?.ai_summary?.fallback_sections || [];
+    const fallbackReason = String(data.fallback_reason_code || data.draft?.ai_summary?.fallback_reason_code || '');
+    const fallbackMessages = {
+      timeout: 'Claude timed out. A source-verified deterministic narrative is ready for review.',
+      rate_limited: 'Claude rate limit was reached. A source-verified deterministic narrative is ready for review.',
+      input_too_large: 'The AI input was too large. A source-verified deterministic narrative is ready for review.',
+      unsupported_claims: 'Claude returned claims that were not fully supported by the Daily Reports. A verified narrative is ready for review.',
+      malformed_response: 'Claude returned an incomplete response. A source-verified deterministic narrative is ready for review.',
+    };
+    const message = mode === 'deterministic_fallback'
+      ? (fallbackMessages[fallbackReason] || 'Claude was unavailable. A source-verified deterministic narrative is ready for review.')
+      : mode === 'hybrid'
+        ? `Claude summary is ready. ${fallbackSections.length || 'Some'} section(s) used verified fallback and should be reviewed.`
+        : 'AI narrative suggestions are ready. Review and edit them before accepting.';
+    showMonthlyAlert(message, mode === 'claude' ? 'success' : 'warning');
   } catch (error) { showMonthlyAlert(error.message, 'warning'); }
   finally { setLoading('generate-ai-summary-btn', false); }
 }
