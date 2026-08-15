@@ -12,15 +12,18 @@ from unittest.mock import patch
 from flask import Flask
 
 from monthly_report.ai_summary import AISummaryError
+from monthly_report.narrative_fallback import apply_deterministic_narrative
 from monthly_report.web import (
     _acquire_ai_draft_lock,
     _ai_draft_lock_path,
     _apply_review,
+    _deterministic_ai_display,
     _issued_report_copy,
     _load_draft,
     _makassar_issue_date,
     _release_ai_draft_lock,
     _save_draft,
+    _update_draft,
     register_monthly_routes,
 )
 
@@ -266,9 +269,18 @@ class WorkforceWebTests(unittest.TestCase):
         with patch("monthly_report.web.generate_ai_summary", return_value=envelope):
             response = self.client.post(f"/monthly/ai-summary/{self.draft_id}")
         self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertFalse(response.get_json()["degraded"])
         suggested = response.get_json()["draft"]
         self.assertEqual(suggested.get("executive_summary"), before.get("executive_summary"))
         self.assertEqual(suggested["ai_summary"]["status"], "suggested")
+        self.assertEqual(suggested["ai_summary"]["generation_mode"], "claude")
+        decision_token = suggested["ai_summary"]["decision_token"]
+        self.assertRegex(decision_token, r"^[a-f0-9]{64}$")
+        self.assertEqual(response.get_json()["decision_token"], decision_token)
+        self.assertCountEqual(
+            suggested["ai_summary"]["expected_missing_sections"],
+            ["engineering_summary", "procurement_summary"],
+        )
         suggestion = suggested["ai_summary"]["suggestion"]
         self.assertEqual(
             suggestion["concerns"][0]["corrective_action"],
@@ -279,11 +291,12 @@ class WorkforceWebTests(unittest.TestCase):
             suggestion["citation_evidence"]["lookahead"][0]["dates"],
             ["2026-08-01"],
         )
-        self.assertEqual(suggestion["missing_data"], ["Procurement: Not supplied"])
+        self.assertIn("Procurement: Not supplied", suggestion["missing_data"])
+        self.assertIn("Safety incident metrics: Not supplied", suggestion["missing_data"])
 
         response = self.client.post(
             f"/monthly/ai-summary/{self.draft_id}/decision",
-            json={"decision": "accept", "suggestion": {
+            json={"decision": "accept", "decision_token": decision_token, "suggestion": {
                 "executive_summary": "Edited reviewed summary.",
                 "engineering_summary": "Not supplied",
                 "procurement_summary": "Not supplied",
@@ -300,6 +313,101 @@ class WorkforceWebTests(unittest.TestCase):
             accepted["ai_summary"]["suggestion"]["citation_evidence"]["executive_summary"]["source_ids"],
             ["day-1"],
         )
+
+    def test_ai_reject_requires_and_accepts_current_decision_token(self):
+        with patch("monthly_report.web.generate_ai_summary", return_value=_ai_envelope()):
+            generated = self.client.post(f"/monthly/ai-summary/{self.draft_id}")
+        self.assertEqual(generated.status_code, 200, generated.get_json())
+        token = generated.get_json()["decision_token"]
+
+        rejected = self.client.post(
+            f"/monthly/ai-summary/{self.draft_id}/decision",
+            json={"decision": "reject", "decision_token": token},
+        )
+
+        self.assertEqual(rejected.status_code, 200, rejected.get_json())
+        self.assertEqual(rejected.get_json()["draft"]["ai_summary"]["status"], "rejected")
+
+    def test_old_tab_cannot_apply_previous_ai_suggestion(self):
+        first_envelope = _ai_envelope()
+        first_envelope["suggestion"]["executive_summary"]["text"] = "Suggestion A."
+        with patch("monthly_report.web.generate_ai_summary", return_value=first_envelope):
+            first = self.client.post(f"/monthly/ai-summary/{self.draft_id}")
+        self.assertEqual(first.status_code, 200, first.get_json())
+        first_token = first.get_json()["decision_token"]
+
+        second_envelope = _ai_envelope()
+        second_envelope["suggestion"]["executive_summary"]["text"] = "Suggestion B."
+        with patch("monthly_report.web._ai_cooldown_remaining", return_value=0), patch(
+            "monthly_report.web.generate_ai_summary",
+            return_value=second_envelope,
+        ):
+            second = self.client.post(f"/monthly/ai-summary/{self.draft_id}")
+        self.assertEqual(second.status_code, 200, second.get_json())
+        self.assertNotEqual(first_token, second.get_json()["decision_token"])
+
+        stale = self.client.post(
+            f"/monthly/ai-summary/{self.draft_id}/decision",
+            json={
+                "decision": "accept",
+                "decision_token": first_token,
+                "suggestion": {"executive_summary": "Suggestion A."},
+            },
+        )
+
+        self.assertEqual(stale.status_code, 409, stale.get_json())
+        self.assertEqual(stale.get_json()["code"], "ai_suggestion_stale")
+        persisted = _load_draft(str(self.data_dir), "reza", self.draft_id)
+        self.assertEqual(
+            persisted["ai_summary"]["suggestion"]["executive_summary"],
+            "Suggestion B.",
+        )
+        self.assertEqual(persisted["ai_summary"]["status"], "suggested")
+
+    def test_ai_decision_rejects_changed_source_draft(self):
+        with patch("monthly_report.web.generate_ai_summary", return_value=_ai_envelope()):
+            generated = self.client.post(f"/monthly/ai-summary/{self.draft_id}")
+        self.assertEqual(generated.status_code, 200, generated.get_json())
+        token = generated.get_json()["decision_token"]
+
+        changed = _load_draft(str(self.data_dir), "reza", self.draft_id)
+        changed["project_title"] = "Changed after AI generation"
+        _update_draft(str(self.data_dir), "reza", changed)
+        stale = self.client.post(
+            f"/monthly/ai-summary/{self.draft_id}/decision",
+            json={"decision": "reject", "decision_token": token},
+        )
+
+        self.assertEqual(stale.status_code, 409, stale.get_json())
+        self.assertEqual(stale.get_json()["code"], "ai_suggestion_stale")
+        persisted = _load_draft(str(self.data_dir), "reza", self.draft_id)
+        self.assertEqual(persisted["project_title"], "Changed after AI generation")
+        self.assertEqual(persisted["ai_summary"]["status"], "suggested")
+
+    def test_pending_legacy_ai_suggestion_can_be_rejected_but_not_accepted(self):
+        draft = _load_draft(str(self.data_dir), "reza", self.draft_id)
+        draft["ai_summary"] = {
+            "status": "suggested",
+            "suggestion": {"executive_summary": "Legacy suggestion"},
+        }
+        _update_draft(str(self.data_dir), "reza", draft)
+
+        accept = self.client.post(
+            f"/monthly/ai-summary/{self.draft_id}/decision",
+            json={
+                "decision": "accept",
+                "suggestion": {"executive_summary": "Legacy suggestion"},
+            },
+        )
+        self.assertEqual(accept.status_code, 409, accept.get_json())
+        self.assertEqual(accept.get_json()["code"], "ai_decision_regeneration_required")
+
+        reject = self.client.post(
+            f"/monthly/ai-summary/{self.draft_id}/decision",
+            json={"decision": "reject"},
+        )
+        self.assertEqual(reject.status_code, 200, reject.get_json())
+        self.assertEqual(reject.get_json()["draft"]["ai_summary"]["status"], "rejected")
 
     def test_ai_inflight_lock_returns_clear_409(self):
         lock = _acquire_ai_draft_lock(str(self.data_dir), "reza", self.draft_id)
@@ -342,7 +450,12 @@ class WorkforceWebTests(unittest.TestCase):
 
         with patch("monthly_report.web.generate_ai_summary", side_effect=fail_after_check):
             response = self.client.post(f"/monthly/ai-summary/{self.draft_id}")
-        self.assertEqual(response.status_code, 502, response.get_json())
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()["degraded"])
+        self.assertEqual(
+            response.get_json()["draft"]["ai_summary"]["generation_mode"],
+            "deterministic_fallback",
+        )
         self.assertEqual(observed.get("version"), "periodic-ai-request-control/1")
         self.assertEqual(observed.get("last_started_by"), "reza")
         self.assertTrue(observed.get("last_started_at", "").endswith("Z"))
@@ -355,7 +468,7 @@ class WorkforceWebTests(unittest.TestCase):
         self.assertGreaterEqual(int(retry.headers["Retry-After"]), 1)
         generate.assert_not_called()
 
-    def test_provider_rate_limit_returns_clear_429(self):
+    def test_provider_rate_limit_returns_reviewable_fallback(self):
         with patch(
             "monthly_report.web.generate_ai_summary",
             side_effect=AISummaryError(
@@ -365,11 +478,92 @@ class WorkforceWebTests(unittest.TestCase):
             ),
         ):
             response = self.client.post(f"/monthly/ai-summary/{self.draft_id}")
-        self.assertEqual(response.status_code, 429, response.get_json())
-        self.assertEqual(response.get_json()["code"], "rate_limited")
-        self.assertEqual(response.get_json()["retry_after_seconds"], 30)
-        self.assertEqual(response.headers["Retry-After"], "30")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()["degraded"])
+        self.assertEqual(response.get_json()["fallback_reason_code"], "rate_limited")
+        self.assertEqual(
+            response.get_json()["draft"]["ai_summary"]["generation_mode"],
+            "deterministic_fallback",
+        )
         self.assertFalse(_ai_draft_lock_path(str(self.data_dir), "reza", self.draft_id).exists())
+
+    def test_input_too_large_returns_fallback_without_provider_call(self):
+        error = AISummaryError(
+            "Compact periodic draft exceeds the AI input limit.",
+            code="input_too_large",
+        )
+        with patch("monthly_report.web.compact_periodic_draft", side_effect=error), patch(
+            "monthly_report.web.generate_ai_summary"
+        ) as generate:
+            response = self.client.post(f"/monthly/ai-summary/{self.draft_id}")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()["fallback_reason_code"], "input_too_large")
+        self.assertEqual(
+            response.get_json()["draft"]["ai_summary"]["generation_mode"],
+            "deterministic_fallback",
+        )
+        generate.assert_not_called()
+
+    def test_ai_success_does_not_overwrite_concurrent_draft_update(self):
+        def mutate_then_succeed(_draft_value):
+            latest = _load_draft(str(self.data_dir), "reza", self.draft_id)
+            latest["project_title"] = "Concurrently revised project"
+            _update_draft(str(self.data_dir), "reza", latest)
+            return _ai_envelope()
+
+        with patch("monthly_report.web.generate_ai_summary", side_effect=mutate_then_succeed):
+            response = self.client.post(f"/monthly/ai-summary/{self.draft_id}")
+
+        self.assertEqual(response.status_code, 409, response.get_json())
+        self.assertEqual(response.get_json()["code"], "ai_draft_changed")
+        persisted = _load_draft(str(self.data_dir), "reza", self.draft_id)
+        self.assertEqual(persisted["project_title"], "Concurrently revised project")
+        self.assertNotIn("ai_summary", persisted)
+
+    def test_ai_fallback_does_not_overwrite_concurrent_draft_update(self):
+        def mutate_then_fail(_draft_value):
+            latest = _load_draft(str(self.data_dir), "reza", self.draft_id)
+            latest["project_title"] = "Concurrent fallback project"
+            _update_draft(str(self.data_dir), "reza", latest)
+            raise AISummaryError(
+                "Claude is temporarily unavailable.",
+                code="provider_error",
+                retryable=True,
+            )
+
+        with patch("monthly_report.web.generate_ai_summary", side_effect=mutate_then_fail):
+            response = self.client.post(f"/monthly/ai-summary/{self.draft_id}")
+
+        self.assertEqual(response.status_code, 409, response.get_json())
+        self.assertEqual(response.get_json()["code"], "ai_draft_changed")
+        persisted = _load_draft(str(self.data_dir), "reza", self.draft_id)
+        self.assertEqual(persisted["project_title"], "Concurrent fallback project")
+        self.assertNotIn("ai_summary", persisted)
+
+    def test_ai_merges_summary_into_latest_input_equivalent_draft(self):
+        photo = {"asset_id": "a" * 64, "caption": "Reviewed during AI request"}
+
+        def update_photo_then_succeed(_draft_value):
+            latest = _load_draft(str(self.data_dir), "reza", self.draft_id)
+            latest["photo_documentation"] = [photo]
+            _update_draft(str(self.data_dir), "reza", latest)
+            return _ai_envelope()
+
+        with patch("monthly_report.web.generate_ai_summary", side_effect=update_photo_then_succeed):
+            response = self.client.post(f"/monthly/ai-summary/{self.draft_id}")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        persisted = _load_draft(str(self.data_dir), "reza", self.draft_id)
+        self.assertEqual(persisted["photo_documentation"], [photo])
+        self.assertEqual(persisted["ai_summary"]["status"], "suggested")
+
+    def test_deterministic_display_keeps_missing_labels_after_baseline_applied(self):
+        draft = apply_deterministic_narrative(_draft(), overwrite=True)
+        display = _deterministic_ai_display(draft)
+
+        self.assertIn("Engineering status: Not supplied", display["missing_data"])
+        self.assertIn("Procurement status: Not supplied", display["missing_data"])
 
     def test_issue_date_uses_asia_makassar_calendar_day(self):
         utc_near_midnight = datetime(2026, 8, 10, 16, 30, tzinfo=timezone.utc)

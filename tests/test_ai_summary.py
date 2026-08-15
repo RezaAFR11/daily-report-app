@@ -11,6 +11,7 @@ import httpx
 
 from monthly_report.ai_summary import (
     AIConfigurationError,
+    AIInputError,
     AIMalformedResponseError,
     AIRateLimitError,
     AISourceValidationError,
@@ -72,9 +73,10 @@ def _draft():
     }
 
 
-def _claim(text="Not supplied", source_ids=None, dates=None):
+def _claim(text="Not supplied", source_ids=None, dates=None, fact_ids=None):
     return {
         "text": text,
+        "fact_ids": list(fact_ids or []),
         "source_ids": list(source_ids or []),
         "dates": list(dates or []),
     }
@@ -86,17 +88,21 @@ def _valid_suggestion():
             "Turbine alignment continued with available personnel.",
             ["daily-a"],
             ["2026-08-10"],
+            ["site.current_activity.1"],
         ),
         "engineering_summary": _claim(
-            "Drawing review completed.", ["daily-a"], ["2026-08-10"]
+            "Drawing review completed.", ["daily-a"], ["2026-08-10"],
+            ["engineering.summary"],
         ),
         "procurement_summary": _claim(),
         "site_summary": _claim(
-            "Turbine alignment was recorded.", ["daily-a"], ["2026-08-10"]
+            "Turbine alignment was recorded.", ["daily-a"], ["2026-08-10"],
+            ["site.current_activity.1"],
         ),
         "current_activities": [{
             "area": "Turbine",
             "text": "Turbine alignment was recorded.",
+            "fact_ids": ["site.current_activity.1"],
             "source_ids": ["daily-a"],
             "dates": ["2026-08-10"],
         }],
@@ -104,15 +110,22 @@ def _valid_suggestion():
             {
                 "concern": "Waiting for permit.",
                 "corrective_action": "Continue alignment.",
+                "fact_ids": ["site.concern.1", "site.lookahead.1"],
                 "source_ids": ["daily-b"],
                 "dates": ["2026-08-11"],
             }
         ],
         "lookahead": [
-            _claim("Continue alignment.", ["daily-b"], ["2026-08-11"])
+            _claim(
+                "Continue alignment.", ["daily-b"], ["2026-08-11"],
+                ["site.lookahead.1"],
+            )
         ],
         "claims": [
-            _claim("Drawing review completed.", ["daily-a"], ["2026-08-10"])
+            _claim(
+                "Drawing review completed.", ["daily-a"], ["2026-08-10"],
+                ["engineering.summary"],
+            )
         ],
         "missing_data": ["Procurement: Not supplied"],
     }
@@ -170,6 +183,7 @@ class AISummaryTests(unittest.TestCase):
             {
                 "concern": "Waiting for permit.",
                 "corrective_action": "Continue alignment.",
+                "fact_ids": ["site.concern.1", "site.lookahead.1"],
                 "source_ids": ["daily-b"],
                 "dates": ["2026-08-11"],
             },
@@ -183,7 +197,7 @@ class AISummaryTests(unittest.TestCase):
             ["daily-a"],
         )
         call = client.messages.calls[0]
-        self.assertEqual(call["temperature"], 0)
+        self.assertEqual(call["temperature"], 0.1)
         self.assertEqual(
             call["output_config"]["format"]["type"],
             "json_schema",
@@ -210,6 +224,9 @@ class AISummaryTests(unittest.TestCase):
         invalid_json_client = _FakeClient(response=invalid_json)
         result = generate_ai_summary(_draft(), client=invalid_json_client)
         self.assertEqual(len(invalid_json_client.messages.calls), 2)
+        self.assertTrue(all(
+            call["timeout"] == 60.0 for call in invalid_json_client.messages.calls
+        ))
         self.assertEqual(result["suggestion"]["executive_summary"]["text"], "Not supplied")
 
         invalid_schema = _valid_suggestion()
@@ -248,10 +265,7 @@ class AISummaryTests(unittest.TestCase):
                     ["daily-a"],
                     ["2026-08-10"],
                 )
-                with self.assertRaisesRegex(
-                    AIUnsupportedClaimsError,
-                    "numeric prose",
-                ):
+                with self.assertRaises(AIUnsupportedClaimsError):
                     validate_narrative_suggestion(
                         numeric,
                         compact_draft=compact_periodic_draft(_draft()),
@@ -272,6 +286,8 @@ class AISummaryTests(unittest.TestCase):
             "Install 4 valve accessories at 81-HCV-231"
         )
         suggestion = _valid_suggestion()
+        suggestion["executive_summary"] = _claim()
+        suggestion["site_summary"] = _claim()
         suggestion["current_activities"][0]["text"] = (
             "Installed 4 valve accessories at 81-HCV-231."
         )
@@ -281,12 +297,245 @@ class AISummaryTests(unittest.TestCase):
         )
         self.assertIn("81-HCV-231", validated["current_activities"][0]["text"])
 
+    def test_verified_fact_pack_allows_reviewed_workforce_aggregates(self):
+        suggestion = _valid_suggestion()
+        suggestion["executive_summary"] = _claim(
+            "The available reports recorded 10 personnel and 100 man-hours.",
+            fact_ids=["workforce.total_manpower", "workforce.total_man_hours"],
+        )
+
+        validated = validate_narrative_suggestion(
+            suggestion,
+            compact_draft=compact_periodic_draft(_draft()),
+        )
+
+        summary = validated["executive_summary"]
+        self.assertIn("10 personnel", summary["text"])
+        self.assertEqual(
+            summary["fact_ids"],
+            ["workforce.total_manpower", "workforce.total_man_hours"],
+        )
+        self.assertEqual(summary["source_ids"], ["daily-a", "daily-b"])
+        self.assertEqual(summary["dates"], ["2026-08-10", "2026-08-11"])
+
+    def test_fact_pack_prefers_reviewed_workforce_and_tracks_coverage(self):
+        draft = _draft()
+        draft["coverage"] = {
+            "covered_dates": ["2026-08-10", "2026-08-11"],
+            "missing_dates": [
+                "2026-08-12", "2026-08-13", "2026-08-14",
+                "2026-08-15", "2026-08-16",
+            ],
+        }
+        draft["manpower"] = {
+            "totals": {"peak_headcount": 99, "total_man_hours": 999}
+        }
+        draft["workforce_validation"] = {
+            "effective": {
+                "peak_headcount": 12,
+                "regular_man_hours": 100,
+                "overtime_man_hours": 25,
+                "total_man_hours": 125,
+            },
+            "timesheet": {"status": "applied"},
+            "overtime": {"status": "applied"},
+        }
+        draft["constraint_reporting"] = {
+            "daily": [{
+                "date": "2026-08-10",
+                "source_id": "daily-a",
+                "status": "none_reported",
+            }]
+        }
+
+        compact = compact_periodic_draft(draft)
+        facts = {row["fact_id"]: row for row in compact["verified_fact_pack"]}
+
+        self.assertEqual(facts["workforce.total_manpower"]["value"], 12)
+        self.assertEqual(facts["workforce.regular_man_hours"]["value"], 100)
+        self.assertEqual(facts["workforce.overtime_man_hours"]["value"], 25)
+        self.assertEqual(facts["workforce.total_man_hours"]["value"], 125)
+        self.assertEqual(facts["coverage.missing_dates"]["coverage"], "partial")
+        self.assertEqual(
+            facts["site.constraint_reporting.1"]["value"]["status"],
+            "none_reported",
+        )
+        for fact in facts.values():
+            self.assertEqual(
+                set(fact),
+                {"fact_id", "value", "unit", "source_ids", "dates", "coverage"},
+            )
+
+    def test_missing_safety_is_an_explicit_not_supplied_fact(self):
+        compact = compact_periodic_draft(_draft())
+        facts = {row["fact_id"]: row for row in compact["verified_fact_pack"]}
+
+        self.assertEqual(facts["safety.data_availability"]["value"], "Not supplied")
+        self.assertNotIn("safety.recordable_cases", facts)
+
+    def test_daily_report_total_is_not_mislabelled_as_regular_hours(self):
+        draft = _draft()
+        draft.pop("workforce_validation", None)
+
+        facts = {
+            row["fact_id"]: row
+            for row in compact_periodic_draft(draft)["verified_fact_pack"]
+        }
+
+        self.assertEqual(facts["workforce.total_man_hours"]["value"], 100)
+        self.assertNotIn("workforce.regular_man_hours", facts)
+
+    def test_decimal_fact_matches_natural_integer_rendering(self):
+        draft = _draft()
+        draft["workforce_validation"] = {
+            "effective": {"total_man_hours": 320.0},
+        }
+        suggestion = _valid_suggestion()
+        suggestion["executive_summary"] = _claim(
+            "The available reports recorded 320 man-hours.",
+            fact_ids=["workforce.total_man_hours"],
+        )
+
+        validated = validate_narrative_suggestion(
+            suggestion,
+            compact_draft=compact_periodic_draft(draft),
+        )
+
+        self.assertIn("320 man-hours", validated["executive_summary"]["text"])
+
+    def test_natural_date_range_is_allowed_only_from_exact_cited_dates(self):
+        suggestion = _valid_suggestion()
+        suggestion["executive_summary"] = _claim(
+            "This Weekly Progress Report covers 10–16 August 2026.",
+            fact_ids=["coverage.reporting_period"],
+        )
+
+        validated = validate_narrative_suggestion(
+            suggestion,
+            compact_draft=compact_periodic_draft(_draft()),
+        )
+        self.assertIn("10–16 August 2026", validated["executive_summary"]["text"])
+
+        unrelated = _valid_suggestion()
+        unrelated["executive_summary"] = _claim(
+            "A total of 10 valves were installed.",
+            fact_ids=["coverage.covered_dates"],
+        )
+        with self.assertRaises(AIUnsupportedClaimsError):
+            validate_narrative_suggestion(
+                unrelated,
+                compact_draft=compact_periodic_draft(_draft()),
+            )
+
+    def test_safety_missing_statement_and_technical_safety_valve_are_allowed(self):
+        suggestion = _valid_suggestion()
+        suggestion["executive_summary"] = _claim(
+            "Safety incident metrics were not supplied.",
+            fact_ids=["safety.data_availability"],
+        )
+        validated = validate_narrative_suggestion(
+            suggestion,
+            compact_draft=compact_periodic_draft(_draft()),
+        )
+        self.assertIn("not supplied", validated["executive_summary"]["text"])
+
+        draft = _draft()
+        draft["site"]["current_period_activities"][0]["description"] = (
+            "Safety valve overhaul"
+        )
+        activity = _valid_suggestion()
+        activity["executive_summary"] = _claim()
+        activity["site_summary"] = _claim()
+        activity["current_activities"][0]["text"] = "Safety valve overhaul was recorded."
+        validated = validate_narrative_suggestion(
+            activity,
+            compact_draft=compact_periodic_draft(draft),
+        )
+        self.assertIn("Safety valve", validated["current_activities"][0]["text"])
+
+    def test_project_number_abbreviation_is_not_treated_as_zero(self):
+        suggestion = _valid_suggestion()
+        suggestion["executive_summary"] = _claim(
+            "Project No. PROJECT-ABC.",
+            fact_ids=["project.number"],
+        )
+        validated = validate_narrative_suggestion(
+            suggestion,
+            compact_draft=compact_periodic_draft(_draft()),
+        )
+        self.assertEqual(validated["executive_summary"]["text"], "Project No. PROJECT-ABC.")
+
+    def test_fact_ids_cannot_be_repurposed_for_unrelated_or_wrong_unit_claims(self):
+        for text, fact_ids in (
+            ("The turbine exploded catastrophically.", ["site.current_activity.1"]),
+            ("A total of 100 valves were installed.", ["workforce.total_man_hours"]),
+            ("All work was completed successfully.", ["site.current_activity.1"]),
+            ("Turbine alignment was completed successfully.", ["site.current_activity.1"]),
+        ):
+            with self.subTest(text=text):
+                suggestion = _valid_suggestion()
+                suggestion["executive_summary"] = _claim(text, fact_ids=fact_ids)
+                with self.assertRaises(AIUnsupportedClaimsError):
+                    validate_narrative_suggestion(
+                        suggestion,
+                        compact_draft=compact_periodic_draft(_draft()),
+                    )
+
+    def test_unsupported_safety_sentence_is_dropped_not_whole_summary(self):
+        suggestion = _valid_suggestion()
+        suggestion["executive_summary"] = _claim(
+            "Turbine alignment was recorded. No safety incidents were recorded.",
+            ["daily-a"],
+            ["2026-08-10"],
+            ["site.current_activity.1", "safety.data_availability"],
+        )
+        client = _FakeClient(response=_response(suggestion))
+
+        result = generate_ai_summary(_draft(), client=client)
+
+        self.assertEqual(len(client.messages.calls), 1)
+        self.assertEqual(
+            result["suggestion"]["executive_summary"]["text"],
+            "Turbine alignment was recorded.",
+        )
+        self.assertIn(
+            "One unsupported AI safety sentence was ignored; safety data remain Not supplied.",
+            result["validation_warnings"],
+        )
+
+    def test_legacy_claim_without_fact_ids_remains_compatible(self):
+        suggestion = _valid_suggestion()
+        for key in (
+            "executive_summary", "engineering_summary", "procurement_summary",
+            "site_summary",
+        ):
+            suggestion[key].pop("fact_ids")
+        for key in ("current_activities", "concern_actions", "lookahead", "claims"):
+            for row in suggestion[key]:
+                row.pop("fact_ids")
+
+        with self.assertRaisesRegex(AIMalformedResponseError, "fact_ids is required"):
+            validate_narrative_suggestion(
+                suggestion,
+                compact_draft=compact_periodic_draft(_draft()),
+            )
+
+        validated = validate_narrative_suggestion(
+            suggestion,
+            compact_draft=compact_periodic_draft(_draft()),
+            legacy_compatibility=True,
+        )
+
+        self.assertEqual(validated["site_summary"]["text"], "Turbine alignment was recorded.")
+
     def test_cited_date_and_full_equipment_tag_are_allowed(self):
         draft = _draft()
         draft["site"]["current_period_activities"][0]["description"] = (
             "Install 4 valve accessories at 81-HCV-231"
         )
         suggestion = _valid_suggestion()
+        suggestion["executive_summary"] = _claim()
+        suggestion["site_summary"] = _claim()
         suggestion["current_activities"][0]["text"] = (
             "On 2026-08-10, installed 4 valve accessories at 81-HCV-231."
         )
@@ -302,6 +551,8 @@ class AISummaryTests(unittest.TestCase):
             "Install 4 valve accessories at 81-HCV-231"
         )
         suggestion = _valid_suggestion()
+        suggestion["executive_summary"] = _claim()
+        suggestion["site_summary"] = _claim()
         suggestion["current_activities"][0]["text"] = (
             "Installed 231 valve accessories in Area 81."
         )
@@ -325,6 +576,7 @@ class AISummaryTests(unittest.TestCase):
             "No constraints were reported.",
             ["daily-a"],
             ["2026-08-10"],
+            ["site.constraint_reporting.1"],
         )
         validated = validate_narrative_suggestion(
             suggestion,
@@ -349,8 +601,9 @@ class AISummaryTests(unittest.TestCase):
             "No safety incidents were recorded.",
             ["daily-a"],
             ["2026-08-10"],
+            ["site.constraint_reporting.1"],
         )
-        with self.assertRaisesRegex(AIUnsupportedClaimsError, "numeric prose"):
+        with self.assertRaisesRegex(AIUnsupportedClaimsError, "safety prose"):
             validate_narrative_suggestion(
                 suggestion,
                 compact_draft=compact_periodic_draft(draft),
@@ -362,6 +615,7 @@ class AISummaryTests(unittest.TestCase):
         suggestion = _valid_suggestion()
         suggestion["current_activities"][0].update({
             "text": "Install 999 bolts.",
+            "fact_ids": [],
             "source_ids": ["daily-a", "daily-b"],
             "dates": ["2026-08-10"],
         })
@@ -369,6 +623,7 @@ class AISummaryTests(unittest.TestCase):
             validate_narrative_suggestion(
                 suggestion,
                 compact_draft=compact_periodic_draft(draft),
+                legacy_compatibility=True,
             )
 
     def test_one_missing_reference_half_is_completed_from_exact_manifest_pair(self):
@@ -386,6 +641,7 @@ class AISummaryTests(unittest.TestCase):
         suggestion = _valid_suggestion()
         suggestion["lookahead"][0]["source_ids"] = []
         suggestion["lookahead"][0]["dates"] = []
+        suggestion["lookahead"][0]["fact_ids"] = []
         client = _FakeClient(response=_response(suggestion))
         result = generate_ai_summary(_draft(), client=client)
         self.assertEqual(len(client.messages.calls), 1)
@@ -420,11 +676,13 @@ class AISummaryTests(unittest.TestCase):
             )
 
         unknown = _valid_suggestion()
+        unknown["concern_actions"][0]["fact_ids"] = []
         unknown["concern_actions"][0]["source_ids"] = ["made-up"]
         with self.assertRaisesRegex(AIUnsupportedClaimsError, "unknown source IDs"):
             validate_narrative_suggestion(
                 unknown,
                 compact_draft=compact_periodic_draft(_draft()),
+                legacy_compatibility=True,
             )
 
     def test_prompt_injection_is_delimited_as_untrusted_data(self):
@@ -463,6 +721,9 @@ class AISummaryTests(unittest.TestCase):
         with self.assertRaises(AIRateLimitError) as rate_error:
             generate_ai_summary(_draft(), client=_FakeClient(error=rate))
         self.assertTrue(rate_error.exception.retryable)
+
+        with self.assertRaisesRegex(AIInputError, "between 1 and 60 seconds"):
+            generate_ai_summary(_draft(), client=_FakeClient(), timeout=61)
 
     def test_input_hash_is_deterministic_for_mapping_key_order(self):
         compact = compact_periodic_draft(_draft())

@@ -493,9 +493,12 @@
         <div class="border rounded-3 p-3 mb-4 d-none" id="ai-summary-card">
           <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap">
             <div>
-              <div class="section-label mb-1">Claude AI Narrative Suggestions</div>
+              <div class="d-flex align-items-center gap-2 flex-wrap mb-1">
+                <div class="section-label mb-0">Narrative Suggestions</div>
+                <span class="badge text-bg-secondary d-none" id="ai-generation-mode"></span>
+              </div>
               <div class="muted-note">
-                Claude can group activities and improve narrative wording. Verified numbers and source facts stay locked.
+                Claude can improve the wording; verified facts and a professional deterministic fallback keep the report usable if AI is unavailable.
               </div>
             </div>
             <button type="button" class="btn btn-sm btn-outline-primary" id="generate-ai-summary-btn"
@@ -512,15 +515,24 @@
               <div class="col-md-6"><label class="form-label small">Engineering</label><textarea class="form-control" rows="3" id="ai-engineering-summary"></textarea></div>
               <div class="col-md-6"><label class="form-label small">Procurement</label><textarea class="form-control" rows="3" id="ai-procurement-summary"></textarea></div>
               <div class="col-12"><label class="form-label small">Site Summary</label><textarea class="form-control" rows="4" id="ai-site-summary"></textarea></div>
+              <div class="col-12">
+                <label class="form-label small">Current-period Activities</label>
+                <textarea class="form-control" rows="5" id="ai-current-activities" placeholder="Area | Activity summary"></textarea>
+                <div class="form-text">One activity per line. Use <code>Area | Activity</code>; every AI line has already passed source validation.</div>
+              </div>
               <div class="col-md-6"><label class="form-label small">Concerns / Actions</label><textarea class="form-control" rows="4" id="ai-concerns-summary"></textarea></div>
               <div class="col-md-6"><label class="form-label small">Look-ahead</label><textarea class="form-control" rows="4" id="ai-lookahead-summary"></textarea></div>
             </div>
             <div class="border rounded p-3 mt-3 d-none bg-light" id="ai-evidence-panel">
-              <div class="section-label mb-2">AI Source References</div>
+              <div class="section-label mb-2">Narrative Source References</div>
               <ul class="small mb-0 ps-3 d-none" id="ai-citations-list"></ul>
               <div class="mt-3 d-none" id="ai-missing-data-panel">
-                <div class="fw-semibold small mb-1">Missing data reported by AI</div>
+                <div class="fw-semibold small mb-1">Missing source data</div>
                 <ul class="small mb-0 ps-3" id="ai-missing-data-list"></ul>
+              </div>
+              <div class="mt-3 d-none" id="ai-validation-warnings-panel">
+                <div class="fw-semibold small mb-1">Validation notes</div>
+                <ul class="small mb-0 ps-3" id="ai-validation-warnings-list"></ul>
               </div>
             </div>
             <div class="d-flex gap-2 mt-3">
@@ -689,6 +701,7 @@ let monthlySourceValidationApplied = false;
 let monthlyPhotos = [];
 let monthlyWorkforce = {};
 let monthlyAiSuggestion = null;
+let monthlyAiDecisionToken = '';
 const MAX_MONTHLY_UPLOAD_FILES = 35;
 const MAX_MONTHLY_PDF_BYTES = {{ pdf_upload_max_bytes|default(52428800)|int }};
 const MONTHLY_UPLOAD_CLEANUP_KEY = 'gpa-report-upload-cleanup';
@@ -1755,24 +1768,49 @@ async function resetWorkforceValidation() {
 }
 
 function aiCitationRows(state) {
+  const rows = [];
+  const addClaim = (label, claim) => {
+    if (!claim || typeof claim !== 'object') return;
+    const factIds = Array.isArray(claim.fact_ids) ? claim.fact_ids.map(String) : [];
+    const sourceIds = Array.isArray(claim.source_ids) ? claim.source_ids.map(String) : [];
+    const dates = Array.isArray(claim.dates) ? claim.dates.map(String) : [];
+    if (factIds.length || sourceIds.length || dates.length) {
+      rows.push({label, factIds, sourceIds, dates});
+    }
+  };
+
+  const evidence = state?.suggestion?.citation_evidence;
+  if (evidence && typeof evidence === 'object') {
+    [
+      ['Executive summary', evidence.executive_summary],
+      ['Engineering', evidence.engineering_summary],
+      ['Procurement', evidence.procurement_summary],
+      ['Site summary', evidence.site_summary],
+    ].forEach(([label, claim]) => addClaim(label, claim));
+    [
+      ['Current activity', evidence.current_activities],
+      ['Concern / action', evidence.concern_actions],
+      ['Look-ahead', evidence.lookahead],
+      ['Supporting claim', evidence.claims],
+    ].forEach(([label, claims]) => {
+      (Array.isArray(claims) ? claims : [])
+        .forEach((claim, index) => addClaim(`${label} ${index + 1}`, claim));
+    });
+    if (rows.length) return rows;
+  }
+
   const direct = state?.suggestion?.citations;
   if (Array.isArray(direct)) {
     return direct.map((row, index) => ({
       label:String(row?.label || row?.section || `Claim ${index + 1}`),
+      factIds:Array.isArray(row?.fact_ids) ? row.fact_ids.map(String) : [],
       sourceIds:Array.isArray(row?.source_ids) ? row.source_ids.map(String) : [],
       dates:Array.isArray(row?.dates) ? row.dates.map(String) : [],
-    })).filter(row => row.sourceIds.length || row.dates.length);
+    })).filter(row => row.factIds.length || row.sourceIds.length || row.dates.length);
   }
 
   const provider = state?.provider_envelope?.suggestion;
   if (!provider || typeof provider !== 'object') return [];
-  const rows = [];
-  const addClaim = (label, claim) => {
-    if (!claim || typeof claim !== 'object') return;
-    const sourceIds = Array.isArray(claim.source_ids) ? claim.source_ids.map(String) : [];
-    const dates = Array.isArray(claim.dates) ? claim.dates.map(String) : [];
-    if (sourceIds.length || dates.length) rows.push({label, sourceIds, dates});
-  };
   [
     ['Executive summary', provider.executive_summary],
     ['Engineering', provider.engineering_summary],
@@ -1795,17 +1833,26 @@ function renderAiEvidence(state) {
     : (Array.isArray(state?.provider_envelope?.suggestion?.missing_data)
         ? state.provider_envelope.suggestion.missing_data.map(String)
         : []);
+  const validationWarnings = Array.isArray(state?.validation_warnings)
+    ? state.validation_warnings.map(String)
+    : (Array.isArray(state?.provider_envelope?.validation_warnings)
+        ? state.provider_envelope.validation_warnings.map(String)
+        : []);
   const panel = document.getElementById('ai-evidence-panel');
   const citationList = document.getElementById('ai-citations-list');
   const missingPanel = document.getElementById('ai-missing-data-panel');
   const missingList = document.getElementById('ai-missing-data-list');
+  const warningsPanel = document.getElementById('ai-validation-warnings-panel');
+  const warningsList = document.getElementById('ai-validation-warnings-list');
   citationList.replaceChildren();
   missingList.replaceChildren();
+  warningsList.replaceChildren();
   citations.forEach(row => {
     const item = document.createElement('li');
+    const facts = row.factIds?.length ? row.factIds.join(', ') : 'none';
     const sources = row.sourceIds.length ? row.sourceIds.join(', ') : 'none';
     const dates = row.dates.length ? row.dates.join(', ') : 'none';
-    item.textContent = `${row.label} — source IDs: ${sources}; dates: ${dates}`;
+    item.textContent = `${row.label} — verified facts: ${facts}; source IDs: ${sources}; dates: ${dates}`;
     citationList.appendChild(item);
   });
   missingData.forEach(value => {
@@ -1813,19 +1860,55 @@ function renderAiEvidence(state) {
     item.textContent = value;
     missingList.appendChild(item);
   });
+  validationWarnings.forEach(value => {
+    const item = document.createElement('li');
+    item.textContent = value;
+    warningsList.appendChild(item);
+  });
   citationList.classList.toggle('d-none', citations.length === 0);
   missingPanel.classList.toggle('d-none', missingData.length === 0);
-  panel.classList.toggle('d-none', citations.length === 0 && missingData.length === 0);
+  warningsPanel.classList.toggle('d-none', validationWarnings.length === 0);
+  panel.classList.toggle(
+    'd-none',
+    citations.length === 0 && missingData.length === 0 && validationWarnings.length === 0,
+  );
 }
 
 function populateAiSummaryReview(draft) {
   const state = draft.ai_summary || {};
   monthlyAiSuggestion = state.suggestion || null;
+  monthlyAiDecisionToken = String(state.decision_token || '');
   const card = document.getElementById('ai-summary-card');
   card.classList.toggle('d-none', !monthlySourceValidationApplied);
   const status = document.getElementById('ai-summary-status');
+  const modeBadge = document.getElementById('ai-generation-mode');
   const review = document.getElementById('ai-summary-review');
-  status.textContent = state.status ? `AI summary status: ${state.status}` : '';
+  const mode = String(state.generation_mode || '');
+  const modeLabels = {
+    claude:'Claude summary',
+    hybrid:'Hybrid: Claude + verified fallback',
+    deterministic_fallback:'Verified fallback',
+  };
+  modeBadge.textContent = modeLabels[mode] || '';
+  modeBadge.className = `badge ${mode === 'deterministic_fallback' ? 'text-bg-warning' : (mode === 'hybrid' ? 'text-bg-info' : 'text-bg-success')} ${mode ? '' : 'd-none'}`;
+  if (state.status) {
+    if (state.status === 'accepted') {
+      status.textContent = 'Narrative suggestion accepted and applied to the report draft.';
+      status.className = 'alert py-2 small mt-3 alert-success';
+    } else if (state.status === 'rejected') {
+      status.textContent = 'Narrative suggestion rejected. The source-grounded report draft remains unchanged.';
+      status.className = 'alert py-2 small mt-3 alert-secondary';
+    } else {
+      status.textContent = mode === 'deterministic_fallback'
+        ? 'Claude was unavailable. A source-verified deterministic narrative is ready for review.'
+        : (mode === 'hybrid'
+            ? 'Claude output is ready; unsupported sections were replaced with verified fallback text.'
+            : `Narrative suggestion status: ${state.status}`);
+      status.className = `alert py-2 small mt-3 ${mode === 'deterministic_fallback' ? 'alert-warning' : 'alert-info'}`;
+    }
+  } else {
+    status.textContent = '';
+  }
   status.classList.toggle('d-none', !state.status);
   review.classList.toggle('d-none', !monthlyAiSuggestion || state.status !== 'suggested');
   renderAiEvidence(state);
@@ -1834,6 +1917,12 @@ function populateAiSummaryReview(draft) {
   document.getElementById('ai-engineering-summary').value = monthlyAiSuggestion.engineering_summary || '';
   document.getElementById('ai-procurement-summary').value = monthlyAiSuggestion.procurement_summary || '';
   document.getElementById('ai-site-summary').value = monthlyAiSuggestion.site_summary || '';
+  const currentActivities = Array.isArray(monthlyAiSuggestion.current_activities)
+    ? monthlyAiSuggestion.current_activities : [];
+  document.getElementById('ai-current-activities').value = currentActivities.map(item => {
+    if (typeof item === 'string') return item;
+    return `${item.area || 'Site'} | ${item.text || item.description || ''}`;
+  }).join('\n');
   const concerns = Array.isArray(monthlyAiSuggestion.concerns) ? monthlyAiSuggestion.concerns : [];
   document.getElementById('ai-concerns-summary').value = concerns.map(item =>
     typeof item === 'string' ? item : `${item.concern || ''} | ${item.corrective_action || item.action || ''}`
@@ -1851,12 +1940,24 @@ async function generateAiSummary() {
     const response = await fetch(`/monthly/ai-summary/${encodeURIComponent(monthlyDraftId)}`, {method:'POST'});
     const data = await responsePayload(response, 'AI summary could not be generated.');
     applyAiDraftPreservingReview(data);
-    showMonthlyAlert('AI narrative suggestions are ready. Review and edit them before accepting.', 'success');
+    showMonthlyAlert(
+      data.degraded
+        ? 'Claude was unavailable or returned an unsupported section. A verified fallback is ready for review.'
+        : 'AI narrative suggestions are ready. Review and edit them before accepting.',
+      data.degraded ? 'warning' : 'success',
+    );
   } catch (error) { showMonthlyAlert(error.message, 'warning'); }
   finally { setLoading('generate-ai-summary-btn', false); }
 }
 
 function collectAiSuggestionReview() {
+  const currentActivities = document.getElementById('ai-current-activities').value
+    .split('\n').map(line => {
+      const [area, ...text] = line.split('|');
+      return text.length
+        ? {area:area.trim() || 'Site', text:text.join('|').trim()}
+        : {area:'Site', text:area.trim()};
+    }).filter(item => item.text);
   const concerns = document.getElementById('ai-concerns-summary').value.split('\n').map(line => {
     const [concern, ...action] = line.split('|');
     return {concern:concern.trim(), corrective_action:action.join('|').trim()};
@@ -1866,6 +1967,7 @@ function collectAiSuggestionReview() {
     engineering_summary:document.getElementById('ai-engineering-summary').value.trim(),
     procurement_summary:document.getElementById('ai-procurement-summary').value.trim(),
     site_summary:document.getElementById('ai-site-summary').value.trim(),
+    current_activities:currentActivities,
     concerns,
     lookahead:document.getElementById('ai-lookahead-summary').value.split('\n').map(value => value.trim()).filter(Boolean),
   };
@@ -1873,10 +1975,18 @@ function collectAiSuggestionReview() {
 
 async function decideAiSummary(decision) {
   if (!monthlyDraftId) return;
+  if (!monthlyAiDecisionToken && decision === 'accept') {
+    showMonthlyAlert('This saved suggestion must be generated again before it can be accepted.', 'warning');
+    return;
+  }
   try {
     const response = await fetch(`/monthly/ai-summary/${encodeURIComponent(monthlyDraftId)}/decision`, {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({decision, suggestion:decision === 'accept' ? collectAiSuggestionReview() : {}}),
+      body:JSON.stringify({
+        decision,
+        decision_token:monthlyAiDecisionToken,
+        suggestion:decision === 'accept' ? collectAiSuggestionReview() : {},
+      }),
     });
     const data = await responsePayload(response, 'AI summary decision could not be saved.');
     applyAiDraftPreservingReview(data, {preserveNarratives:decision !== 'accept'});

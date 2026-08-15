@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -16,8 +17,17 @@ from zoneinfo import ZoneInfo
 from flask import jsonify, request, send_file, session, url_for
 
 from .aggregate import aggregate_monthly_records
-from .ai_summary import AISummaryError, generate_ai_summary
+from .ai_summary import (
+    AISummaryError,
+    compact_periodic_draft,
+    draft_input_hash,
+    generate_ai_summary,
+)
 from .importer import DEFAULT_LIMITS, PDFImportError, import_daily_report_pdf
+from .narrative_fallback import (
+    apply_deterministic_narrative,
+    build_deterministic_narrative,
+)
 from .overtime import parse_overtime_workbooks
 from .photos import (
     DEFAULT_PHOTO_LIMITS,
@@ -984,21 +994,11 @@ def _prepare_draft(
         site["this_week_activities"] = site["current_period_activities"]
         site["next_week_activities"] = site["next_period_activities"]
     draft["site"] = site
-    if not draft.get("executive_summary"):
-        included = coverage.get("included_count", len(source_manifest))
-        missing = len(coverage.get("missing_dates", []))
-        period_description = (
-            ("week-to-date" if mode == "wtd" else "weekly")
-            if kind == "weekly"
-            else mode.upper()
-        )
-        draft["executive_summary"] = (
-            f"This {period_description} draft compiles {included} Daily Report(s) for "
-            f"{project_title or project_no} from {date_from} to {date_to}. "
-            f"There are {missing} calendar date(s) without an included report. "
-            "Progress, safety incidents, engineering, and procurement values must be reviewed before issue."
-        )
-    return draft
+    # A professional deterministic narrative is always available, even when
+    # Claude is disabled, times out, or returns an unsupported claim.  This is
+    # built only from the selected/parsed records and reviewed workforce facts;
+    # it never turns missing HSE data into a false zero.
+    return apply_deterministic_narrative(draft, overwrite=True)
 
 
 def _source_manifest(records: list[dict[str, Any]], method: str) -> list[dict[str, Any]]:
@@ -1610,6 +1610,11 @@ def _usable_ai_text(value: Any) -> str:
 
 def _clean_ai_references(value: Any) -> dict[str, list[str]]:
     row = value if isinstance(value, dict) else {}
+    fact_ids = []
+    for item in row.get("fact_ids", [])[:80] if isinstance(row.get("fact_ids"), list) else []:
+        text = _clean_text(item, 300)
+        if text and text not in fact_ids:
+            fact_ids.append(text)
     source_ids = []
     for item in row.get("source_ids", [])[:40] if isinstance(row.get("source_ids"), list) else []:
         text = _clean_text(item, 300)
@@ -1620,7 +1625,7 @@ def _clean_ai_references(value: Any) -> dict[str, list[str]]:
         text = _clean_text(item, 10)
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) and text not in dates:
             dates.append(text)
-    return {"source_ids": source_ids, "dates": dates}
+    return {"fact_ids": fact_ids, "source_ids": source_ids, "dates": dates}
 
 
 def _clean_ai_missing_data(value: Any) -> list[str]:
@@ -1648,6 +1653,341 @@ def _clean_ai_citation_evidence(value: Any) -> dict[str, Any]:
         rows = evidence.get(key) if isinstance(evidence.get(key), list) else []
         result[key] = [_clean_ai_references(row) for row in rows[:75]]
     return result
+
+
+def _draft_ai_state_hash(draft: dict[str, Any]) -> str:
+    """Hash draft content while ignoring AI request/result bookkeeping."""
+
+    value = copy.deepcopy(draft)
+    value.pop("ai_request_control", None)
+    value.pop("ai_summary", None)
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _ai_decision_token(
+    *,
+    attempt_id: str,
+    input_hash: str,
+    state_hash: str,
+    suggestion: Any,
+) -> str:
+    """Bind one review decision to one generated suggestion and source state."""
+
+    payload = {
+        "attempt_id": str(attempt_id or ""),
+        "input_hash": str(input_hash or ""),
+        "state_hash": str(state_hash or ""),
+        "suggestion": suggestion if isinstance(suggestion, dict) else {},
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _ai_decision_state_matches(
+    draft: dict[str, Any],
+    state: dict[str, Any],
+    supplied_token: Any,
+) -> bool:
+    """Verify the browser is deciding the current, unchanged suggestion."""
+
+    expected_token = str(state.get("decision_token") or "")
+    attempt_id = str(state.get("attempt_id") or "")
+    input_hash = str(state.get("source_input_hash") or "")
+    state_hash = str(state.get("source_state_hash") or "")
+    token = str(supplied_token or "")
+    if (
+        not expected_token
+        or not attempt_id
+        or (not input_hash and not state_hash)
+        or not token
+    ):
+        return False
+    calculated_token = _ai_decision_token(
+        attempt_id=attempt_id,
+        input_hash=input_hash,
+        state_hash=state_hash,
+        suggestion=state.get("suggestion"),
+    )
+    if not hmac.compare_digest(expected_token, calculated_token):
+        return False
+    if not hmac.compare_digest(expected_token, token):
+        return False
+    return _ai_attempt_matches_draft(
+        draft,
+        attempt_id=attempt_id,
+        input_hash=input_hash,
+        state_hash=state_hash,
+    )
+
+
+def _ai_attempt_matches_draft(
+    draft: dict[str, Any],
+    *,
+    attempt_id: str,
+    input_hash: str,
+    state_hash: str,
+) -> bool:
+    """Reject a provider result when its source draft changed in flight."""
+
+    control = draft.get("ai_request_control")
+    control = control if isinstance(control, dict) else {}
+    if not attempt_id or str(control.get("attempt_id") or "") != attempt_id:
+        return False
+    if input_hash:
+        try:
+            current_input_hash = draft_input_hash(compact_periodic_draft(draft))
+        except AISummaryError:
+            return False
+        if current_input_hash != input_hash:
+            return False
+    elif state_hash and _draft_ai_state_hash(draft) != state_hash:
+        # An oversized input has no compact input hash. Fall back to the full
+        # draft-state hash so even its deterministic fallback cannot overwrite
+        # an in-flight edit.
+        return False
+    return True
+
+
+def _ai_draft_changed_response(draft: dict[str, Any]):
+    remaining = _ai_cooldown_remaining(draft)
+    return _ai_retry_response(
+        "Report data changed while the narrative was being generated. Review the latest data and retry.",
+        code="ai_draft_changed",
+        status=409,
+        retry_after=max(1, remaining),
+    )
+
+
+def _draft_source_references(draft: dict[str, Any]) -> dict[str, list[str]]:
+    """Return the selected Daily Report references for deterministic prose."""
+
+    source_ids: list[str] = []
+    dates: list[str] = []
+    manifest = draft.get("source_manifest") if isinstance(draft.get("source_manifest"), list) else []
+    for row in manifest:
+        if not isinstance(row, dict):
+            continue
+        source_id = _clean_text(row.get("source_id", row.get("report_id")), 300)
+        report_date = _clean_text(row.get("report_date", row.get("date")), 10)
+        if source_id and source_id not in source_ids:
+            source_ids.append(source_id)
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", report_date) and report_date not in dates:
+            dates.append(report_date)
+    return {"fact_ids": [], "source_ids": source_ids, "dates": dates}
+
+
+def _narrative_row_text(row: Any) -> str:
+    if isinstance(row, dict):
+        return _clean_text(
+            row.get("text", row.get("description", row.get("activity", row.get("title")))),
+            2_000,
+        )
+    return _clean_text(row, 2_000)
+
+
+def _deterministic_ai_display(draft: dict[str, Any]) -> dict[str, Any]:
+    """Build the review payload used when Claude is unavailable or incomplete."""
+
+    stored_narrative = draft.get("deterministic_narrative")
+    narrative = (
+        copy.deepcopy(stored_narrative)
+        if isinstance(stored_narrative, dict)
+        and stored_narrative.get("version") == "periodic-narrative-fallback/1"
+        else build_deterministic_narrative(draft)
+    )
+    # Rebuilding a draft that already contains deterministic missing-data prose
+    # must not accidentally reclassify that prose as supplied source data.
+    missing_data = _clean_ai_missing_data(narrative.get("missing_data"))
+    missing_keys = {item.casefold() for item in missing_data}
+    for section, label, prefix in (
+        ("engineering", "Engineering status: Not supplied", "no engineering status data was supplied"),
+        ("procurement", "Procurement status: Not supplied", "no procurement status data was supplied"),
+    ):
+        section_value = narrative.get(section)
+        section_value = section_value if isinstance(section_value, dict) else {}
+        summary = _clean_text(section_value.get("summary"), 4_000).casefold()
+        if summary.startswith(prefix) and label.casefold() not in missing_keys:
+            missing_data.append(label)
+            missing_keys.add(label.casefold())
+    source_references = _draft_source_references(draft)
+    site = narrative.get("site") if isinstance(narrative.get("site"), dict) else {}
+    engineering = narrative.get("engineering") if isinstance(narrative.get("engineering"), dict) else {}
+    procurement = narrative.get("procurement") if isinstance(narrative.get("procurement"), dict) else {}
+
+    current_activities: list[dict[str, Any]] = []
+    current_evidence: list[dict[str, list[str]]] = []
+    for row in site.get("current_period_activities", []) if isinstance(site.get("current_period_activities"), list) else []:
+        text = _narrative_row_text(row)
+        if not text:
+            continue
+        references = _clean_ai_references(row)
+        current_activities.append({
+            "area": _clean_text(row.get("area"), 200) or "Site" if isinstance(row, dict) else "Site",
+            "text": text,
+            **references,
+        })
+        current_evidence.append(references)
+
+    concerns: list[dict[str, Any]] = []
+    concern_evidence: list[dict[str, list[str]]] = []
+    for row in site.get("concerns", []) if isinstance(site.get("concerns"), list) else []:
+        if not isinstance(row, dict):
+            continue
+        concern = _clean_text(row.get("concern", row.get("text")), 2_000)
+        action = _clean_text(row.get("corrective_action"), 2_000)
+        if not concern and not action:
+            continue
+        references = _clean_ai_references(row)
+        concerns.append({
+            "concern": concern,
+            "corrective_action": action,
+            **references,
+        })
+        concern_evidence.append(references)
+
+    lookahead: list[str] = []
+    lookahead_evidence: list[dict[str, list[str]]] = []
+    for row in site.get("next_period_activities", []) if isinstance(site.get("next_period_activities"), list) else []:
+        text = _narrative_row_text(row)
+        if not text:
+            continue
+        lookahead.append(text)
+        lookahead_evidence.append(_clean_ai_references(row))
+
+    citation_evidence = {
+        "executive_summary": copy.deepcopy(source_references),
+        "engineering_summary": copy.deepcopy(source_references) if _usable_ai_text(engineering.get("summary")) else {"fact_ids": [], "source_ids": [], "dates": []},
+        "procurement_summary": copy.deepcopy(source_references) if _usable_ai_text(procurement.get("summary")) else {"fact_ids": [], "source_ids": [], "dates": []},
+        "site_summary": copy.deepcopy(source_references),
+        "current_activities": current_evidence,
+        "concern_actions": concern_evidence,
+        "lookahead": lookahead_evidence,
+        "claims": [],
+    }
+    return {
+        "executive_summary": _clean_text(narrative.get("executive_summary"), 12_000),
+        "engineering_summary": _clean_text(engineering.get("summary"), 4_000),
+        "procurement_summary": _clean_text(procurement.get("summary"), 4_000),
+        "site_summary": _clean_text(site.get("summary"), 12_000),
+        "current_activities": current_activities,
+        "concerns": concerns,
+        "lookahead": lookahead,
+        "citation_evidence": citation_evidence,
+        "missing_data": missing_data,
+    }
+
+
+def _merge_ai_with_deterministic(
+    draft: dict[str, Any],
+    envelope: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    """Use Claude where validated and deterministic prose for dropped sections."""
+
+    baseline = _deterministic_ai_display(draft)
+    raw = envelope.get("suggestion") if isinstance(envelope.get("suggestion"), dict) else {}
+    display = copy.deepcopy(baseline)
+    fallback_sections: list[str] = []
+    expected_missing_sections: list[str] = []
+    missing_labels = {item.casefold() for item in baseline.get("missing_data", [])}
+    expected_missing = {
+        "engineering_summary": "engineering status: not supplied" in missing_labels,
+        "procurement_summary": "procurement status: not supplied" in missing_labels,
+    }
+
+    for target, source in (
+        ("executive_summary", "executive_summary"),
+        ("engineering_summary", "engineering_summary"),
+        ("procurement_summary", "procurement_summary"),
+        ("site_summary", "site_summary"),
+    ):
+        ai_text = _usable_ai_text(raw.get(source))
+        if ai_text:
+            display[target] = ai_text
+            display["citation_evidence"][target] = _clean_ai_references(raw.get(source))
+        elif expected_missing.get(target, False):
+            expected_missing_sections.append(target)
+        else:
+            fallback_sections.append(target)
+
+    ai_activities: list[dict[str, Any]] = []
+    activity_evidence: list[dict[str, list[str]]] = []
+    for row in raw.get("current_activities", []) if isinstance(raw.get("current_activities"), list) else []:
+        if not isinstance(row, dict):
+            continue
+        text = _claim_text(row)
+        if not text:
+            continue
+        references = _clean_ai_references(row)
+        ai_activities.append({
+            "area": _clean_text(row.get("area"), 200) or "Site",
+            "text": text,
+            **references,
+        })
+        activity_evidence.append(references)
+    if ai_activities:
+        display["current_activities"] = _enrich_activity_statuses(ai_activities, draft)
+        display["citation_evidence"]["current_activities"] = activity_evidence
+    elif baseline["current_activities"]:
+        fallback_sections.append("current_activities")
+
+    ai_concerns: list[dict[str, Any]] = []
+    concern_evidence: list[dict[str, list[str]]] = []
+    for row in raw.get("concern_actions", []) if isinstance(raw.get("concern_actions"), list) else []:
+        if not isinstance(row, dict):
+            continue
+        concern = _clean_text(row.get("concern"), 2_000)
+        action = _clean_text(row.get("corrective_action"), 2_000)
+        if not concern and not action:
+            continue
+        references = _clean_ai_references(row)
+        ai_concerns.append({"concern": concern, "corrective_action": action, **references})
+        concern_evidence.append(references)
+    if ai_concerns:
+        display["concerns"] = ai_concerns
+        display["citation_evidence"]["concern_actions"] = concern_evidence
+    elif baseline["concerns"]:
+        fallback_sections.append("concerns")
+
+    ai_lookahead: list[str] = []
+    lookahead_evidence: list[dict[str, list[str]]] = []
+    for row in raw.get("lookahead", []) if isinstance(raw.get("lookahead"), list) else []:
+        text = _claim_text(row)
+        if not text:
+            continue
+        ai_lookahead.append(text)
+        lookahead_evidence.append(_clean_ai_references(row))
+    if ai_lookahead:
+        display["lookahead"] = ai_lookahead
+        display["citation_evidence"]["lookahead"] = lookahead_evidence
+    elif baseline["lookahead"]:
+        fallback_sections.append("lookahead")
+
+    display["citation_evidence"]["claims"] = [
+        _clean_ai_references(row)
+        for row in (raw.get("claims", []) if isinstance(raw.get("claims"), list) else [])
+        if isinstance(row, dict)
+    ][:75]
+    display["missing_data"] = list(dict.fromkeys(
+        _clean_ai_missing_data(raw.get("missing_data")) + baseline["missing_data"]
+    ))
+    return (
+        display,
+        list(dict.fromkeys(fallback_sections)),
+        list(dict.fromkeys(expected_missing_sections)),
+    )
 
 
 def _clean_ai_review(value: Any) -> dict[str, Any]:
@@ -1809,7 +2149,12 @@ def _ai_issue_audit(value: Any) -> dict[str, Any] | None:
     envelope = value.get("provider_envelope") if isinstance(value.get("provider_envelope"), dict) else {}
     result = {
         key: copy.deepcopy(value.get(key))
-        for key in ("status", "requested_at", "requested_by", "decided_at", "decided_by")
+        for key in (
+            "status", "requested_at", "requested_by", "decided_at", "decided_by",
+            "generation_mode", "fallback_sections", "expected_missing_sections",
+            "fallback_reason_code",
+            "validation_warnings",
+        )
         if value.get(key) not in (None, "")
     }
     result.update({
@@ -1837,6 +2182,7 @@ def _issued_report_copy(report: dict[str, Any]) -> dict[str, Any]:
     value = copy.deepcopy(report)
     value.pop("_source_records", None)
     value.pop("ai_request_control", None)
+    value.pop("deterministic_narrative", None)
     workforce = _workforce_issue_audit(value.get("workforce_validation"))
     if workforce is None:
         value.pop("workforce_validation", None)
@@ -2909,6 +3255,7 @@ def register_monthly_routes(
                 actor=username,
             )
             draft.pop("ai_summary", None)
+            draft = apply_deterministic_narrative(draft, overwrite=True)
             _update_draft(data_dir, username, draft)
             return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
         except ValueError as exc:
@@ -2966,6 +3313,7 @@ def register_monthly_routes(
                 actor=username,
             )
             draft.pop("ai_summary", None)
+            draft = apply_deterministic_narrative(draft, overwrite=True)
             _update_draft(data_dir, username, draft)
             return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
         except ValueError as exc:
@@ -2982,6 +3330,7 @@ def register_monthly_routes(
             return jsonify({"error": "Report draft not found."}), 404
         reset_workforce(draft)
         draft.pop("ai_summary", None)
+        draft = apply_deterministic_narrative(draft, overwrite=True)
         _update_draft(data_dir, username, draft)
         return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
 
@@ -2997,6 +3346,10 @@ def register_monthly_routes(
         if draft is None:
             return jsonify({"error": "Report draft not found."}), 404
         ai_lock: tuple[Path, str] | None = None
+        started_at = ""
+        attempt_id = ""
+        request_input_hash = ""
+        request_state_hash = ""
         try:
             _require_applied_source_validation(draft)
             if has_pending_workforce_review(draft):
@@ -3033,122 +3386,157 @@ def register_monthly_routes(
             # prevents rapid retries after timeouts/provider failures and also
             # closes the race between multiple Railway workers.
             started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            attempt_id = uuid.uuid4().hex
+            request_state_hash = _draft_ai_state_hash(draft)
+            input_error: AISummaryError | None = None
+            try:
+                request_input_hash = draft_input_hash(compact_periodic_draft(draft))
+            except AISummaryError as exc:
+                # Keep input-too-large deterministic fallback reviewable. Other
+                # input/configuration errors keep their existing error response.
+                if exc.code != "input_too_large":
+                    raise
+                input_error = exc
             draft["ai_request_control"] = {
                 "version": "periodic-ai-request-control/1",
                 "last_started_at": started_at,
                 "last_started_by": username,
-                "attempt_id": uuid.uuid4().hex,
+                "attempt_id": attempt_id,
+                "input_hash": request_input_hash,
+                "draft_state_hash": request_state_hash,
             }
             _update_draft(data_dir, username, draft)
+            if input_error is not None:
+                raise input_error
             envelope = generate_ai_summary(draft)
-            raw = envelope.get("suggestion") if isinstance(envelope.get("suggestion"), dict) else {}
-            concerns = []
-            concern_evidence = []
-            concern_actions = (
-                raw.get("concern_actions")
-                if isinstance(raw.get("concern_actions"), list)
-                else []
+            latest_draft = _load_draft(data_dir, username, draft_id)
+            if latest_draft is None:
+                return jsonify({"error": "Report draft not found."}), 404
+            if not _ai_attempt_matches_draft(
+                latest_draft,
+                attempt_id=attempt_id,
+                input_hash=request_input_hash,
+                state_hash=request_state_hash,
+            ):
+                return _ai_draft_changed_response(latest_draft)
+            draft = latest_draft
+            display, fallback_sections, expected_missing_sections = _merge_ai_with_deterministic(
+                draft,
+                envelope,
             )
-            for row in concern_actions[:75]:
-                if not isinstance(row, dict):
-                    continue
-                concern = _clean_text(row.get("concern"), 2_000)
-                action = _clean_text(row.get("corrective_action"), 2_000)
-                if concern or action:
-                    references = _clean_ai_references(row)
-                    concerns.append({
-                        "concern": concern,
-                        "corrective_action": action,
-                        **references,
-                    })
-                    concern_evidence.append(references)
-            lookahead = []
-            lookahead_evidence = []
-            for row in raw.get("lookahead", [])[:75] if isinstance(raw.get("lookahead"), list) else []:
-                text = _claim_text(row)
-                if text:
-                    lookahead.append(text)
-                    lookahead_evidence.append(_clean_ai_references(row))
-            current_activities = []
-            current_activity_evidence = []
-            for row in raw.get("current_activities", [])[:75] if isinstance(raw.get("current_activities"), list) else []:
-                if not isinstance(row, dict):
-                    continue
-                text = _claim_text(row)
-                area = _clean_text(row.get("area"), 200)
-                if text:
-                    references = _clean_ai_references(row)
-                    current_activities.append({
-                        "area": area or "Site",
-                        "text": text,
-                        **references,
-                    })
-                    current_activity_evidence.append(references)
-
-            # Preserve deterministic source status even when Claude omits it.
-            current_activities = _enrich_activity_statuses(current_activities, draft)
-
-            claim_evidence = [
-                _clean_ai_references(row)
-                for row in (raw.get("claims", [])[:75] if isinstance(raw.get("claims"), list) else [])
-            ]
-            citation_evidence = {
-                key: _clean_ai_references(raw.get(key))
-                for key in (
-                    "executive_summary",
-                    "engineering_summary",
-                    "procurement_summary",
-                    "site_summary",
+            validation_warnings = [
+                _clean_text(item, 500)
+                for item in (
+                    envelope.get("validation_warnings", [])
+                    if isinstance(envelope.get("validation_warnings"), list)
+                    else []
                 )
-            }
-            citation_evidence.update({
-                "current_activities": current_activity_evidence,
-                "concern_actions": concern_evidence,
-                "lookahead": lookahead_evidence,
-                "claims": claim_evidence,
-            })
-            current_engineering = draft.get("engineering") if isinstance(draft.get("engineering"), dict) else {}
-            current_procurement = draft.get("procurement") if isinstance(draft.get("procurement"), dict) else {}
-            current_site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
-            display = {
-                # A missing AI section must never make the review look worse
-                # than the deterministic draft that existed before AI.
-                "executive_summary": _usable_ai_text(raw.get("executive_summary"))
-                or _clean_text(draft.get("executive_summary"), 4_000),
-                "engineering_summary": _usable_ai_text(raw.get("engineering_summary"))
-                or _clean_text(current_engineering.get("summary"), 4_000),
-                "procurement_summary": _usable_ai_text(raw.get("procurement_summary"))
-                or _clean_text(current_procurement.get("summary"), 4_000),
-                "site_summary": _usable_ai_text(raw.get("site_summary"))
-                or _clean_text(current_site.get("summary"), 4_000),
-                "current_activities": current_activities,
-                "concerns": concerns,
-                "lookahead": lookahead,
-                "citation_evidence": citation_evidence,
-                "missing_data": _clean_ai_missing_data(raw.get("missing_data")),
-            }
+                if _clean_text(item, 500)
+            ]
+            generation_mode = "hybrid" if fallback_sections or validation_warnings else "claude"
+            decision_token = _ai_decision_token(
+                attempt_id=attempt_id,
+                input_hash=request_input_hash,
+                state_hash=request_state_hash,
+                suggestion=display,
+            )
             draft["ai_summary"] = {
                 "status": "suggested",
                 "requested_at": started_at,
                 "requested_by": username,
+                "attempt_id": attempt_id,
+                "source_input_hash": request_input_hash,
+                "source_state_hash": request_state_hash,
+                "decision_token": decision_token,
+                "generation_mode": generation_mode,
+                "fallback_sections": fallback_sections,
+                "expected_missing_sections": expected_missing_sections,
+                "validation_warnings": validation_warnings,
                 "suggestion": display,
                 "provider_envelope": envelope,
             }
             _update_draft(data_dir, username, draft)
             if activity_logger:
                 activity_logger(username, "periodic_ai_suggestion_generated", f"draft={draft_id} model={envelope.get('model', '')}")
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+            return jsonify({
+                "ok": True,
+                "degraded": generation_mode == "hybrid",
+                "generation_mode": generation_mode,
+                "decision_token": decision_token,
+                "draft_id": draft_id,
+                "draft": draft,
+            })
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         except AISummaryError as exc:
             app.logger.warning("AI summary failed code=%s retryable=%s", exc.code, exc.retryable)
-            if exc.code == "rate_limited":
-                return _ai_retry_response(
-                    str(exc),
-                    code="rate_limited",
-                    status=429,
-                    retry_after=30,
+            fallback_codes = {
+                "timeout",
+                "rate_limited",
+                "provider_error",
+                "provider_call_limit",
+                "malformed_response",
+                "unsupported_claims",
+                "input_too_large",
+            }
+            if exc.code in fallback_codes:
+                latest_draft = _load_draft(data_dir, username, draft_id)
+                if latest_draft is None:
+                    return jsonify({"error": "Report draft not found."}), 404
+                if not _ai_attempt_matches_draft(
+                    latest_draft,
+                    attempt_id=attempt_id,
+                    input_hash=request_input_hash,
+                    state_hash=request_state_hash,
+                ):
+                    return _ai_draft_changed_response(latest_draft)
+                draft = latest_draft
+                display = _deterministic_ai_display(draft)
+                requested_at = started_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                decision_token = _ai_decision_token(
+                    attempt_id=attempt_id,
+                    input_hash=request_input_hash,
+                    state_hash=request_state_hash,
+                    suggestion=display,
                 )
+                draft["ai_summary"] = {
+                    "status": "suggested",
+                    "requested_at": requested_at,
+                    "requested_by": username,
+                    "attempt_id": attempt_id,
+                    "source_input_hash": request_input_hash,
+                    "source_state_hash": request_state_hash,
+                    "decision_token": decision_token,
+                    "generation_mode": "deterministic_fallback",
+                    "fallback_sections": [
+                        "executive_summary",
+                        "engineering_summary",
+                        "procurement_summary",
+                        "site_summary",
+                        "current_activities",
+                        "concerns",
+                        "lookahead",
+                    ],
+                    "fallback_reason_code": exc.code,
+                    "validation_warnings": [_clean_text(str(exc), 500)],
+                    "suggestion": display,
+                }
+                _update_draft(data_dir, username, draft)
+                if activity_logger:
+                    activity_logger(
+                        username,
+                        "periodic_ai_fallback_generated",
+                        f"draft={draft_id} reason={exc.code}",
+                    )
+                return jsonify({
+                    "ok": True,
+                    "degraded": True,
+                    "generation_mode": "deterministic_fallback",
+                    "fallback_reason_code": exc.code,
+                    "decision_token": decision_token,
+                    "draft_id": draft_id,
+                    "draft": draft,
+                })
             status = 503 if exc.code in {"missing_api_key", "billing_required"} else 502
             return jsonify({"error": str(exc), "code": exc.code, "retryable": exc.retryable}), status
         except Exception:
@@ -3172,6 +3560,26 @@ def register_monthly_routes(
         body = request.get_json(silent=True)
         if not isinstance(body, dict) or body.get("decision") not in {"accept", "reject"}:
             return jsonify({"error": "AI decision must be accept or reject."}), 400
+        if not state.get("decision_token") and body.get("decision") != "reject":
+            # Drafts created before per-suggestion decision binding remain
+            # readable and may be safely rejected. They cannot be accepted,
+            # because an older browser tab is indistinguishable from the
+            # current review. Regeneration creates a bound suggestion.
+            return jsonify({
+                "error": "This saved narrative suggestion predates secure review binding. Generate it again before accepting it.",
+                "code": "ai_decision_regeneration_required",
+                "retryable": True,
+            }), 409
+        if state.get("decision_token") and not _ai_decision_state_matches(
+            draft,
+            state,
+            body.get("decision_token"),
+        ):
+            return jsonify({
+                "error": "This narrative suggestion is stale or the report data changed. Review the latest draft and generate the suggestion again.",
+                "code": "ai_suggestion_stale",
+                "retryable": True,
+            }), 409
         decision = str(body["decision"])
         if decision == "accept":
             try:

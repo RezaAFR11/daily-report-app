@@ -180,7 +180,10 @@ class WeeklyDraftTests(unittest.TestCase):
         self.assertEqual(draft["site"]["this_week_activities"], activities)
         self.assertEqual(draft["site"]["next_period_activities"], plans)
         self.assertEqual(draft["site"]["next_week_activities"], plans)
-        self.assertIn("week-to-date draft", draft["executive_summary"])
+        self.assertIn("Weekly Progress Report covers 3–4 August 2026", draft["executive_summary"])
+        self.assertIn("Loop test", draft["executive_summary"])
+        self.assertIn("Safety incident metrics were not supplied", draft["executive_summary"])
+        self.assertNotIn("No safety incidents", draft["executive_summary"])
 
 
 class WeeklyRouteTests(unittest.TestCase):
