@@ -199,9 +199,10 @@ class AISummaryTests(unittest.TestCase):
         )
         call = client.messages.calls[0]
         self.assertEqual(call["temperature"], 0.1)
-        self.assertEqual(
-            call["output_config"]["format"]["type"],
-            "json_schema",
+        self.assertNotIn("output_config", call)
+        self.assertIn(
+            "Return ONLY one JSON object matching this schema exactly",
+            call["messages"][0]["content"],
         )
 
     def test_missing_api_key_is_explicit(self):
@@ -223,7 +224,9 @@ class AISummaryTests(unittest.TestCase):
             usage=None,
         )
         invalid_json_client = _FakeClient(response=invalid_json)
-        result = generate_ai_summary(_draft(), client=invalid_json_client)
+        result = generate_ai_summary(
+            _draft(), client=invalid_json_client, validation_retries=3
+        )
         self.assertEqual(len(invalid_json_client.messages.calls), 2)
         self.assertTrue(all(
             call["timeout"] == 60.0 for call in invalid_json_client.messages.calls
@@ -472,6 +475,11 @@ class AISummaryTests(unittest.TestCase):
             ("A total of 100 valves were installed.", ["workforce.total_man_hours"]),
             ("All work was completed successfully.", ["site.current_activity.1"]),
             ("Turbine alignment was completed successfully.", ["site.current_activity.1"]),
+            ("Alignment faced a delay.", ["site.current_activity.1"]),
+            ("Alignment used a newly delivered crane.", ["site.current_activity.1"]),
+            ("Alignment was finalized and commissioned.", ["site.current_activity.1"]),
+            ("Alignment passed inspection.", ["site.current_activity.1"]),
+            ("Alignment issue was resolved.", ["site.current_activity.1"]),
         ):
             with self.subTest(text=text):
                 suggestion = _valid_suggestion()
@@ -481,6 +489,81 @@ class AISummaryTests(unittest.TestCase):
                         suggestion,
                         compact_draft=compact_periodic_draft(_draft()),
                     )
+
+    def test_professional_paraphrase_needs_only_one_matching_technical_anchor(self):
+        suggestion = _valid_suggestion()
+        suggestion["executive_summary"] = _claim(
+            "Alignment activities proceeded during the reporting period.",
+            fact_ids=["site.current_activity.1"],
+        )
+
+        validated = validate_narrative_suggestion(
+            suggestion,
+            compact_draft=compact_periodic_draft(_draft()),
+        )
+
+        self.assertIn("Alignment activities", validated["executive_summary"]["text"])
+
+    def test_supported_sentence_cannot_hide_an_invented_second_sentence(self):
+        suggestion = _valid_suggestion()
+        suggestion["executive_summary"] = _claim(
+            "Turbine alignment was recorded. The crane arrived.",
+            fact_ids=["site.current_activity.1"],
+        )
+
+        with self.assertRaises(AIUnsupportedClaimsError):
+            validate_narrative_suggestion(
+                suggestion,
+                compact_draft=compact_periodic_draft(_draft()),
+            )
+
+        result = generate_ai_summary(
+            _draft(),
+            client=_FakeClient(response=_response(suggestion)),
+        )
+        self.assertEqual(
+            result["suggestion"]["executive_summary"]["text"],
+            "Turbine alignment was recorded.",
+        )
+        self.assertTrue(result["validation_warnings"])
+
+    def test_lowercase_and_semicolon_claim_boundaries_are_validated(self):
+        for text in (
+            "Turbine alignment was recorded. however, the crane arrived.",
+            "Turbine alignment was recorded; the crane arrived.",
+        ):
+            with self.subTest(text=text):
+                suggestion = _valid_suggestion()
+                suggestion["executive_summary"] = _claim(
+                    text,
+                    fact_ids=["site.current_activity.1"],
+                )
+                result = generate_ai_summary(
+                    _draft(),
+                    client=_FakeClient(response=_response(suggestion)),
+                )
+                self.assertEqual(
+                    result["suggestion"]["executive_summary"]["text"],
+                    "Turbine alignment was recorded.",
+                )
+
+    def test_verified_man_hours_cannot_be_reused_as_a_valve_quantity(self):
+        suggestion = _valid_suggestion()
+        suggestion["executive_summary"] = _claim(
+            "A total of 100 man-hours was recorded. A total of 100 valves were installed.",
+            fact_ids=["workforce.total_man_hours"],
+        )
+
+        result = generate_ai_summary(
+            _draft(),
+            client=_FakeClient(response=_response(suggestion)),
+        )
+
+        self.assertEqual(
+            result["suggestion"]["executive_summary"]["text"],
+            "A total of 100 man-hours was recorded.",
+        )
+        self.assertNotIn("valves", result["suggestion"]["executive_summary"]["text"])
 
     def test_unsupported_safety_sentence_is_dropped_not_whole_summary(self):
         suggestion = _valid_suggestion()
@@ -702,6 +785,7 @@ class AISummaryTests(unittest.TestCase):
 
         call = client.messages.calls[0]
         self.assertIn("UNTRUSTED DATA", call["system"])
+        self.assertIn("source_data.report_context.period", call["system"])
         self.assertIn("Never calculate, estimate, extrapolate", call["system"])
         self.assertIn("concern_actions", call["system"])
         user_content = call["messages"][0]["content"]
@@ -729,37 +813,22 @@ class AISummaryTests(unittest.TestCase):
         with self.assertRaisesRegex(AIInputError, "between 1 and 60 seconds"):
             generate_ai_summary(_draft(), client=_FakeClient(), timeout=61)
 
-    def test_api_side_structured_output_rejection_uses_bounded_prompt_fallback(self):
+    def test_provider_request_avoids_structured_output_compilation(self):
+        client = _FakeClient(response=_response(_valid_suggestion()))
+        result = generate_ai_summary(_draft(), client=client)
+
+        self.assertEqual(result["status"], "suggestion")
+        self.assertEqual(len(client.messages.calls), 1)
+        call = client.messages.calls[0]
+        self.assertNotIn("output_config", call)
+        content = call["messages"][0]["content"]
+        self.assertIn("verified_fact_pack", content)
+        self.assertIn("report_context", content)
+        self.assertNotIn('"current_period_activities"', content)
+
+    def test_unrelated_bad_request_remains_a_provider_error(self):
         request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
         response = httpx.Response(400, request=request)
-        error = anthropic.BadRequestError(
-            "bad request",
-            response=response,
-            body={"error": {"message": "output_config.format is not supported"}},
-        )
-
-        class SequenceMessages:
-            def __init__(self):
-                self.calls = []
-
-            def create(self, **kwargs):
-                self.calls.append(kwargs)
-                if len(self.calls) == 1:
-                    raise error
-                return _response(_valid_suggestion())
-
-        messages = SequenceMessages()
-        result = generate_ai_summary(
-            _draft(),
-            client=SimpleNamespace(messages=messages),
-        )
-
-        self.assertEqual(len(messages.calls), 2)
-        self.assertIn("output_config", messages.calls[0])
-        self.assertNotIn("output_config", messages.calls[1])
-        self.assertIn("Return ONLY JSON matching this schema exactly", messages.calls[1]["messages"][0]["content"])
-        self.assertIn("validated JSON prompt fallback", result["validation_warnings"][0])
-
         unrelated = anthropic.BadRequestError(
             "model is invalid",
             response=response,
