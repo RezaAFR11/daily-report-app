@@ -13,6 +13,7 @@ import hashlib
 import io
 import os
 import re
+import unicodedata
 import warnings as python_warnings
 from collections import Counter
 from dataclasses import dataclass
@@ -244,11 +245,177 @@ def _looks_like_signature_or_line_art(content: bytes) -> bool:
     )
 
 
+
+def _normalise_photo_text(value: Any) -> str:
+    """Normalise photo captions/activity text for deterministic matching."""
+
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
+
+
+def _photo_status_suffix(value: Any) -> str:
+    """Return the client-facing status token used by Daily Report photo cards."""
+
+    status = _normalise_photo_text(value)
+    labels = {
+        "finished": "FINISH",
+        "finish": "FINISH",
+        "completed": "COMPLETE",
+        "complete": "COMPLETE",
+        "in progress": "IN PROGRESS",
+        "ongoing": "ONGOING",
+        "on hold": "ON HOLD",
+        "pending": "PENDING",
+    }
+    label = labels.get(status)
+    return f" ({label})" if label else ""
+
+
+def _photo_activity_identifiers(value: Any) -> list[str]:
+    """Return distinctive equipment/tag fragments usable as safe fallbacks."""
+
+    text = str(value or "")
+    identifiers: list[str] = []
+    for match in re.finditer(
+        r"(?<![A-Za-z0-9])(?:\d{1,4}\s*[- ]\s*)?[A-Za-z]{2,}"
+        r"(?:\s*[- ]\s*[A-Za-z0-9]+){1,4}(?![A-Za-z0-9])",
+        text,
+    ):
+        key = _normalise_photo_text(match.group(0))
+        if key and any(char.isdigit() for char in key) and key not in identifiers:
+            identifiers.append(key)
+    return identifiers
+
+
+def _photo_context_entries(areas: Iterable[Mapping[str, Any]] | None) -> list[dict[str, str]]:
+    """Build source-backed area/caption candidates from parsed Daily Report areas."""
+
+    result: list[dict[str, str]] = []
+    for area in areas or ():
+        if not isinstance(area, Mapping):
+            continue
+        area_name = str(area.get("id") or area.get("area") or area.get("name") or "").strip()
+        status_by_description: dict[str, str] = {}
+        statuses = area.get("activity_statuses")
+        for item in statuses if isinstance(statuses, list) else []:
+            if not isinstance(item, Mapping):
+                continue
+            description_key = _normalise_photo_text(item.get("description"))
+            status = str(item.get("status") or "").strip()
+            if description_key and status:
+                status_by_description[description_key] = status
+
+        activities = area.get("activities_today")
+        for description in activities if isinstance(activities, list) else []:
+            description_text = " ".join(str(description or "").split()).strip()
+            description_key = _normalise_photo_text(description_text)
+            if not description_text or not description_key:
+                continue
+            status = status_by_description.get(description_key, "")
+            result.append({
+                "area": area_name[:255],
+                "caption": (description_text + _photo_status_suffix(status))[:500],
+                "key": description_key,
+                "identifiers": "|".join(_photo_activity_identifiers(description_text)),
+            })
+    return result
+
+
+def _match_photo_page_contexts(
+    page_text: str,
+    entries: list[dict[str, str]],
+    *,
+    trim_before_heading: bool,
+) -> list[dict[str, str]]:
+    """Match parsed activities to captions visible in one Photo Documentation page."""
+
+    text = str(page_text or "")
+    if trim_before_heading:
+        heading = _PHOTO_HEADING_RE.search(text)
+        if heading:
+            text = text[heading.start():]
+    normalised_page = _normalise_photo_text(text)
+    if not normalised_page:
+        return []
+
+    matches: list[tuple[int, int, dict[str, str]]] = []
+    seen: set[tuple[str, str]] = set()
+    for order, entry in enumerate(entries):
+        key = entry.get("key", "")
+        position = normalised_page.find(key) if key else -1
+        if position < 0:
+            positions = [
+                normalised_page.find(identifier)
+                for identifier in entry.get("identifiers", "").split("|")
+                if identifier
+            ]
+            positions = [value for value in positions if value >= 0]
+            position = min(positions) if positions else -1
+        if position < 0:
+            continue
+        identity = (entry.get("area", ""), entry.get("caption", ""))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        matches.append((position, order, entry))
+
+    matches.sort(key=lambda item: (item[0], item[1]))
+    return [dict(item[2]) for item in matches]
+
+
+def _attach_photo_contexts(
+    candidates: list[dict[str, Any]],
+    pages: list[Any],
+    heading_pages: set[int],
+    areas: Iterable[Mapping[str, Any]] | None,
+) -> None:
+    """Attach source_area/caption metadata to retained PDF photographs in-place."""
+
+    entries = _photo_context_entries(areas)
+    if not entries or not candidates:
+        return
+
+    by_page: dict[int, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        try:
+            page_number = int(candidate.get("page") or 0)
+        except (TypeError, ValueError):
+            continue
+        if page_number > 0:
+            by_page.setdefault(page_number, []).append(candidate)
+
+    for page_number, page_candidates in by_page.items():
+        if not (1 <= page_number <= len(pages)):
+            continue
+        contexts = _match_photo_page_contexts(
+            _page_text(pages[page_number - 1]),
+            entries,
+            trim_before_heading=page_number in heading_pages,
+        )
+        if not contexts:
+            continue
+
+        # One activity can legitimately have several photographs.  When only
+        # one caption is visible on the page, apply it to every retained image.
+        if len(contexts) == 1:
+            pairs = [(candidate, contexts[0]) for candidate in page_candidates]
+        else:
+            pairs = list(zip(page_candidates, contexts))
+
+        for candidate, context in pairs:
+            area = str(context.get("area") or "").strip()
+            caption = str(context.get("caption") or "").strip()
+            if area:
+                candidate["source_area"] = area[:255]
+            if caption:
+                candidate["caption"] = caption[:500]
+
 def extract_pdf_photo_candidates(
     source: bytes | bytearray | memoryview | str | os.PathLike[str] | BinaryIO,
     *,
     filename: str = "report.pdf",
     limits: PhotoLimits = DEFAULT_PHOTO_LIMITS,
+    areas: Iterable[Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Extract reviewable photographs from a Daily Report PDF.
 
@@ -378,6 +545,8 @@ def extract_pdf_photo_candidates(
         )
     if candidates and not useful:
         warnings.append(f"{filename}: no useful Photo Documentation images remained after filtering.")
+
+    _attach_photo_contexts(useful, pages, heading_pages, areas)
     return useful, warnings
 
 
