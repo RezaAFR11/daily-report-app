@@ -1448,23 +1448,39 @@ def _photo_grid_flowables(
 
         source = _plain(raw.get("source"))
         page = _plain(raw.get("page"))
+        area = _plain(raw.get("source_area"))
         fallback = f"{source} - p.{page}" if source and page else source
         caption = _plain(raw.get("caption"), fallback)
+
+        card_rows: list[list[Any]] = []
+        if area:
+            card_rows.append([Paragraph(f"<b>{_xml(area)}</b>", styles["small"])])
+        if caption:
+            card_rows.append([Paragraph(f"<i>{_xml(caption)}</i>", styles["small"])])
+        card_rows.append([rendered_image])
+
         card = Table(
-            [
-                [rendered_image],
-                [Paragraph(_xml(caption, "Photo documentation"), styles["small"])],
-            ],
+            card_rows,
             colWidths=[cell_width - 4],
         )
-        card.setStyle(TableStyle([
+        card_style = [
             ("BOX", (0, 0), (-1, -1), 0.55, CYAN),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 2),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("LEFTPADDING", (0, 0), (-1, -1), 3),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ]))
+        ]
+        if area:
+            card_style.extend([
+                ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#DDEBF7")),
+                ("LINEBELOW", (0, 0), (0, 0), 0.35, CYAN),
+            ])
+            if caption:
+                card_style.append(("BACKGROUND", (0, 1), (0, 1), LIGHT_GREY))
+        elif caption:
+            card_style.append(("BACKGROUND", (0, 0), (0, 0), LIGHT_GREY))
+        card.setStyle(TableStyle(card_style))
         current.append(card)
         if len(current) == columns:
             rows.append(current)
