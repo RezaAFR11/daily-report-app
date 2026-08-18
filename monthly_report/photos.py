@@ -184,18 +184,73 @@ def _normalise_image(raw: bytes, limits: PhotoLimits) -> tuple[bytes, int, int] 
 
 
 def _iter_page_images(page: Any) -> Iterable[bytes]:
+    """Return page image bytes in PDF draw order when it can be determined.
+
+    ``page.images`` is resource order, which is not guaranteed to match the
+    visual left-to-right/top-to-bottom order of photo cards.  ReportLab PDFs
+    draw the card images with ``Do`` operators in layout order, so prefer that
+    sequence and fall back to ``page.images`` when the content stream cannot be
+    inspected safely.  Any resources not referenced directly by the page
+    content are appended in their original order for backward compatibility.
+    """
+
     try:
-        images = page.images
+        images = list(page.images)
     except Exception:
         return ()
-    result: list[bytes] = []
+
+    def resource_key(value: Any) -> str:
+        name = str(value or "").strip().lstrip("/")
+        # pypdf ImageFile names include a file extension while the ``Do``
+        # operand is the bare XObject resource name.
+        lower = name.casefold()
+        for suffix in (".jpeg", ".jpg", ".png", ".jp2", ".webp", ".tif", ".tiff"):
+            if lower.endswith(suffix):
+                return name[:-len(suffix)]
+        return name
+
+    by_resource: dict[str, Any] = {}
+    for image in images:
+        key = resource_key(getattr(image, "name", ""))
+        if key and key not in by_resource:
+            by_resource[key] = image
+
+    ordered: list[Any] = []
+    emitted: set[str] = set()
     try:
-        for image in images:
-            raw = getattr(image, "data", None)
-            if isinstance(raw, (bytes, bytearray, memoryview)):
-                result.append(bytes(raw))
+        from pypdf.generic import ContentStream
+
+        contents = page.get_contents()
+        reader = getattr(page, "pdf", None)
+        if contents is not None and reader is not None:
+            stream = ContentStream(contents, reader)
+            for operands, operator in stream.operations:
+                if operator != b"Do" or not operands:
+                    continue
+                key = resource_key(operands[0])
+                image = by_resource.get(key)
+                if image is None or key in emitted:
+                    continue
+                ordered.append(image)
+                emitted.add(key)
     except Exception:
-        return result
+        # Resource order remains a safe fallback; extraction is review-first.
+        ordered = []
+        emitted.clear()
+
+    for image in images:
+        key = resource_key(getattr(image, "name", ""))
+        if key and key in emitted:
+            continue
+        ordered.append(image)
+        if key:
+            emitted.add(key)
+
+    result: list[bytes] = []
+    for image in ordered:
+        raw = getattr(image, "data", None)
+        if isinstance(raw, (bytes, bytearray, memoryview)):
+            result.append(bytes(raw))
     return result
 
 
