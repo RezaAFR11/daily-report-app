@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/7"
-PROMPT_VERSION = "periodic-narrative-grounding/7"
+SUGGESTION_VERSION = "periodic-ai-suggestion/8"
+PROMPT_VERSION = "periodic-narrative-grounding/8"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -65,6 +65,15 @@ _BROAD_SAFETY_ABSENCE_RE = re.compile(
     r"|\bwithout\s+(?:any\s+)?(?:safety\s+)?(?:incidents?|accidents?|injuries?)\b"
     r"|\bzero\s+(?:safety\s+)?(?:incidents?|accidents?|injuries?)\b"
     r"|\bincident[- ]free\b)",
+    re.IGNORECASE,
+)
+
+# Avoid wording that makes a daily man-hour value sound like the accumulated
+# period total. The model may still report both values when each is explicitly
+# supplied; this guard only rejects the ambiguous construction.
+_AMBIGUOUS_DAILY_MAN_HOURS_RE = re.compile(
+    r"\baccumulat(?:e|ed|es|ing)\b[^A-Za-z0-9\n]{0,12}"
+    r"\d[\d.,]*\s+man[- ]?hours?\s+per\s+day\s+across\b",
     re.IGNORECASE,
 )
 
@@ -300,7 +309,13 @@ Reporting rules:
    and explicit completion/status. When weather observations are supplied, include
    one short sentence summarizing the reported conditions and work impact. If report
    coverage is partial, describe weather only for the available reporting days.
-   Never infer a weather impact that is not supplied.
+   Never infer a weather impact that is not supplied. For manpower/man-hours, keep
+   daily values and period totals semantically distinct. If BOTH a daily man-hour
+   value and a period total are explicitly supplied, state them separately, e.g.
+   "160.0 man-hours were recorded per day, for a total of 320.0 man-hours across
+   the two reported days" ONLY when those exact values are present in source_data.
+   Never write "accumulating X man-hours per day across ..." and never calculate a
+   total that is not explicitly supplied.
 8. current_activities: create concise client-facing bullets for the current report
    period. Group repeated/continuing work instead of copying every Daily Report
    line. Use the exact area/equipment label from source data when available.
@@ -493,6 +508,17 @@ def _reject_unsupported_broad_safety_claim(text: str, *, path: str) -> None:
         raise AIUnsupportedClaimsError(
             f"{path} uses broad zero-incident safety wording. Report exact supplied "
             "safety metrics instead; missing/Not supplied metrics are not zero."
+        )
+
+
+def _reject_ambiguous_man_hours_wording(text: str, *, path: str) -> None:
+    """Reject prose that conflates daily man-hours with an accumulated total."""
+
+    if _AMBIGUOUS_DAILY_MAN_HOURS_RE.search(str(text or "")):
+        raise AIUnsupportedClaimsError(
+            f"{path} uses ambiguous man-hour wording. Keep the per-day value and "
+            "the explicitly supplied period total separate; do not describe a "
+            "per-day value as accumulated across multiple days."
         )
 
 
@@ -801,6 +827,10 @@ def validate_narrative_suggestion(
                 result[key]["text"],
                 path=f"$.{key}.text",
             )
+            _reject_ambiguous_man_hours_wording(
+                result[key]["text"],
+                path=f"$.{key}.text",
+            )
 
     activity_rows = value[_ACTIVITY_LIST_KEY]
     if not isinstance(activity_rows, list):
@@ -895,6 +925,10 @@ def _safe_validated_suggestion(
             )
             if result[key]["text"] != _NOT_SUPPLIED:
                 _reject_unsupported_broad_safety_claim(
+                    result[key]["text"],
+                    path=f"$.{key}.text",
+                )
+                _reject_ambiguous_man_hours_wording(
                     result[key]["text"],
                     path=f"$.{key}.text",
                 )
