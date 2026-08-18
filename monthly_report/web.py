@@ -963,8 +963,12 @@ def _prepare_draft(
         "severity_rate": None,
         "average_day_away": None,
     })
-    draft.setdefault("engineering", {"summary": f"Manual {kind} input required."})
-    draft.setdefault("procurement", {"summary": f"Manual {kind} input required."})
+    # Missing engineering/procurement data is source absence, not a project fact
+    # and not an instruction for the client-facing report.  Keep the draft
+    # neutral so AI cannot turn an internal workflow placeholder such as
+    # "Manual weekly input required" into narrative prose.
+    draft.setdefault("engineering", {"summary": "Not supplied"})
+    draft.setdefault("procurement", {"summary": "Not supplied"})
 
     site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
     if not site.get("this_month_activities"):
@@ -1001,7 +1005,7 @@ def _prepare_draft(
             f"This {period_description} draft compiles {included} Daily Report(s) for "
             f"{project_title or project_no} from {date_from} to {date_to}. "
             f"There are {missing} calendar date(s) without an included report. "
-            "Progress, safety incidents, engineering, and procurement values must be reviewed before issue."
+            "Sections without source data remain marked as Not supplied."
         )
     return draft
 
