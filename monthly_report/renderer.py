@@ -1,3494 +1,1961 @@
+"""Render the structured monthly-report model as a self-contained PDF.
+
+The renderer intentionally has no Flask or storage dependencies.  Callers pass
+the reviewed runtime data and receive a rewound :class:`io.BytesIO` object.
+"""
+
 from __future__ import annotations
 
-import copy
-import hashlib
-import json
+import io
+import math
 import os
-import re
-import shutil
-import time
-import uuid
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any, Callable
-from zoneinfo import ZoneInfo
+from collections.abc import Mapping, Sequence
+from datetime import date, datetime
+from html import escape
+from typing import Any
 
-from flask import jsonify, request, send_file, session, url_for
-
-from .aggregate import aggregate_monthly_records
-from .ai_summary import AISummaryError, generate_ai_summary
-from .importer import DEFAULT_LIMITS, PDFImportError, import_daily_report_pdf
-from .overtime import parse_overtime_workbooks
-from .photos import (
-    DEFAULT_PHOTO_LIMITS,
-    attach_canonical_photo_candidates,
-    asset_filename,
-    copy_photo_assets,
-    extract_pdf_photo_candidates,
-    is_asset_id,
-    store_photo_candidates,
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfgen import canvas as pdf_canvas
+from reportlab.platypus import (
+    BaseDocTemplate,
+    Flowable,
+    Frame,
+    Image as RLImage,
+    LongTable,
+    NextPageTemplate,
+    PageBreak,
+    PageTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
 )
-from .renderer import render_monthly_report
-from .storage import list_canonical_records
-from .timesheet import TimesheetError, compile_timesheets
-from .validation import (
-    build_source_validation,
-    resolve_duplicate_records,
-    resolve_project_records,
+from reportlab.platypus.tableofcontents import TableOfContents
+
+from .photos import asset_filename, is_asset_id
+
+
+__all__ = ["render_monthly_report"]
+
+
+PAGE_WIDTH, PAGE_HEIGHT = A4
+BLACK = colors.HexColor("#000000")
+WHITE = colors.HexColor("#FFFFFF")
+GREY_HEADER = colors.HexColor("#D9D9D9")
+GREY_SUBHEADER = colors.HexColor("#DFDFDF")
+LIGHT_GREY = colors.HexColor("#F3F4F6")
+MID_GREY = colors.HexColor("#6B7280")
+CYAN = colors.HexColor("#00AFEF")
+ORANGE = colors.HexColor("#F79646")
+ROYAL_BLUE = colors.HexColor("#0000FF")
+TOC_BLUE = colors.HexColor("#365F91")
+FINAL_GREEN = colors.HexColor("#008751")
+
+OUTER_BORDER = (24.0, 24.0, PAGE_WIDTH - 48.0, PAGE_HEIGHT - 48.0)
+BODY_LEFT = 35.4
+BODY_RIGHT = 33.0
+BODY_BOTTOM = 48.0
+BODY_TOP_MARGIN = 109.0
+BODY_WIDTH = PAGE_WIDTH - BODY_LEFT - BODY_RIGHT
+BODY_HEIGHT = PAGE_HEIGHT - BODY_TOP_MARGIN - BODY_BOTTOM
+
+DEFAULT_APPENDICES = (
+    ("6.1", "Summary Progress"),
+    ("6.2", "Progress S-Curve"),
+    ("6.3", "Overall Schedule"),
+    ("6.4", "Document Deliverable List / Drawing Status"),
+    ("6.5", "Manning Manpower / Equipment Loading"),
+    ("6.6", "Photographs Activity"),
+    ("6.7", "Safety Report"),
+    ("6.8", "QC Document"),
 )
-from .workforce import (
-    decide_overtime,
-    decide_timesheet,
-    ensure_workforce_state,
-    has_pending_workforce_review,
-    reset_workforce,
-    set_overtime_preview,
-    set_timesheet_preview,
-)
 
 
-_DRAFT_ID_RE = re.compile(r"^[a-f0-9]{32}$")
-_UPLOAD_FILE_ID_RE = re.compile(r"^[a-f0-9]{32}$")
-_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._() -]+")
-_MAX_UPLOAD_FILES = 35
-_MAX_ACTIVE_UPLOAD_SESSIONS = 10
-_UPLOAD_SESSION_TTL_SECONDS = 24 * 60 * 60
-_UPLOAD_OPERATION_LOCK_STALE_SECONDS = 15 * 60
-_MAX_STAGED_REQUEST_BYTES = DEFAULT_LIMITS.max_bytes + (1024 * 1024)
-_MAX_REVIEW_TEXT = 30_000
-_REPORT_TYPES = {"monthly", "weekly"}
-_MAX_PHOTO_REVIEW_BYTES = 128 * 1024
-_STORED_PHOTO_WARNING_PREFIX = "Stored JSON photo:"
-_MAX_WORKBOOK_FILES = 6
-_MAX_WORKBOOK_FILE_BYTES = 16 * 1024 * 1024
-_MAX_WORKBOOK_REQUEST_BYTES = 48 * 1024 * 1024
-_AI_COOLDOWN_SECONDS = 20
-_AI_DRAFT_LOCK_STALE_SECONDS = 5 * 60
-_AI_DRAFT_LOCK_RETRY_SECONDS = 5
-_MAKASSAR_TIMEZONE = ZoneInfo("Asia/Makassar")
+def _value(mapping: Mapping[str, Any] | None, *keys: str, default: Any = "") -> Any:
+    if not isinstance(mapping, Mapping):
+        return default
+    for key in keys:
+        value = mapping.get(key)
+        if value is not None and value != "":
+            return value
+    return default
 
 
-def _report_type(value: Any) -> str:
-    text = str(value or "monthly").strip().lower()
-    if text not in _REPORT_TYPES:
-        raise ValueError("Report type must be monthly or weekly.")
+def _plain(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    if isinstance(value, (date, datetime)):
+        return value.strftime("%d %b %Y")
+    text = str(value).strip()
+    return text if text else default
+
+
+def _xml(value: Any, default: str = "&#8212;") -> str:
+    text = _plain(value)
+    if not text:
+        return default
+    return escape(text, quote=False).replace("\n", "<br/>")
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, (str, bytes, bytearray, Mapping)):
+        return [value]
+    if isinstance(value, Sequence):
+        return list(value)
+    return [value]
+
+
+def _number(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    text = str(value).strip().replace("%", "").replace(" ", "")
+    if not text:
+        return None
+    if "," in text and "." not in text:
+        text = text.replace(",", ".")
+    else:
+        text = text.replace(",", "")
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _percent(value: Any) -> str:
+    number = _number(value)
+    if number is not None:
+        return f"{number:.1f}%"
+    return _plain(value, "\u2014")
+
+
+def _normalise_report_type(value: Any) -> str:
+    """Return the supported report kind, defaulting safely to monthly.
+
+    Historical report JSON does not contain ``report_type``.  Treating every
+    missing or unknown value as monthly keeps those saved reports rendering as
+    they did before weekly reports were introduced.
+    """
+    text = _plain(value, "monthly").lower().replace("_", "-")
+    if text in {"weekly", "week", "wtd", "week-to-date", "week to date"}:
+        return "weekly"
+    return "monthly"
+
+
+def _report_type(report: Mapping[str, Any]) -> str:
+    return _normalise_report_type(report.get("report_type"))
+
+
+def _progress_report_title(report: Mapping[str, Any]) -> str:
+    period_name = "Weekly" if _report_type(report) == "weekly" else "Monthly"
+    return f"{period_name} Progress Report"
+
+
+def _normalise_status(value: Any, *, report_type: str = "monthly") -> str:
+    text = _plain(value, "draft").lower().replace("_", "-")
+    if text in {"final", "issued", "approved"}:
+        return "FINAL"
+    if text in {"wtd", "week-to-date", "week to date"}:
+        return "WTD"
+    if text in {"mtd", "month-to-date", "month to date"}:
+        return "WTD" if _normalise_report_type(report_type) == "weekly" else "MTD"
+    if text in {"partial", "to-date", "to date"}:
+        return "WTD" if _normalise_report_type(report_type) == "weekly" else "MTD"
+    return "DRAFT"
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _styles() -> dict[str, ParagraphStyle]:
+    base = dict(fontName="Helvetica", textColor=BLACK, splitLongWords=1)
+    return {
+        "body": ParagraphStyle(
+            "MonthlyBody", fontSize=10.5, leading=14, spaceAfter=5, **base
+        ),
+        "body_center": ParagraphStyle(
+            "MonthlyBodyCenter", parent=None, fontName="Helvetica", fontSize=10.5,
+            leading=14, alignment=TA_CENTER, textColor=BLACK, splitLongWords=1,
+        ),
+        "small": ParagraphStyle(
+            "MonthlySmall", fontSize=8.5, leading=10.5, spaceAfter=3, **base
+        ),
+        "small_center": ParagraphStyle(
+            "MonthlySmallCenter", fontName="Helvetica", fontSize=8.5, leading=10.5,
+            alignment=TA_CENTER, textColor=BLACK, splitLongWords=1,
+        ),
+        "small_right": ParagraphStyle(
+            "MonthlySmallRight", fontName="Helvetica", fontSize=8.5, leading=10.5,
+            alignment=TA_RIGHT, textColor=BLACK, splitLongWords=1,
+        ),
+        "table": ParagraphStyle(
+            "MonthlyTable", fontName="Helvetica", fontSize=8.5, leading=10.5,
+            textColor=BLACK, splitLongWords=1,
+        ),
+        "table_center": ParagraphStyle(
+            "MonthlyTableCenter", fontName="Helvetica", fontSize=8.3, leading=9.8,
+            alignment=TA_CENTER, textColor=BLACK, splitLongWords=1,
+        ),
+        "table_header": ParagraphStyle(
+            "MonthlyTableHeader", fontName="Helvetica-Bold", fontSize=8.3,
+            leading=9.6, alignment=TA_CENTER, textColor=BLACK, splitLongWords=1,
+        ),
+        "h1": ParagraphStyle(
+            "MonthlyH1", fontName="Helvetica-Bold", fontSize=14, leading=17,
+            textColor=BLACK, spaceBefore=0, spaceAfter=9, keepWithNext=True,
+        ),
+        "h2": ParagraphStyle(
+            "MonthlyH2", fontName="Helvetica-Bold", fontSize=11.5, leading=14,
+            textColor=BLACK, leftIndent=28.3, spaceBefore=5, spaceAfter=6,
+            keepWithNext=True,
+        ),
+        "activity_area": ParagraphStyle(
+            "MonthlyActivityArea", fontName="Helvetica-Bold", fontSize=10.5, leading=13,
+            textColor=BLACK, leftIndent=14, spaceBefore=5, spaceAfter=2,
+            keepWithNext=True,
+        ),
+        "appendix_item": ParagraphStyle(
+            "MonthlyAppendixItem", fontName="Helvetica-Bold", fontSize=11.5,
+            leading=15, textColor=BLACK, leftIndent=20, firstLineIndent=-20,
+            spaceAfter=4, keepWithNext=False,
+        ),
+        "toc_title": ParagraphStyle(
+            "MonthlyTOCTitle", fontName="Helvetica-Bold", fontSize=14, leading=16,
+            alignment=TA_LEFT, textColor=BLACK, spaceAfter=6,
+        ),
+        "toc_subtitle": ParagraphStyle(
+            "MonthlyTOCSubtitle", fontName="Helvetica", fontSize=16, leading=19,
+            textColor=TOC_BLUE, spaceAfter=4,
+        ),
+        "placeholder": ParagraphStyle(
+            "MonthlyPlaceholder", fontName="Helvetica-Oblique", fontSize=9.5,
+            leading=13, textColor=MID_GREY, leftIndent=28.3, spaceAfter=6,
+            splitLongWords=1,
+        ),
+    }
+
+
+def _paragraph(value: Any, style: ParagraphStyle, default: str = "&#8212;") -> Paragraph:
+    return Paragraph(_xml(value, default), style)
+
+
+def _heading(text: str, style: ParagraphStyle, level: int) -> Paragraph:
+    paragraph = Paragraph(escape(text, quote=False), style)
+    paragraph._monthly_toc_level = level  # type: ignore[attr-defined]
+    paragraph._monthly_toc_text = text  # type: ignore[attr-defined]
+    return paragraph
+
+
+def _draw_outer_border(canvas: pdf_canvas.Canvas) -> None:
+    x, y, width, height = OUTER_BORDER
+    canvas.setStrokeColor(BLACK)
+    canvas.setLineWidth(0.5)
+    canvas.rect(x, y, width, height, stroke=1, fill=0)
+
+
+def _status_color(status: str):
+    return {
+        "DRAFT": ORANGE,
+        "MTD": CYAN,
+        "WTD": CYAN,
+        "FINAL": FINAL_GREEN,
+    }.get(status, ORANGE)
+
+
+def _draw_status_badge(
+    canvas: pdf_canvas.Canvas, status: str, x: float, y: float, width: float = 55
+) -> None:
+    color = _status_color(status)
+    canvas.saveState()
+    canvas.setStrokeColor(color)
+    canvas.setFillColor(WHITE)
+    canvas.setLineWidth(1.2)
+    canvas.roundRect(x, y, width, 16, 3, stroke=1, fill=1)
+    canvas.setFillColor(color)
+    canvas.setFont("Helvetica-Bold", 8.5)
+    canvas.drawCentredString(x + width / 2, y + 4.2, status)
+    canvas.restoreState()
+
+
+def _draw_draft_watermark(canvas: pdf_canvas.Canvas) -> None:
+    canvas.saveState()
+    try:
+        canvas.setFillAlpha(0.16)
+    except (AttributeError, TypeError):
+        pass
+    canvas.setFillColor(ORANGE)
+    canvas.translate(PAGE_WIDTH / 2, PAGE_HEIGHT / 2)
+    canvas.rotate(28)
+    canvas.setFont("Helvetica-Bold", 64)
+    canvas.drawCentredString(0, 0, "DRAFT")
+    canvas.setFont("Helvetica-Bold", 17)
+    canvas.drawCentredString(0, -25, "SAMPLE DATA - NOT FOR ISSUE")
+    canvas.restoreState()
+
+
+def _draw_logo_fallback(
+    canvas: pdf_canvas.Canvas, x: float, y: float, width: float, height: float
+) -> None:
+    canvas.saveState()
+    canvas.setStrokeColor(ORANGE)
+    canvas.setFillColor(WHITE)
+    canvas.setLineWidth(2)
+    canvas.roundRect(x, y, width, height, 4, stroke=1, fill=1)
+    canvas.setFillColor(BLACK)
+    canvas.setFont("Helvetica", min(11, max(7, height * 0.23)))
+    canvas.drawCentredString(x + width / 2, y + height / 2 - 3, "LOGO VENDOR")
+    canvas.restoreState()
+
+
+def _draw_logo(
+    canvas: pdf_canvas.Canvas,
+    logo_path: str | os.PathLike[str] | None,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+) -> None:
+    if logo_path:
+        try:
+            path = os.fspath(logo_path)
+            if os.path.isfile(path):
+                image = ImageReader(path)
+                image_width, image_height = image.getSize()
+                if image_width > 0 and image_height > 0:
+                    scale = min(width / image_width, height / image_height)
+                    draw_width = image_width * scale
+                    draw_height = image_height * scale
+                    canvas.drawImage(
+                        image,
+                        x + (width - draw_width) / 2,
+                        y + (height - draw_height) / 2,
+                        draw_width,
+                        draw_height,
+                        preserveAspectRatio=True,
+                        mask="auto",
+                    )
+                    return
+        except (OSError, ValueError, TypeError):
+            pass
+    _draw_logo_fallback(canvas, x, y, width, height)
+
+
+def _draw_box_paragraph(
+    canvas: pdf_canvas.Canvas,
+    text: Any,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    *,
+    font_name: str = "Helvetica",
+    font_size: float = 11,
+    min_font_size: float = 7,
+    alignment: int = TA_CENTER,
+    text_color=BLACK,
+) -> None:
+    escaped = _xml(text)
+    size = font_size
+    paragraph = None
+    paragraph_height = 0.0
+    while size >= min_font_size:
+        style = ParagraphStyle(
+            "CanvasBox",
+            fontName=font_name,
+            fontSize=size,
+            leading=size * 1.15,
+            alignment=alignment,
+            textColor=text_color,
+            splitLongWords=1,
+        )
+        paragraph = Paragraph(escaped, style)
+        _, paragraph_height = paragraph.wrap(width, height)
+        if paragraph_height <= height:
+            break
+        size -= 0.5
+    if paragraph is not None:
+        paragraph.drawOn(canvas, x, y + max(0, (height - paragraph_height) / 2))
+
+
+def _period_label(report: Mapping[str, Any]) -> str:
+    direct = _plain(_value(report, "reporting_period", "report_period"))
+    if direct:
+        return direct
+    period = report.get("period")
+    if isinstance(period, Mapping):
+        start = _plain(_value(period, "start", "date_from"))
+        end = _plain(_value(period, "end", "date_to"))
+        if start and end:
+            return f"{start} to {end}"
+        return start or end
+    return ""
+
+
+def _normalise_revision_rows(report: Mapping[str, Any]) -> list[dict[str, str]]:
+    source = report.get("revision_rows", report.get("revisions", []))
+    rows: list[dict[str, str]] = []
+    for raw in _as_list(source):
+        if not isinstance(raw, Mapping):
+            continue
+        rows.append({
+            "rev": _plain(_value(raw, "rev", "revision")),
+            "description": _plain(_value(raw, "description", "status")),
+            "date": _plain(_value(raw, "date", "issued_date")),
+            "prepared": _plain(_value(raw, "prepared", "prepared_by")),
+            "checked": _plain(_value(raw, "checked", "checked_by")),
+            "vendor_approved": _plain(
+                _value(raw, "vendor_approved", "approved", "approved_by")
+            ),
+            "kn_approved": _plain(_value(raw, "kn_approved", "client_approved")),
+        })
+    if not rows and any(
+        _plain(report.get(key))
+        for key in ("prepared_by", "checked_by", "approved_by", "kn_approved_by")
+    ):
+        rows.append({
+            "rev": _plain(_value(report, "revision", "rev")),
+            "description": _plain(report.get("revision_description")),
+            "date": _plain(_value(report, "issued_date", "issue_date")),
+            "prepared": _plain(report.get("prepared_by")),
+            "checked": _plain(report.get("checked_by")),
+            "vendor_approved": _plain(report.get("approved_by")),
+            "kn_approved": _plain(report.get("kn_approved_by")),
+        })
+    return rows[-3:]
+
+
+def _draw_revision_table(canvas: pdf_canvas.Canvas, report: Mapping[str, Any]) -> None:
+    styles = _styles()
+    rows = _normalise_revision_rows(report)
+    while len(rows) < 3:
+        rows.append({key: "" for key in (
+            "rev", "description", "date", "prepared", "checked",
+            "vendor_approved", "kn_approved",
+        )})
+
+    def cell(value: Any, *, header: bool = False) -> Paragraph:
+        style = ParagraphStyle(
+            "RevisionHeader" if header else "RevisionCell",
+            parent=styles["table_center"],
+            fontName="Helvetica-Bold" if header else "Helvetica",
+            fontSize=7.4 if header else 6.8,
+            leading=8.2 if header else 7.7,
+            textColor=ROYAL_BLUE if header else BLACK,
+        )
+        return _paragraph(value, style, default="")
+
+    table_data = [
+        [cell("REV", header=True), cell("DESCRIPTION", header=True),
+         cell("DATE", header=True), cell("VENDOR", header=True), "", "",
+         cell("KN", header=True)],
+        ["", "", "", cell("PREPARED", header=True), cell("CHECKED", header=True),
+         cell("APVD", header=True), cell("APVD", header=True)],
+    ]
+    for row in rows:
+        table_data.append([
+            cell(row["rev"]), cell(row["description"]), cell(row["date"]),
+            cell(row["prepared"]), cell(row["checked"]),
+            cell(row["vendor_approved"]), cell(row["kn_approved"]),
+        ])
+    table_data.append(["", "", "", cell("CHECKED & REVIEWED BY KN", header=True), "", "", ""])
+
+    table = Table(
+        table_data,
+        colWidths=[42.3, 185.8, 62.3, 61.0, 57.5, 62.3, 58.2],
+        rowHeights=[15, 18, 26, 26, 26, 26.5],
+    )
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.72, ROYAL_BLUE),
+        ("SPAN", (0, 0), (0, 1)),
+        ("SPAN", (1, 0), (1, 1)),
+        ("SPAN", (2, 0), (2, 1)),
+        ("SPAN", (3, 0), (5, 0)),
+        ("SPAN", (3, 5), (6, 5)),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 1),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+    ]))
+    table.wrapOn(canvas, 529.4, 137.5)
+    table.drawOn(canvas, 35.4, 41.3)
+
+
+def _draw_cover(
+    canvas: pdf_canvas.Canvas,
+    _doc: BaseDocTemplate,
+    report: Mapping[str, Any],
+    status: str,
+    logo_path: str | os.PathLike[str] | None,
+) -> None:
+    canvas.saveState()
+    report_title = _progress_report_title(report)
+    canvas.setTitle(
+        f"{report_title} - {_plain(_value(report, 'project_name', 'project_title'), 'Project')}"
+    )
+    _draw_outer_border(canvas)
+    if status == "DRAFT":
+        _draw_draft_watermark(canvas)
+    _draw_status_badge(canvas, status, 35.4, 786.0)
+    _draw_logo(canvas, logo_path, 415.5, 753.5, 128.25, 47.25)
+
+    customer = _value(report, "customer", "client_name", default="Kertas Nusantara")
+    _draw_box_paragraph(
+        canvas, customer, 70, 661, PAGE_WIDTH - 140, 48,
+        font_name="Helvetica-Bold", font_size=36, min_font_size=20,
+    )
+    _draw_box_paragraph(
+        canvas, report_title.upper(), 70, 586, PAGE_WIDTH - 140, 35,
+        font_name="Helvetica-Bold", font_size=20, min_font_size=14,
+    )
+    period = _period_label(report)
+    period_text = f"({period})" if period and not period.startswith("(") else period
+    _draw_box_paragraph(
+        canvas, period_text, 110, 553, PAGE_WIDTH - 220, 28,
+        font_name="Helvetica-Bold", font_size=18, min_font_size=11,
+    )
+    issued = _plain(_value(report, "issued_date", "issue_date"))
+    _draw_box_paragraph(
+        canvas, f"Issued on {issued}" if issued else "Issued on \u2014",
+        100, 526, PAGE_WIDTH - 200, 27,
+        font_name="Helvetica-Bold", font_size=18, min_font_size=11,
+    )
+    vendor_doc = _value(report, "vendor_doc_no", "document_no", "doc_no")
+    _draw_box_paragraph(
+        canvas, f"Vendor Doc No: {_plain(vendor_doc, '\u2014')}",
+        150, 485, PAGE_WIDTH - 300, 27,
+        font_name="Helvetica-Bold", font_size=14, min_font_size=9,
+    )
+    project_no = _value(report, "vendor_project_no", "project_no")
+    _draw_box_paragraph(
+        canvas, f"Vendor Project No.: {_plain(project_no, '\u2014')}",
+        95, 373, PAGE_WIDTH - 190, 35,
+        font_name="Helvetica-Bold", font_size=19, min_font_size=10,
+    )
+    project_name = _value(report, "project_name", "project_title", default="Project Name")
+    _draw_box_paragraph(
+        canvas, project_name, 70, 315, PAGE_WIDTH - 140, 64,
+        font_name="Helvetica-Bold", font_size=23, min_font_size=10,
+    )
+    _draw_revision_table(canvas, report)
+    canvas.restoreState()
+
+
+def _draw_body_page(
+    canvas: pdf_canvas.Canvas,
+    _doc: BaseDocTemplate,
+    report: Mapping[str, Any],
+    status: str,
+    logo_path: str | os.PathLike[str] | None,
+) -> None:
+    canvas.saveState()
+    _draw_outer_border(canvas)
+    if status == "DRAFT":
+        _draw_draft_watermark(canvas)
+    _draw_status_badge(canvas, status, 35.4, 790.0)
+    canvas.setFillColor(BLACK)
+    canvas.setFont("Helvetica-Bold", 14)
+    canvas.drawCentredString(
+        PAGE_WIDTH / 2 + 6, 792.8, _progress_report_title(report)
+    )
+
+    project_name = _value(report, "project_name", "project_title", default="Project Name")
+    _draw_box_paragraph(
+        canvas, project_name, 45.1, 752.0, 174, 29,
+        font_name="Helvetica-Bold", font_size=11.5, min_font_size=7,
+        alignment=TA_LEFT,
+    )
+    cod = _value(report, "cod", "project_code", "project_no")
+    _draw_box_paragraph(
+        canvas, f"({_plain(cod, 'COD')})", 224, 752.0, 95, 29,
+        font_name="Helvetica-Bold", font_size=12.5, min_font_size=7,
+    )
+    vendor_doc = _value(report, "vendor_doc_no", "document_no", "doc_no")
+    _draw_box_paragraph(
+        canvas, f"Doc No (Vendor): {_plain(vendor_doc, '\u2014')}",
+        337, 752.0, 128, 29,
+        font_name="Helvetica-Bold", font_size=10.5, min_font_size=6.5,
+        alignment=TA_LEFT,
+    )
+    _draw_logo(canvas, logo_path, 468.75, 776.75, 95.25, 32.25)
+    canvas.setStrokeColor(BLACK)
+    canvas.setLineWidth(0.5)
+    canvas.line(43.7, 746.8, 537.3, 746.8)
+    canvas.setLineWidth(0.75)
+    canvas.line(33.75, 742.3, 562.5, 742.3)
+    canvas.restoreState()
+
+
+class _NumberedCanvas(pdf_canvas.Canvas):
+    """Delay page output so the footer can contain the final page count."""
+
+    def __init__(self, *args, status: str = "DRAFT", **kwargs):
+        super().__init__(*args, **kwargs)
+        self._monthly_status = status
+        self._monthly_page_states: list[dict[str, Any]] = []
+
+    def showPage(self):  # noqa: N802 - ReportLab API
+        state = {
+            key: value for key, value in self.__dict__.items()
+            if key != "_monthly_page_states"
+        }
+        self._monthly_page_states.append(state)
+        self._startPage()
+
+    def save(self):
+        total_pages = len(self._monthly_page_states)
+        for state in self._monthly_page_states:
+            self.__dict__.update(state)
+            if self._pageNumber > 1:
+                self._draw_monthly_footer(total_pages)
+            pdf_canvas.Canvas.showPage(self)
+        pdf_canvas.Canvas.save(self)
+
+    def _draw_monthly_footer(self, total_pages: int) -> None:
+        status = self._monthly_status
+        self.saveState()
+        self.setFillColor(_status_color(status))
+        self.setFont("Helvetica-Bold", 8.5)
+        text = f"{status}  |  Page {self._pageNumber} of {total_pages}"
+        self.drawCentredString(PAGE_WIDTH / 2, 31.0, text)
+        self.restoreState()
+
+
+class _MonthlyDocTemplate(BaseDocTemplate):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._monthly_heading_counter = 0
+
+    def beforeDocument(self) -> None:  # noqa: N802 - ReportLab API
+        # ``multiBuild`` makes several complete passes while resolving the
+        # table of contents.  Stable bookmark keys are required for the TOC to
+        # consider two consecutive passes identical.
+        self._monthly_heading_counter = 0
+
+    def afterFlowable(self, flowable: Flowable) -> None:  # noqa: N802 - ReportLab API
+        level = getattr(flowable, "_monthly_toc_level", None)
+        if level is None:
+            return
+        self._monthly_heading_counter += 1
+        text = getattr(flowable, "_monthly_toc_text", "")
+        key = f"monthly-heading-{self._monthly_heading_counter}"
+        self.canv.bookmarkPage(key)
+        self.canv.addOutlineEntry(text, key, level=level, closed=False)
+        self.notify("TOCEntry", (level, text, self.page, key))
+
+
+def _normalise_progress(value: Any) -> list[dict[str, Any]]:
+    source = value.get("rows", []) if isinstance(value, Mapping) else value
+    rows: list[dict[str, Any]] = []
+    for index, raw in enumerate(_as_list(source), start=1):
+        if not isinstance(raw, Mapping):
+            continue
+        previous = _number(_value(
+            raw, "previous", "previous_actual", "cumulative_previous_actual", default=None
+        ))
+        this_month = _number(_value(
+            raw,
+            "this_month",
+            "this_week",
+            "this_period",
+            "current_period",
+            "this",
+            "period",
+            "this_week_actual",
+            "this_period_actual",
+            "current_period_actual",
+            default=None,
+        ))
+        to_date = _number(_value(
+            raw, "to_date", "cumulative", "cumulative_to_date_actual", default=None
+        ))
+        if to_date is None and previous is not None and this_month is not None:
+            to_date = previous + this_month
+        plan = _number(_value(
+            raw, "plan", "to_date_plan", "cumulative_to_date_plan", default=None
+        ))
+        variance = _number(_value(raw, "variance", "deviation", default=None))
+        if variance is None and to_date is not None and plan is not None:
+            variance = to_date - plan
+        rows.append({
+            "description": _plain(raw.get("description"), f"Progress item {index}"),
+            "previous": previous,
+            "this_month": this_month,
+            "to_date": to_date,
+            "plan": plan,
+            "variance": variance,
+            "weight": _number(_value(raw, "weight", "weight_factor", default=None)),
+            "is_total": bool(raw.get("is_total")),
+        })
+    return rows
+
+
+def _progress_table(
+    rows: list[dict[str, Any]],
+    styles: Mapping[str, ParagraphStyle],
+    *,
+    report_type: str = "monthly",
+) -> LongTable:
+    display_rows = rows or [
+        {"description": description, "previous": None, "this_month": None,
+         "to_date": None, "plan": None, "variance": None}
+        for description in ("Engineering", "Purchasing", "Manufacturing", "Delivery", "Total Overall")
+    ]
+    header = styles["table_header"]
+    body = styles["table"]
+    centered = styles["table_center"]
+    current_period_label = (
+        "This Week\n(b)"
+        if _normalise_report_type(report_type) == "weekly"
+        else "This Month\n(b)"
+    )
+    data: list[list[Any]] = [
+        [_paragraph("Description", header), _paragraph("Progress", header), "", "",
+         _paragraph("To-date Plan\n(d)", header),
+         _paragraph("Variance\n(e) = (c) - (d)", header)],
+        ["", _paragraph("Previous\n(a)", header),
+         _paragraph(current_period_label, header),
+         _paragraph("To-date\n(c) = (a) + (b)", header), "", ""],
+    ]
+    for row in display_rows:
+        data.append([
+            _paragraph(row.get("description"), body),
+            _paragraph(_percent(row.get("previous")), centered),
+            _paragraph(_percent(row.get("this_month")), centered),
+            _paragraph(_percent(row.get("to_date")), centered),
+            _paragraph(_percent(row.get("plan")), centered),
+            _paragraph(_percent(row.get("variance")), centered),
+        ])
+    table = LongTable(
+        data,
+        colWidths=[108.0, 76.6, 81.0, 76.6, 72.0, 76.6],
+        repeatRows=2,
+        splitByRow=1,
+        splitInRow=1,
+        hAlign="CENTER",
+    )
+    commands = [
+        ("GRID", (0, 0), (-1, -1), 0.75, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), GREY_HEADER),
+        ("BACKGROUND", (1, 1), (3, 1), GREY_SUBHEADER),
+        ("SPAN", (0, 0), (0, 1)),
+        ("SPAN", (1, 0), (3, 0)),
+        ("SPAN", (4, 0), (4, 1)),
+        ("SPAN", (5, 0), (5, 1)),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]
+    for row_index, row in enumerate(display_rows, start=2):
+        if row.get("is_total") or "total" in _plain(row.get("description")).lower():
+            commands.extend([
+                ("FONTNAME", (0, row_index), (-1, row_index), "Helvetica-Bold"),
+                ("BACKGROUND", (0, row_index), (-1, row_index), LIGHT_GREY),
+            ])
+    table.setStyle(TableStyle(commands))
+    return table
+
+
+def _executive_summary(report: Mapping[str, Any], progress: list[dict[str, Any]]) -> str:
+    supplied = _plain(report.get("executive_summary"))
+    if supplied:
+        return supplied
+    total = next(
+        (row for row in reversed(progress)
+         if row.get("is_total") or "total" in row["description"].lower()),
+        None,
+    )
+    if total and total.get("to_date") is not None and total.get("plan") is not None:
+        variance = total.get("variance")
+        if variance is None:
+            variance = total["to_date"] - total["plan"]
+        return (
+            "For this reporting period, overall project progress is "
+            f"{_percent(total['to_date'])} compared with the plan of "
+            f"{_percent(total['plan'])}, for a variance of {_percent(variance)}. "
+            "The summary of progress and S-Curve are shown in the appendices."
+        )
+    return (
+        "Overall progress values have not been supplied for this reporting period. "
+        "Complete and review the progress table before issue."
+    )
+
+
+def _safety_table(value: Any, styles: Mapping[str, ParagraphStyle]) -> Table:
+    safety = value if isinstance(value, Mapping) else {}
+    rows = [
+        ("Total Manpower", _value(safety, "total_manpower", "manpower")),
+        ("Total Man hours", _value(safety, "total_man_hours", "man_hours")),
+        ("Total Recordable Cases", _value(
+            safety, "total_recordable_cases", "recordable_cases"
+        )),
+        ("Lost Workdays", safety.get("lost_workdays")),
+        ("Lost Time Injuries", safety.get("lost_time_injuries")),
+        ("Severity Rate", safety.get("severity_rate")),
+        ("Average Day Away", safety.get("average_day_away")),
+    ]
+    table_data = []
+    for label, raw in rows:
+        rendered = _plain(raw, "Not supplied")
+        if label == "Total Man hours" and rendered != "Not supplied" and not rendered.upper().endswith("MH"):
+            rendered += " MH"
+        table_data.append([
+            _paragraph("\u2022", styles["body_center"], default=""),
+            _paragraph(label, styles["body"]),
+            _paragraph(":", styles["body_center"]),
+            _paragraph(rendered, styles["body"]),
+        ])
+    table = Table(table_data, colWidths=[18, 145, 24, 150], hAlign="CENTER")
+    table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    return table
+
+
+def _mapping_summary(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _value(value, "summary", "text", "description", "remarks")
+    return value
+
+
+def _describe_mapping(value: Mapping[str, Any]) -> str:
+    preferred = _activity_display_text(value)
+    if preferred:
+        area = _plain(_value(value, "area", "location"))
+        return f"{area}: {preferred}" if area else preferred
+    pairs = []
+    for key, item in value.items():
+        if item in (None, "", [], {}):
+            continue
+        label = str(key).replace("_", " ").strip().title()
+        pairs.append(f"{label}: {_plain(item)}")
+    return "; ".join(pairs)
+
+
+def _activity_display_text(value: Mapping[str, Any]) -> str:
+    text = _plain(_value(value, "text", "description", "activity", "title", "name"))
+    if not text:
+        return ""
+    status = _plain(value.get("status"))
+    if status and status.casefold() not in text.casefold():
+        return f"{text} — {status}"
     return text
 
 
-def _report_name(report_type: Any) -> str:
-    return "Weekly" if _report_type(report_type) == "weekly" else "Monthly"
+def _client_facing_missing_summary(value: Any, *, section: str) -> Any:
+    """Replace internal manual-input placeholders with client-facing wording."""
 
-
-def _normalise_report_mode(report_type: Any, value: Any) -> str:
-    kind = _report_type(report_type)
-    default = "wtd" if kind == "weekly" else "mtd"
-    mode = str(value or default).strip().lower().replace("_", "-")
-    aliases = {
-        "month-to-date": "mtd",
-        "month to date": "mtd",
-        "week-to-date": "wtd",
-        "week to date": "wtd",
-    }
-    mode = aliases.get(mode, mode)
-    allowed = {"wtd", "draft", "final"} if kind == "weekly" else {"mtd", "draft", "final"}
-    return mode if mode in allowed else default
-
-
-def _atomic_json(path: str | Path, value: Any) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(value, handle, ensure_ascii=False, indent=2)
-        os.replace(temporary, path)
-    finally:
-        if temporary.exists():
-            try:
-                temporary.unlink()
-            except OSError:
-                pass
-
-
-def _monthly_user_dir(data_dir: str | Path, username: str) -> Path:
-    username_text = str(username or "user")
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", username_text):
-        safe_username = username_text
-    else:
-        digest = hashlib.sha256(username_text.encode("utf-8")).hexdigest()[:24]
-        safe_username = f"legacy-user-{digest}"
-    directory = Path(data_dir) / "monthly_reports" / safe_username
-    (directory / "reports").mkdir(parents=True, exist_ok=True)
-    (directory / "drafts").mkdir(parents=True, exist_ok=True)
-    return directory
-
-
-def _makassar_issue_date(now: datetime | None = None) -> str:
-    """Return the report issue date in the project's local timezone."""
-
-    current = now or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
-    return current.astimezone(_MAKASSAR_TIMEZONE).date().isoformat()
-
-
-def _ai_draft_lock_path(data_dir: str | Path, username: str, draft_id: str) -> Path:
-    if not _DRAFT_ID_RE.fullmatch(str(draft_id or "")):
-        raise ValueError("Invalid report draft ID")
-    return _monthly_user_dir(data_dir, username) / "drafts" / f".{draft_id}.ai.lock"
-
-
-def _acquire_ai_draft_lock(
-    data_dir: str | Path,
-    username: str,
-    draft_id: str,
-) -> tuple[Path, str] | None:
-    """Atomically acquire one paid-AI operation lock for a report draft."""
-
-    lock_path = _ai_draft_lock_path(data_dir, username, draft_id)
-    for attempt in range(2):
-        token = uuid.uuid4().hex
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)
-        try:
-            descriptor = os.open(lock_path, flags, 0o600)
-        except FileExistsError:
-            try:
-                stale = lock_path.stat().st_mtime < (
-                    time.time() - _AI_DRAFT_LOCK_STALE_SECONDS
-                )
-            except FileNotFoundError:
-                continue
-            except OSError:
-                stale = False
-            if attempt == 0 and stale:
-                try:
-                    lock_path.unlink()
-                    continue
-                except FileNotFoundError:
-                    continue
-                except OSError:
-                    pass
-            return None
-        payload = json.dumps(
-            {
-                "token": token,
-                "draft_id": draft_id,
-                "username": username,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "pid": os.getpid(),
-            },
-            ensure_ascii=False,
-        ).encode("utf-8")
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(payload)
-        except Exception:
-            try:
-                lock_path.unlink()
-            except OSError:
-                pass
-            raise
-        return lock_path, token
-    return None
-
-
-def _release_ai_draft_lock(lock: tuple[Path, str] | None) -> None:
-    """Release only the lock created by this request."""
-
-    if lock is None:
-        return
-    lock_path, token = lock
-    try:
-        with lock_path.open(encoding="utf-8") as handle:
-            value = json.load(handle)
-        if not isinstance(value, dict) or value.get("token") != token:
-            return
-        lock_path.unlink()
-    except (FileNotFoundError, OSError, ValueError, TypeError):
-        return
-
-
-def _ai_cooldown_remaining(draft: dict[str, Any], now: datetime | None = None) -> int:
-    """Return whole retry seconds for a persisted per-draft AI cooldown."""
-
-    control = draft.get("ai_request_control")
-    control = control if isinstance(control, dict) else {}
-    timestamp = str(control.get("last_started_at") or "")
-    if not timestamp:
-        previous = draft.get("ai_summary")
-        previous = previous if isinstance(previous, dict) else {}
-        timestamp = str(previous.get("requested_at") or "")
-    if not timestamp:
-        return 0
-    try:
-        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    except ValueError:
-        return 0
-    if parsed.tzinfo is None:
-        # Legacy drafts stored server-local naive timestamps. Compare them
-        # with the current server-local clock to preserve their short cooldown.
-        elapsed = (datetime.now() - parsed).total_seconds()
-    else:
-        current = now or datetime.now(timezone.utc)
-        if current.tzinfo is None:
-            current = current.replace(tzinfo=timezone.utc)
-        elapsed = (current.astimezone(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
-    remaining = _AI_COOLDOWN_SECONDS - elapsed
-    if remaining <= 0:
-        return 0
-    return max(1, int(remaining) + (0 if remaining.is_integer() else 1))
-
-
-def _ai_retry_response(message: str, *, code: str, status: int, retry_after: int):
-    response = jsonify({
-        "error": message,
-        "code": code,
-        "retryable": True,
-        "retry_after_seconds": max(1, int(retry_after)),
-    })
-    response.status_code = status
-    response.headers["Retry-After"] = str(max(1, int(retry_after)))
-    return response
-
-
-def _draft_photo_dir(
-    data_dir: str | Path,
-    username: str,
-    draft_id: str,
-    *,
-    create: bool = True,
-) -> Path | None:
-    if not _DRAFT_ID_RE.fullmatch(str(draft_id or "")):
-        return None
-    root = (_monthly_user_dir(data_dir, username) / "draft_assets").resolve(strict=False)
-    directory = (root / draft_id).resolve(strict=False)
-    if directory.parent != root:
-        return None
-    if create:
-        directory.mkdir(parents=True, exist_ok=True)
-    return directory
-
-
-def _remove_draft_assets(data_dir: str | Path, username: str, draft_id: str) -> None:
-    directory = _draft_photo_dir(data_dir, username, draft_id, create=False)
-    if directory is not None and directory.is_dir():
-        shutil.rmtree(directory)
-
-
-def _is_generated_stored_photo_warning(value: Any) -> bool:
-    text = str(value or "").strip()
-    return text.startswith(_STORED_PHOTO_WARNING_PREFIX) or bool(
-        re.fullmatch(
-            r"\d+ (?:duplicate photo\(s\) across Daily Reports were removed"
-            r"|photo\(s\) exceeded the \d+-photo or draft asset byte limit and were excluded)\.",
-            text,
-        )
+    section_key = str(section or "").strip().casefold()
+    message = (
+        "No engineering status data was supplied in the available Daily Reports."
+        if section_key == "engineering"
+        else "No procurement status data was supplied in the available Daily Reports."
     )
-
-
-def _prune_draft_photo_assets(
-    data_dir: str | Path,
-    username: str,
-    draft_id: str,
-    references: Any,
-) -> None:
-    """Best-effort removal of assets no longer selected for one draft."""
-
-    directory = _draft_photo_dir(data_dir, username, draft_id, create=False)
-    if directory is None or not directory.is_dir():
-        return
-    allowed = {
-        str(item.get("asset_id") or "")
-        for item in (references if isinstance(references, list) else [])
-        if isinstance(item, dict) and is_asset_id(item.get("asset_id"))
-    }
-    for path in directory.glob("*.jpg"):
-        if is_asset_id(path.stem) and path.stem not in allowed:
-            try:
-                path.unlink()
-            except OSError:
-                continue
-
-
-def _upload_sessions_dir(data_dir: str | Path, username: str) -> Path:
-    directory = _monthly_user_dir(data_dir, username) / "upload_sessions"
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
-
-
-def _upload_session_dir(
-    data_dir: str | Path,
-    username: str,
-    upload_session_id: str,
-) -> Path | None:
-    upload_session_id = str(upload_session_id or "")
-    if not _DRAFT_ID_RE.fullmatch(upload_session_id):
-        return None
-    root = _upload_sessions_dir(data_dir, username).resolve(strict=False)
-    directory = (root / upload_session_id).resolve(strict=False)
-    if directory.parent != root:
-        return None
-    return directory
-
-
-def _remove_upload_session(data_dir: str | Path, username: str, upload_session_id: str) -> bool:
-    directory = _upload_session_dir(data_dir, username, upload_session_id)
-    if directory is None or not directory.exists():
-        return False
-    root = _upload_sessions_dir(data_dir, username).resolve(strict=False)
-    if directory.resolve(strict=False).parent != root:
-        return False
-    if directory.is_dir():
-        shutil.rmtree(directory)
-    else:
-        directory.unlink()
-    return True
-
-
-def _cleanup_upload_sessions(data_dir: str | Path, username: str) -> None:
-    root = _upload_sessions_dir(data_dir, username)
-    cutoff = time.time() - _UPLOAD_SESSION_TTL_SECONDS
-    for directory in root.iterdir():
-        if not directory.is_dir() or not _DRAFT_ID_RE.fullmatch(directory.name):
-            continue
-        try:
-            if directory.stat().st_mtime >= cutoff:
-                continue
-            _remove_upload_session(data_dir, username, directory.name)
-        except OSError:
-            continue
-
-
-def _load_upload_session(
-    data_dir: str | Path,
-    username: str,
-    upload_session_id: str,
-) -> tuple[Path, dict[str, Any]] | None:
-    directory = _upload_session_dir(data_dir, username, upload_session_id)
-    if directory is None:
-        return None
-    try:
-        if directory.is_dir() and directory.stat().st_mtime < time.time() - _UPLOAD_SESSION_TTL_SECONDS:
-            _remove_upload_session(data_dir, username, upload_session_id)
-            return None
-    except OSError:
-        return None
-    manifest_path = directory / "session.json"
-    if not manifest_path.is_file():
-        return None
-    try:
-        with manifest_path.open(encoding="utf-8") as handle:
-            manifest = json.load(handle)
-        if not isinstance(manifest, dict) or manifest.get("owner") != username:
-            return None
-        return directory, manifest
-    except (OSError, ValueError, TypeError):
-        return None
-
-
-def _load_upload_item(directory: Path, file_id: str) -> dict[str, Any] | None:
-    if not _UPLOAD_FILE_ID_RE.fullmatch(str(file_id or "")):
-        return None
-    path = directory / "items" / f"{file_id}.json"
-    if not path.is_file():
-        return None
-    try:
-        with path.open(encoding="utf-8") as handle:
-            value = json.load(handle)
-        return value if isinstance(value, dict) else None
-    except (OSError, ValueError, TypeError):
-        return None
-
-
-def _public_upload_item(item: dict[str, Any]) -> dict[str, Any]:
-    record = item.get("record") if isinstance(item.get("record"), dict) else {}
-    source_identity = (
-        record.get("source_identity")
-        if isinstance(record.get("source_identity"), dict)
-        else {}
-    )
-    return {
-        "file_id": str(item.get("file_id") or ""),
-        "filename": str(item.get("filename") or "report.pdf"),
-        "status": str(item.get("status") or "skipped"),
-        "included": bool(item.get("included")),
-        "report_date": str(item.get("report_date") or ""),
-        "size_bytes": int(item.get("size_bytes") or 0),
-        "warnings": [str(value) for value in item.get("warnings", []) if str(value).strip()],
-        "source_project_no": str(source_identity.get("project_no") or ""),
-        "source_project_title": str(source_identity.get("project_title") or ""),
+    placeholders = {
+        "",
+        "not supplied",
+        "manual input required",
+        "manual input required.",
+        "manual weekly input required",
+        "manual weekly input required.",
+        "manual monthly input required",
+        "manual monthly input required.",
     }
 
+    if isinstance(value, Mapping):
+        result = dict(value)
+        summary = _plain(result.get("summary")).strip()
+        if summary.casefold() in placeholders:
+            result["summary"] = message
+        return result
 
-def _acquire_upload_operation_lock(directory: Path) -> Path | None:
-    lock_path = directory / ".operation.lock"
-    for attempt in range(2):
-        try:
-            lock_path.mkdir()
-            return lock_path
-        except (FileExistsError, FileNotFoundError):
-            if not directory.is_dir():
-                return None
-            try:
-                stale = lock_path.stat().st_mtime < time.time() - _UPLOAD_OPERATION_LOCK_STALE_SECONDS
-            except OSError:
-                stale = False
-            if attempt == 0 and stale:
-                try:
-                    lock_path.rmdir()
-                    continue
-                except OSError:
-                    pass
-            return None
-    return None
+    plain = _plain(value).strip()
+    if plain.casefold() in placeholders:
+        return message
+    return value
 
 
-def get_monthly_reports_index(data_dir: str | Path, username: str) -> list[dict[str, Any]]:
-    index_path = _monthly_user_dir(data_dir, username) / "index.json"
-    if not index_path.is_file():
-        return []
-    try:
-        with index_path.open(encoding="utf-8") as handle:
-            value = json.load(handle)
-        if not isinstance(value, list):
-            return []
-        # Reports created before weekly support did not store a type. They are
-        # monthly reports and remain visible to old and new clients.
-        for row in value:
-            if isinstance(row, dict):
-                row.setdefault("report_type", "monthly")
-        return value
-    except (OSError, ValueError, TypeError):
-        return []
-
-
-def _save_monthly_index(data_dir: str | Path, username: str, rows: list[dict[str, Any]]) -> None:
-    _atomic_json(_monthly_user_dir(data_dir, username) / "index.json", rows)
-
-
-def _save_draft(
-    data_dir: str | Path,
-    username: str,
-    draft: dict[str, Any],
+def _content_flowables(
+    value: Any,
+    styles: Mapping[str, ParagraphStyle],
     *,
-    draft_id: str | None = None,
-) -> str:
-    drafts_dir = _monthly_user_dir(data_dir, username) / "drafts"
-    cutoff = datetime.now().timestamp() - (7 * 24 * 60 * 60)
-    existing = sorted(drafts_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
-    for stale in existing[19:]:
-        try:
-            stale.unlink()
-            _remove_draft_assets(data_dir, username, stale.stem)
-        except OSError:
-            pass
-    for stale in existing[:19]:
-        try:
-            if stale.stat().st_mtime < cutoff:
-                stale.unlink()
-                _remove_draft_assets(data_dir, username, stale.stem)
-        except OSError:
-            pass
-    draft_id = str(draft_id or uuid.uuid4().hex)
-    if not _DRAFT_ID_RE.fullmatch(draft_id):
-        raise ValueError("Invalid report draft ID")
-    value = copy.deepcopy(draft)
-    value["draft_id"] = draft_id
-    value["owner"] = username
-    value.setdefault("created_at", datetime.now().isoformat(timespec="seconds"))
-    _atomic_json(drafts_dir / f"{draft_id}.json", value)
-    return draft_id
-
-
-def _load_draft(data_dir: str | Path, username: str, draft_id: str) -> dict[str, Any] | None:
-    if not _DRAFT_ID_RE.fullmatch(str(draft_id or "")):
-        return None
-    path = _monthly_user_dir(data_dir, username) / "drafts" / f"{draft_id}.json"
-    if not path.is_file():
-        return None
-    try:
-        with path.open(encoding="utf-8") as handle:
-            value = json.load(handle)
-        if not isinstance(value, dict) or value.get("owner") != username:
-            return None
-        return value
-    except (OSError, ValueError, TypeError):
-        return None
-
-
-def _update_draft(data_dir: str | Path, username: str, draft: dict[str, Any]) -> None:
-    draft_id = str(draft.get("draft_id") or "")
-    if not _DRAFT_ID_RE.fullmatch(draft_id):
-        raise ValueError("Invalid report draft ID")
-    _atomic_json(_monthly_user_dir(data_dir, username) / "drafts" / f"{draft_id}.json", draft)
-
-
-def _parse_period(
-    date_from: str,
-    date_to: str,
-    report_type: str = "monthly",
-    report_mode: str | None = None,
-) -> tuple[datetime, datetime]:
-    kind = _report_type(report_type)
-    mode = _normalise_report_mode(kind, report_mode)
-    try:
-        start = datetime.strptime(str(date_from or ""), "%Y-%m-%d")
-        end = datetime.strptime(str(date_to or ""), "%Y-%m-%d")
-    except ValueError as exc:
-        raise ValueError("Use valid From and To dates.") from exc
-    if start > end:
-        raise ValueError("The From date cannot be after the To date.")
-    if kind == "monthly" and (start.year, start.month) != (end.year, end.month):
-        raise ValueError("A Monthly Report period must stay within one calendar month.")
-    if kind == "weekly":
-        day_count = (end - start).days + 1
-        if day_count > 7:
-            raise ValueError("A Weekly Report period cannot be longer than 7 days.")
-        if mode != "wtd" and day_count != 7:
-            raise ValueError("A full Weekly Report period must be exactly 7 consecutive days.")
-    return start, end
-
-
-def _rolling_week_period(records: list[dict[str, Any]]) -> tuple[datetime, datetime]:
-    """Anchor an uploaded weekly batch to its earliest valid report date."""
-    valid_dates: list[datetime] = []
-    for record in records:
-        try:
-            valid_dates.append(datetime.strptime(_record_date(record), "%Y-%m-%d"))
-        except (TypeError, ValueError):
-            continue
-    if not valid_dates:
-        raise ValueError("No uploaded PDF has a valid report date for the Weekly Report.")
-    start = min(valid_dates)
-    return start, start + timedelta(days=6)
-
-
-def _expected_dates(start: datetime, end: datetime) -> list[str]:
-    current = start
-    result = []
-    while current <= end:
-        result.append(current.strftime("%Y-%m-%d"))
-        current += timedelta(days=1)
-    return result
-
-
-def _number(value: Any, default: float = 0.0) -> float:
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, (int, float)):
-        return float(value)
-    cleaned = str(value or "").strip().replace("%", "").replace(",", "")
-    try:
-        return float(cleaned)
-    except ValueError:
-        return default
-
-
-def _optional_number(value: Any) -> float | None:
-    """Return a finite numeric value without turning missing data into zero."""
-
-    if value is None or isinstance(value, bool):
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        parsed = float(text.replace("%", "").replace(",", ""))
-    except ValueError:
-        return None
-    if parsed != parsed or parsed in (float("inf"), float("-inf")):
-        return None
-    return parsed
-
-
-def _optional_non_negative(value: Any, *, integer: bool = False) -> int | float | None:
-    parsed = _optional_number(value)
-    if parsed is None:
-        return None
-    parsed = max(0.0, parsed)
-    return int(parsed) if integer else parsed
-
-
-def _clean_text(value: Any, maximum: int = _MAX_REVIEW_TEXT) -> str:
-    return str(value or "").replace("\x00", "").strip()[:maximum]
-
-
-def _list_text(value: Any, maximum_items: int = 500) -> list[str]:
-    if isinstance(value, str):
-        values = value.splitlines()
-    elif isinstance(value, list):
-        values = value
+    empty_message: str,
+    bullets: bool = False,
+) -> list[Flowable]:
+    if isinstance(value, Mapping) and any(key in value for key in ("summary", "items", "rows")):
+        values: list[Any] = []
+        summary = _plain(value.get("summary"))
+        if summary:
+            values.append(summary)
+        values.extend(_as_list(_value(value, "items", "rows", default=[])))
     else:
-        return []
-    result: list[str] = []
-    for item in values[:maximum_items]:
-        if isinstance(item, dict):
-            item = item.get("text", item.get("activity", item.get("description", "")))
-        text = _clean_text(item, 2_000)
-        if text:
-            result.append(text)
-    return result
+        values = _as_list(value)
 
-
-def _clean_activity_rows(value: Any, maximum_items: int = 250) -> list[dict[str, str]]:
-    """Keep AI-condensed activity bullets structured by area for rendering."""
-
-    rows = value if isinstance(value, list) else []
-    result: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for item in rows[:maximum_items]:
-        status = ""
-        if isinstance(item, str):
-            area = ""
-            text = _clean_text(item, 2_000)
-        elif isinstance(item, dict):
-            area = _clean_text(item.get("area"), 200)
-            text = _clean_text(
-                item.get("text", item.get("activity", item.get("description", ""))),
-                2_000,
-            )
-            status = _clean_text(item.get("status"), 100)
+    rendered: list[Flowable] = []
+    for item in values:
+        if isinstance(item, Mapping):
+            text = _describe_mapping(item)
         else:
+            text = _plain(item)
+        if not text:
             continue
-        if not text or text.casefold() == "not supplied":
-            continue
-        key = (area.casefold(), text.casefold())
-        if key in seen:
-            continue
-        seen.add(key)
-        row = {"area": area or "Site", "text": text}
-        if status and status.casefold() not in text.casefold():
-            row["status"] = status
-        result.append(row)
-    return result
+        if bullets:
+            rendered.append(Paragraph(
+                f"&#8226;&nbsp;&nbsp;{_xml(text)}", styles["body"]
+            ))
+        else:
+            rendered.append(_paragraph(text, styles["body"]))
+    if not rendered:
+        rendered.append(_paragraph(empty_message, styles["placeholder"]))
+    return rendered
 
 
-_ACTIVITY_EQUIPMENT_ID_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?P<prefix>\d{1,3})\s*[- ]\s*"
-    r"(?P<tag>[A-Za-z]{2,8})\s*[- ]\s*(?P<number>\d{2,6})(?![A-Za-z0-9])",
-    re.IGNORECASE,
-)
-
-
-def _activity_match_text(value: Any) -> str:
-    text = _clean_text(value, 2_000).casefold()
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
-
-
-def _activity_equipment_ids(value: Any) -> set[str]:
-    result: set[str] = set()
-    text = _clean_text(value, 2_000)
-    for match in _ACTIVITY_EQUIPMENT_ID_RE.finditer(text):
-        result.add(
-            f"{match.group('prefix')}-{match.group('tag').upper()}-{match.group('number')}"
-        )
-    return result
-
-
-def _source_activity_status_rows(draft: dict[str, Any]) -> list[dict[str, str]]:
-    """Return deterministic source activities carrying an explicit status."""
-
-    rows = draft.get("activities") if isinstance(draft.get("activities"), list) else []
-    result: list[dict[str, str]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        description = _clean_text(row.get("description", row.get("text", "")), 2_000)
-        status = _clean_text(row.get("status"), 100)
-        if not description or not status:
-            continue
-        result.append({
-            "area": _clean_text(row.get("area"), 200),
-            "description": description,
-            "status": status,
-        })
-    return result
-
-
-def _enrich_activity_statuses(
-    rows: Any,
-    draft: dict[str, Any],
-) -> list[dict[str, str]]:
-    """Restore source-backed status when Claude omits it from a condensed bullet."""
-
-    cleaned = _clean_activity_rows(rows)
-    sources = _source_activity_status_rows(draft)
-    if not cleaned or not sources:
-        return cleaned
-
-    for row in cleaned:
-        if row.get("status"):
-            continue
-
-        text = row.get("text", "")
-        area_key = _activity_match_text(row.get("area", ""))
-        text_key = _activity_match_text(text)
-        equipment_ids = _activity_equipment_ids(text)
-
-        matches: list[dict[str, str]] = []
-        for source in sources:
-            source_area = _activity_match_text(source.get("area", ""))
-            if area_key and source_area and area_key != source_area:
-                continue
-
-            source_text = _activity_match_text(source.get("description", ""))
-            source_ids = _activity_equipment_ids(source.get("description", ""))
-            text_match = (
-                bool(source_text)
-                and (
-                    source_text == text_key
-                    or source_text in text_key
-                    or text_key in source_text
-                )
-            )
-            id_match = bool(
-                equipment_ids
-                and source_ids
-                and equipment_ids.intersection(source_ids)
-            )
-            if text_match or id_match:
-                matches.append(source)
-
-        statuses = {item["status"] for item in matches if item.get("status")}
-        if len(statuses) == 1:
-            status = next(iter(statuses))
-            if status.casefold() not in text.casefold():
-                row["status"] = status
-
-    return cleaned
-
-def _payload(record: dict[str, Any]) -> dict[str, Any]:
-    value = record.get("payload", record.get("data", {}))
-    return value if isinstance(value, dict) else {}
-
-
-def _record_photo_areas(record: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return parsed Daily Report areas used to label extracted PDF photographs."""
-
-    areas = _payload(record).get("areas")
-    return [item for item in areas if isinstance(item, dict)] if isinstance(areas, list) else []
-
-
-def _warning_text(value: Any) -> str:
-    if isinstance(value, dict):
-        message = value.get("message") or value.get("code") or "PDF parsing warning"
-        severity = str(value.get("severity") or "warning").upper()
-        return f"{severity}: {message}"
-    return _clean_text(value, 1_000)
-
-
-def _latest_report_context(records: list[dict[str, Any]]) -> dict[str, Any]:
-    if not records:
-        return {}
-    latest = max(
-        records,
-        key=lambda record: (
-            _record_date(record),
-            int(record.get("revision") or 0),
-            str(record.get("generated_at") or ""),
-        ),
-    )
-    payload = _payload(latest)
-    return {
-        "company_name": payload.get("company_name", "PT. GARUDA PRIMA AKSARA"),
-        "customer": payload.get("customer", "PT. KERTAS NUSANTARA"),
-        "location": payload.get("location", ""),
-        "equipment": payload.get("equipment", ""),
-        "prepared_by": payload.get("prepared_by", ""),
-        "checked_by": payload.get("checked_by", ""),
-        "approved_by": payload.get("approved_by", ""),
-    }
-
-
-_FILENAME_ISO_DATE_RE = re.compile(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)")
-
-
-def _valid_iso_date_text(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    try:
-        return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
-    except (TypeError, ValueError):
-        return ""
-
-
-def _date_from_filename(value: Any) -> str:
-    match = _FILENAME_ISO_DATE_RE.search(str(value or ""))
-    return _valid_iso_date_text(match.group(1)) if match else ""
-
-
-def _imported_report_date(imported: dict[str, Any], filename: str = "") -> tuple[str, str]:
-    """Resolve parser date across current/legacy envelope shapes.
-
-    The importer historically exposed report date both at envelope level and in
-    ``data``.  Keeping this boundary tolerant prevents a parser-shape change from
-    appearing in Review Weekly/Monthly Draft as a false Missing Date.
-    """
-
-    containers = [
-        ("imported.report_date", imported),
-        ("imported.date", imported),
-        ("imported.data.date", imported.get("data") if isinstance(imported.get("data"), dict) else {}),
-        ("imported.payload.date", imported.get("payload") if isinstance(imported.get("payload"), dict) else {}),
-    ]
-    keys = ["report_date", "date", "date", "date"]
-    for (method, container), key in zip(containers, keys):
-        parsed = _valid_iso_date_text(container.get(key) if isinstance(container, dict) else "")
-        if parsed:
-            return parsed, method
-
-    source = imported.get("source") if isinstance(imported.get("source"), dict) else {}
-    parsed = _date_from_filename(filename or source.get("filename"))
-    if parsed:
-        return parsed, "filename_iso_fallback"
-    return "", "missing"
-
-
-def _record_date(record: dict[str, Any]) -> str:
-    candidates = (
-        record.get("report_date"),
-        record.get("date"),
-        (_payload(record).get("date") if isinstance(_payload(record), dict) else ""),
-        (record.get("data", {}).get("date") if isinstance(record.get("data"), dict) else ""),
-    )
-    for value in candidates:
-        parsed = _valid_iso_date_text(value)
-        if parsed:
-            return parsed
-    source = record.get("source") if isinstance(record.get("source"), dict) else {}
-    return _date_from_filename(source.get("filename"))
-
-
-def _prepare_draft(
-    aggregated: dict[str, Any],
+def _activity_flowables(
+    value: Any,
+    styles: Mapping[str, ParagraphStyle],
     *,
-    project_no: str,
-    project_title: str,
-    date_from: str,
-    date_to: str,
-    report_mode: str,
-    source_method: str,
-    source_manifest: list[dict[str, Any]],
-    report_context: dict[str, Any] | None = None,
-    extra_warnings: list[str] | None = None,
-    report_type: str = "monthly",
-) -> dict[str, Any]:
-    kind = _report_type(report_type)
-    mode = _normalise_report_mode(kind, report_mode)
-    # Validate again at the draft boundary so direct callers cannot create a
-    # weekly draft with a malformed period.
-    start, end = _parse_period(date_from, date_to, kind, mode)
-    report_name = _report_name(kind)
-    draft = copy.deepcopy(aggregated if isinstance(aggregated, dict) else {})
-    draft["schema_version"] = "weekly-report/1" if kind == "weekly" else "monthly-report/1"
-    draft["report_type"] = kind
-    draft["report_title"] = f"{report_name} Progress Report"
-    draft["project_no"] = project_no
-    draft["project_title"] = project_title
-    draft["period"] = {"start": date_from, "end": date_to, "timezone": "Asia/Makassar"}
-    draft["report_mode"] = mode
-    draft["status"] = draft["report_mode"]
-    draft["source_method"] = source_method
-    draft["source_manifest"] = source_manifest
-    context = report_context if isinstance(report_context, dict) else {}
-    draft["project_name"] = project_title
-    draft["vendor_project_no"] = project_no
-    draft["reporting_period"] = f"{date_from} to {date_to}"
-    # The issue date is the date the periodic draft was compiled, not the
-    # Daily Report cutoff date. It can still be reviewed before final issue.
-    draft["issued_date"] = _makassar_issue_date()
-    draft["company_name"] = context.get("company_name", "PT. GARUDA PRIMA AKSARA")
-    draft["customer"] = context.get("customer", "PT. KERTAS NUSANTARA")
-    draft["location"] = context.get("location", "")
-    draft["equipment"] = context.get("equipment", "")
-    draft["prepared_by"] = context.get("prepared_by", "")
-    draft["checked_by"] = context.get("checked_by", "")
-    draft["approved_by"] = context.get("approved_by", "")
+    empty_message: str,
+) -> list[Flowable]:
+    """Render AI-condensed activities grouped by area when structured rows exist."""
 
-    coverage = draft.get("coverage") if isinstance(draft.get("coverage"), dict) else {}
-    expected = _expected_dates(start, end)
-    found_dates = sorted({
-        str(item.get("report_date") or item.get("date") or "")
-        for item in source_manifest if isinstance(item, dict)
-    } - {""})
-    coverage.setdefault("expected_dates", expected)
-    covered_dates = coverage.get("covered_dates", found_dates)
-    coverage.setdefault("found_dates", covered_dates)
-    coverage.setdefault("missing_dates", [day for day in expected if day not in found_dates])
-    coverage.setdefault("included_count", coverage.get("selected_record_count", len(source_manifest)))
-    coverage.setdefault("duplicate_count", len(coverage.get("duplicate_dates", [])))
-    draft["coverage"] = coverage
+    rows = _as_list(value)
+    structured = [
+        row for row in rows
+        if isinstance(row, Mapping) and _plain(_value(row, "area", "location"))
+        and _activity_display_text(row)
+    ]
+    if not structured:
+        return _content_flowables(value, styles, empty_message=empty_message, bullets=True)
 
-    warnings = draft.get("warnings") if isinstance(draft.get("warnings"), list) else []
-    warnings = [_warning_text(item) for item in warnings if _warning_text(item)]
-    for warning in extra_warnings or []:
-        warning = _warning_text(warning)
-        if warning and warning not in warnings:
-            warnings.append(warning)
-    draft["warnings"] = warnings
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    loose: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            text = _plain(row)
+            if text:
+                loose.append(text)
+            continue
+        area = _plain(_value(row, "area", "location"))
+        text = _activity_display_text(row)
+        if not text:
+            continue
+        if not area:
+            loose.append(text)
+            continue
+        if area not in groups:
+            groups[area] = []
+            order.append(area)
+        if text not in groups[area]:
+            groups[area].append(text)
 
-    if not draft.get("progress") and isinstance(draft.get("overall_progress"), dict):
-        monthly_rows = []
-        for row in draft["overall_progress"].get("rows", []):
-            if not isinstance(row, dict):
-                continue
-            monthly_rows.append({
-                "description": row.get("description", ""),
-                "weight": row.get("weight_factor"),
-                "previous": row.get("cumulative_previous_actual"),
-                "this_month": row.get("this_period_actual"),
-                "to_date": row.get("cumulative_to_date_actual"),
-                "plan": row.get("cumulative_to_date_plan"),
-                "variance": row.get("deviation"),
-            })
-        draft["progress"] = {"rows": monthly_rows}
-    draft.setdefault("progress", {"rows": []})
-    if isinstance(draft.get("progress"), list):
-        draft["progress"] = {"rows": draft["progress"]}
-    manpower_totals = (
-        draft.get("manpower", {}).get("totals", {})
-        if isinstance(draft.get("manpower"), dict)
-        else {}
+    rendered: list[Flowable] = []
+    for area in order:
+        rendered.append(_paragraph(area, styles["activity_area"], default=""))
+        for text in groups[area]:
+            rendered.append(Paragraph(f"&#8226;&nbsp;&nbsp;{_xml(text)}", styles["body"]))
+    for text in loose:
+        rendered.append(Paragraph(f"&#8226;&nbsp;&nbsp;{_xml(text)}", styles["body"]))
+    if not rendered:
+        rendered.append(_paragraph(empty_message, styles["placeholder"]))
+    return rendered
+
+
+def _po_rows(value: Any) -> tuple[Any, list[Mapping[str, Any]], Any, Any]:
+    if not isinstance(value, Mapping):
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return None, [row for row in value if isinstance(row, Mapping)], None, None
+        return value, [], None, None
+    rows = _value(value, "rows", "purchase_orders", "pos", default=[])
+    return (
+        value.get("summary"),
+        [row for row in _as_list(rows) if isinstance(row, Mapping)],
+        value.get("equipment_delivery"),
+        value.get("shipments"),
     )
-    draft.setdefault("safety", {
-        "total_manpower": manpower_totals.get("peak_headcount", 0),
-        "total_man_hours": manpower_totals.get("total_man_hours", 0),
-        # Absence of an incident field in a Daily Report is not evidence of
-        # zero incidents. Keep these values explicitly unsupplied until a
-        # reviewer enters verified HSE data.
-        "recordable_cases": None,
-        "lost_workdays": None,
-        "lost_time_injuries": None,
-        "severity_rate": None,
-        "average_day_away": None,
-    })
-    # Missing engineering/procurement data is source absence, not a project fact
-    # and not an instruction for the client-facing report.  Keep the draft
-    # neutral so AI cannot turn an internal workflow placeholder such as
-    # "Manual weekly input required" into narrative prose.
-    draft.setdefault("engineering", {"summary": "Not supplied"})
-    draft.setdefault("procurement", {"summary": "Not supplied"})
-
-    site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
-    if not site.get("this_month_activities"):
-        site["this_month_activities"] = draft.get("this_month_activities", draft.get("activities", []))
-    if not site.get("next_month_activities"):
-        site["next_month_activities"] = draft.get(
-            "next_month_activities",
-            draft.get("tomorrow_activities", draft.get("planned_activities", [])),
-        )
-    if not site.get("concerns"):
-        site["concerns"] = draft.get("concerns", draft.get("constraints", []))
-    if isinstance(draft.get("constraint_reporting"), dict):
-        site["constraint_reporting"] = copy.deepcopy(draft["constraint_reporting"])
-    if isinstance(draft.get("weather"), list):
-        site["weather"] = copy.deepcopy(draft["weather"])
-    # Generic aliases let the renderer and review UI use period-neutral labels
-    # while legacy monthly keys continue to support archived drafts.
-    site["current_period_activities"] = site.get("this_month_activities", [])
-    site["this_period_activities"] = site["current_period_activities"]
-    site["next_period_activities"] = site.get("next_month_activities", [])
-    if kind == "weekly":
-        site["this_week_activities"] = site["current_period_activities"]
-        site["next_week_activities"] = site["next_period_activities"]
-    draft["site"] = site
-    if not draft.get("executive_summary"):
-        included = coverage.get("included_count", len(source_manifest))
-        missing = len(coverage.get("missing_dates", []))
-        period_description = (
-            ("week-to-date" if mode == "wtd" else "weekly")
-            if kind == "weekly"
-            else mode.upper()
-        )
-        draft["executive_summary"] = (
-            f"This {period_description} draft compiles {included} Daily Report(s) for "
-            f"{project_title or project_no} from {date_from} to {date_to}. "
-            f"There are {missing} calendar date(s) without an included report. "
-            "Sections without source data remain marked as Not supplied."
-        )
-    return draft
 
 
-def _source_manifest(records: list[dict[str, Any]], method: str) -> list[dict[str, Any]]:
-    manifest = []
-    seen: set[str] = set()
-    for record in records:
-        source = record.get("source") if isinstance(record.get("source"), dict) else {}
-        source_identity = (
-            record.get("source_identity")
-            if isinstance(record.get("source_identity"), dict)
-            else {}
-        )
-        row = {
-            "report_id": record.get("report_id"),
-            "revision": record.get("revision", 1),
-            "report_date": _record_date(record),
-            "owner": record.get("username", record.get("owner", "")),
-            "source_method": method,
-            "filename": source.get("filename", record.get("pdf_filename", "")),
-            "sha256": source.get("sha256", record.get("content_sha256", "")),
-            "confidence": (record.get("confidence") or {}).get("overall") if isinstance(record.get("confidence"), dict) else None,
-            "review_required": bool(record.get("review_required", False)),
-            "source_project_no": source_identity.get("project_no", ""),
-            "source_project_title": source_identity.get("project_title", ""),
+def _procurement_table(rows: list[Mapping[str, Any]], styles: Mapping[str, ParagraphStyle]) -> LongTable:
+    header = styles["table_header"]
+    body = styles["table"]
+    data: list[list[Any]] = [[
+        _paragraph("PO #", header),
+        _paragraph("PO Name", header),
+        _paragraph("Supplier/Vendor/\nContractor", header),
+        _paragraph("PO Status", header),
+    ]]
+    if rows:
+        for row in rows:
+            data.append([
+                _paragraph(_value(row, "po_number", "po_no", "po", "number"), body),
+                _paragraph(_value(row, "po_name", "name", "description"), body),
+                _paragraph(_value(row, "supplier", "vendor", "contractor"), body),
+                _paragraph(_value(row, "status", "po_status"), body),
+            ])
+    else:
+        data.append([_paragraph("No purchase-order data supplied.", styles["placeholder"]), "", "", ""])
+    table = LongTable(
+        data, colWidths=[72.5, 103.3, 98.9, 234.7], repeatRows=1,
+        splitByRow=1, splitInRow=1, hAlign="CENTER",
+    )
+    commands = [
+        ("GRID", (0, 0), (-1, -1), 0.5, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), CYAN),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]
+    if not rows:
+        commands.append(("SPAN", (0, 1), (-1, 1)))
+    table.setStyle(TableStyle(commands))
+    return table
+
+
+def _equipment_table(rows: list[Mapping[str, Any]], styles: Mapping[str, ParagraphStyle]) -> LongTable:
+    header = styles["table_header"]
+    body = styles["table"]
+    data: list[list[Any]] = [[
+        _paragraph("Equipment", header), _paragraph("Supplier", header),
+        _paragraph("Status", header), _paragraph("Expected Delivery", header),
+        _paragraph("Actual Delivery", header),
+    ]]
+    for row in rows:
+        data.append([
+            _paragraph(_value(row, "equipment", "name", "description"), body),
+            _paragraph(_value(row, "supplier", "vendor"), body),
+            _paragraph(row.get("status"), body),
+            _paragraph(_value(row, "expected_delivery", "eta", "expected"), body),
+            _paragraph(_value(row, "actual_delivery", "actual"), body),
+        ])
+    table = LongTable(
+        data, colWidths=[135, 95, 90, 95, 95], repeatRows=1,
+        splitByRow=1, splitInRow=1, hAlign="CENTER",
+    )
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), GREY_HEADER),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return table
+
+
+def _shipment_table(rows: list[Mapping[str, Any]], styles: Mapping[str, ParagraphStyle]) -> LongTable:
+    header = styles["table_header"]
+    body = styles["table"]
+    centered = styles["table_center"]
+    data: list[list[Any]] = [[
+        _paragraph("Shipment No.", header), _paragraph("Description", header),
+        _paragraph("PO Number", header), _paragraph("Expected Loading Port", header),
+        _paragraph("Arriving Port", header), _paragraph("ETD", header),
+        _paragraph("Actual departure date", header),
+    ]]
+    if rows:
+        for index, row in enumerate(rows, start=1):
+            data.append([
+                _paragraph(_value(row, "shipment_no", "number", default=index), centered),
+                _paragraph(row.get("description"), body),
+                _paragraph(_value(row, "po_number", "po_no", "po"), body),
+                _paragraph(_value(row, "expected_loading_port", "loading_port"), body),
+                _paragraph(_value(row, "arriving_port", "arrival_port"), body),
+                _paragraph(_value(row, "etd", "expected_departure"), centered),
+                _paragraph(_value(row, "actual_departure_date", "actual_departure"), centered),
+            ])
+    else:
+        data.append([_paragraph("No shipment data supplied.", styles["placeholder"]), "", "", "", "", "", ""])
+    table = LongTable(
+        data, colWidths=[58.8, 98.9, 55.9, 65.6, 67.7, 76.5, 78.1],
+        repeatRows=1, splitByRow=1, splitInRow=1, hAlign="CENTER",
+    )
+    commands = [
+        ("GRID", (0, 0), (-1, -1), 0.5, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), GREY_HEADER),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]
+    if not rows:
+        commands.append(("SPAN", (0, 1), (-1, 1)))
+    table.setStyle(TableStyle(commands))
+    return table
+
+
+def _constraint_reporting_message(report: Mapping[str, Any], site: Mapping[str, Any]) -> str:
+    reporting = site.get("constraint_reporting")
+    if not isinstance(reporting, Mapping):
+        reporting = report.get("constraint_reporting")
+    if not isinstance(reporting, Mapping):
+        return "Concern and closeout information was not supplied."
+    none_dates = _as_list(reporting.get("none_reported_dates"))
+    reported_dates = _as_list(reporting.get("reported_dates"))
+    missing_dates = _as_list(reporting.get("not_supplied_dates"))
+    if none_dates and not reported_dates and not missing_dates:
+        return "No constraints or issues were reported in the available Daily Reports."
+    return "Concern and closeout information was not supplied."
+
+
+def _concerns_table(rows: list[Any], styles: Mapping[str, ParagraphStyle]) -> LongTable | None:
+    data: list[list[Any]] = [[
+        _paragraph("Area of Concern", styles["table_header"]),
+        _paragraph("Suggested Corrective Action", styles["table_header"]),
+    ]]
+    for raw in rows:
+        if isinstance(raw, Mapping):
+            concern = _value(raw, "concern", "text", "description")
+            action = _value(raw, "corrective_action", "action", "suggested_action")
+        else:
+            concern, action = raw, ""
+        if _plain(concern) or _plain(action):
+            data.append([
+                _paragraph(concern, styles["table"]),
+                _paragraph(action, styles["table"]),
+            ])
+    if len(data) == 1:
+        return None
+    table = LongTable(
+        data, colWidths=[BODY_WIDTH * 0.47, BODY_WIDTH * 0.53],
+        repeatRows=1, splitByRow=1, splitInRow=1,
+    )
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), GREY_HEADER),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return table
+
+
+def _normalise_s_curve(
+    value: Any, progress: list[dict[str, Any]]
+) -> tuple[list[str], list[float], list[float], bool] | None:
+    if isinstance(value, Mapping):
+        labels = [_plain(item) for item in _as_list(value.get("labels"))]
+        plan_raw = _as_list(_value(value, "plan", "planned", default=[]))
+        actual_raw = _as_list(value.get("actual"))
+        count = min(len(labels), len(plan_raw), len(actual_raw))
+        if count >= 2:
+            plan = [_number(item) for item in plan_raw[:count]]
+            actual = [_number(item) for item in actual_raw[:count]]
+            if all(item is not None for item in plan + actual):
+                return labels[:count], [float(item) for item in plan], [float(item) for item in actual], False
+
+    total = next(
+        (row for row in reversed(progress)
+         if row.get("is_total") or "total" in row["description"].lower()),
+        progress[-1] if progress else None,
+    )
+    if not total:
+        return None
+    previous = total.get("previous")
+    actual_now = total.get("to_date")
+    plan_now = total.get("plan")
+    if actual_now is None and previous is None:
+        return None
+    previous = float(previous or 0)
+    actual_now = float(actual_now if actual_now is not None else previous)
+    plan_now = float(plan_now if plan_now is not None else actual_now)
+    return (
+        ["Start", "Previous", "Current"],
+        [0.0, min(previous, plan_now), plan_now],
+        [0.0, previous, actual_now],
+        True,
+    )
+
+
+class _SCurveFlowable(Flowable):
+    def __init__(
+        self,
+        labels: list[str],
+        planned: list[float],
+        actual: list[float],
+        *,
+        illustrative: bool,
+        width: float = 490,
+        height: float = 285,
+    ):
+        super().__init__()
+        self.width = width
+        self.height = height
+        self.labels = labels
+        self.planned = planned
+        self.actual = actual
+        self.illustrative = illustrative
+
+    def draw(self):
+        canvas = self.canv
+        left, bottom = 42.0, 43.0
+        chart_width = self.width - left - 18
+        chart_height = self.height - bottom - 42
+        maximum = max([100.0, *self.planned, *self.actual])
+        y_max = max(100.0, math.ceil(maximum / 20.0) * 20.0)
+
+        canvas.saveState()
+        canvas.setFillColor(BLACK)
+        canvas.setFont("Helvetica-Bold", 12)
+        title = "Progress S-Curve"
+        if self.illustrative:
+            title += " (Illustrative Snapshot)"
+        canvas.drawCentredString(self.width / 2, self.height - 18, title)
+
+        canvas.setStrokeColor(colors.HexColor("#D1D5DB"))
+        canvas.setFillColor(MID_GREY)
+        canvas.setFont("Helvetica", 7)
+        for tick in range(6):
+            value = y_max * tick / 5
+            y = bottom + chart_height * tick / 5
+            canvas.line(left, y, left + chart_width, y)
+            canvas.drawRightString(left - 5, y - 2.5, f"{value:.0f}%")
+
+        canvas.setStrokeColor(BLACK)
+        canvas.setLineWidth(0.8)
+        canvas.line(left, bottom, left, bottom + chart_height)
+        canvas.line(left, bottom, left + chart_width, bottom)
+
+        count = len(self.labels)
+        x_positions = [
+            left + (chart_width * index / max(1, count - 1))
+            for index in range(count)
+        ]
+        canvas.setFillColor(BLACK)
+        for index, (x, label) in enumerate(zip(x_positions, self.labels)):
+            if count > 10 and index not in {0, count - 1} and index % math.ceil(count / 8) != 0:
+                continue
+            canvas.drawCentredString(x, bottom - 13, label[:18])
+
+        def draw_series(values: list[float], color, label: str, legend_x: float):
+            canvas.setStrokeColor(color)
+            canvas.setFillColor(color)
+            canvas.setLineWidth(2)
+            points = [
+                (x, bottom + chart_height * max(0.0, min(y_max, value)) / y_max)
+                for x, value in zip(x_positions, values)
+            ]
+            path = canvas.beginPath()
+            path.moveTo(*points[0])
+            for point in points[1:]:
+                path.lineTo(*point)
+            canvas.drawPath(path, stroke=1, fill=0)
+            for x, y in points:
+                canvas.circle(x, y, 2.3, stroke=1, fill=1)
+            legend_y = 15
+            canvas.line(legend_x, legend_y, legend_x + 20, legend_y)
+            canvas.setFont("Helvetica", 8)
+            canvas.drawString(legend_x + 25, legend_y - 3, label)
+
+        draw_series(self.planned, CYAN, "Plan", self.width / 2 - 95)
+        draw_series(self.actual, ORANGE, "Actual", self.width / 2 + 20)
+        if self.illustrative:
+            canvas.setFillColor(ORANGE)
+            canvas.setFont("Helvetica-Bold", 7.5)
+            canvas.drawCentredString(
+                self.width / 2,
+                1,
+                "ILLUSTRATIVE ONLY - provide an approved time series before final issue",
+            )
+        canvas.restoreState()
+
+
+def _normalise_appendices(value: Any, *, has_s_curve: bool) -> list[dict[str, Any]]:
+    # ``source_number`` is the stable internal appendix slot.  ``number`` is the
+    # display number and may later be reassigned after hidden appendices are
+    # removed.  Keeping both lets future data still map to the original 6.1-6.8
+    # definitions without forcing gaps in the issued report numbering.
+    appendices = [
+        {
+            "source_number": number,
+            "number": number,
+            "title": title,
+            "status": "Not supplied",
+            "content": None,
         }
-        identity = str(row["report_id"] or row["sha256"] or f"{row['report_date']}:{row['filename']}")
-        if identity in seen:
-            continue
-        seen.add(identity)
-        manifest.append(row)
-    return manifest
-
-
-def _record_from_uploaded_pdf(
-    imported: dict[str, Any],
-    *,
-    filename: str,
-    username: str,
-    project_no: str,
-    project_title: str,
-    date_from: str,
-    date_to: str,
-    report_type: str = "monthly",
-) -> tuple[dict[str, Any] | None, list[str]]:
-    warnings: list[str] = []
-    data = copy.deepcopy(imported.get("data")) if isinstance(imported.get("data"), dict) else {}
-    parsed_project = _clean_text(data.get("project_no"), 250)
-    parsed_project_title = _clean_text(data.get("project_title"), 500)
-    if parsed_project and parsed_project.casefold() != project_no.casefold():
-        warnings.append(
-            f"{filename}: project number {parsed_project} differs from selected project {project_no}; "
-            "file included for project confirmation."
-        )
-    if not parsed_project:
-        warnings.append(f"{filename}: project assigned from the selected project.")
-
-    # Aggregation uses the selected project as its working identity. Keep the
-    # parser's original values separately so the review step can ask whether
-    # variants should be merged or kept apart without losing evidence.
-    data["project_no"] = project_no
-    if project_title:
-        data["project_title"] = project_title
-
-    report_date, date_method = _imported_report_date(imported, filename)
-    if not report_date:
-        warnings.append(f"{filename}: report date was not detected; file requires manual import and was skipped.")
-        return None, warnings
-    data["date"] = report_date
-    if date_method == "filename_iso_fallback":
-        warnings.append(
-            f"{filename}: report date {report_date} was recovered from the filename; confirm it in Source Data Validation."
-        )
-    if _report_type(report_type) != "weekly" and not (date_from <= report_date <= date_to):
-        warnings.append(f"{filename}: date {report_date} is outside the selected period; file skipped.")
-        return None, warnings
-
-    source = imported.get("source") if isinstance(imported.get("source"), dict) else {}
-    report_id = f"pdf-{source.get('sha256') or uuid.uuid4().hex}"
-    record = {
-        "record_type": "final_daily_report",
-        "report_id": report_id,
-        "revision": int(imported.get("revision") or 1),
-        "username": username,
-        "date": report_date,
-        "project_no": project_no,
-        "project_title": project_title,
-        "generated_at": "",
-        "payload": data,
-        "source": source,
-        "confidence": imported.get("confidence", {}),
-        "import_status": imported.get("status", "needs_review"),
-        "review_required": True,
-        "source_identity": {
-            "project_no": parsed_project,
-            "project_title": parsed_project_title,
-        },
-    }
-    if imported.get("status") != "ready":
-        warnings.append(f"{filename}: parser result needs manual review.")
-    for warning in imported.get("warnings", []):
-        warnings.append(f"{filename}: {_warning_text(warning)}")
-    return record, warnings
-
-
-def _bound_record_photo_candidates(records: list[dict[str, Any]]) -> list[str]:
-    """Apply whole-draft count/byte bounds and exact hash deduplication."""
-
-    seen: set[str] = set()
-    total_bytes = 0
-    retained = 0
-    removed_duplicates = 0
-    removed_for_limit = 0
-    for record in records:
-        raw = record.get("_photo_candidates")
-        bounded: list[dict[str, Any]] = []
-        for item in raw if isinstance(raw, list) else []:
-            if not isinstance(item, dict):
-                continue
-            asset_id = str(item.get("asset_id") or "")
-            try:
-                size_bytes = max(0, int(item.get("size_bytes") or 0))
-            except (TypeError, ValueError):
-                size_bytes = 0
-            if not is_asset_id(asset_id) or size_bytes > DEFAULT_PHOTO_LIMITS.max_asset_bytes:
-                continue
-            if asset_id in seen:
-                removed_duplicates += 1
-                # Keep the reference on every source record so choosing a
-                # later duplicate record during Source Validation does not
-                # accidentally remove its photo. Output collection dedupes it.
-                bounded.append(copy.deepcopy(item))
-                continue
-            if (
-                retained >= DEFAULT_PHOTO_LIMITS.max_images_per_draft
-                or total_bytes + size_bytes > DEFAULT_PHOTO_LIMITS.max_total_asset_bytes_per_draft
-            ):
-                removed_for_limit += 1
-                continue
-            seen.add(asset_id)
-            total_bytes += size_bytes
-            retained += 1
-            bounded.append(copy.deepcopy(item))
-        record["_photo_candidates"] = bounded
-
-    warnings: list[str] = []
-    if removed_duplicates:
-        warnings.append(
-            f"{removed_duplicates} duplicate photo(s) across Daily Reports were removed."
-        )
-    if removed_for_limit:
-        warnings.append(
-            f"{removed_for_limit} photo(s) exceeded the {DEFAULT_PHOTO_LIMITS.max_images_per_draft}-photo "
-            "or draft asset byte limit and were excluded."
-        )
-    return warnings
-
-
-def _photo_references_for_records(
-    records: list[dict[str, Any]],
-    *,
-    previous: Any = None,
-) -> list[dict[str, Any]]:
-    """Return references belonging only to the selected source records."""
-
-    selected_ids = {str(record.get("report_id") or "") for record in records}
-    prior_by_id: dict[str, dict[str, Any]] = {}
-    prior_order: list[str] = []
-    if isinstance(previous, list):
-        for item in previous:
-            if not isinstance(item, dict):
-                continue
-            asset_id = str(item.get("asset_id") or "")
-            if is_asset_id(asset_id) and asset_id not in prior_by_id:
-                prior_by_id[asset_id] = item
-                prior_order.append(asset_id)
-
-    available: dict[str, dict[str, Any]] = {}
-    discovered_order: list[str] = []
-    for record in records:
-        report_id = str(record.get("report_id") or "")
-        if report_id not in selected_ids:
-            continue
-        candidates = record.get("_photo_candidates")
-        for item in candidates if isinstance(candidates, list) else []:
-            if not isinstance(item, dict):
-                continue
-            asset_id = str(item.get("asset_id") or "")
-            if not is_asset_id(asset_id) or asset_id in available:
-                continue
-            try:
-                page_number = int(item.get("page") or 0)
-            except (TypeError, ValueError):
-                page_number = 0
-            reference = {
-                "schema_version": "periodic-photo/1",
-                "asset_id": asset_id,
-                "source_report_id": report_id,
-                "source": _clean_text(item.get("source"), 255),
-                "width": max(1, int(item.get("width") or 1)),
-                "height": max(1, int(item.get("height") or 1)),
-                "size_bytes": max(0, int(item.get("size_bytes") or 0)),
-                "caption": _clean_text(item.get("caption"), 500),
-            }
-            if page_number > 0:
-                reference["page"] = page_number
-            for metadata_key, maximum_length in (("source_date", 10), ("source_area", 255)):
-                metadata_value = _clean_text(item.get(metadata_key), maximum_length)
-                if metadata_value:
-                    reference[metadata_key] = metadata_value
-            previous_item = prior_by_id.get(asset_id)
-            if previous_item is not None:
-                previous_caption = _clean_text(previous_item.get("caption"), 500)
-                if previous_caption:
-                    reference["caption"] = previous_caption
-            available[asset_id] = reference
-            discovered_order.append(asset_id)
-
-    ordered_ids = [asset_id for asset_id in prior_order if asset_id in available]
-    ordered_ids.extend(asset_id for asset_id in discovered_order if asset_id not in ordered_ids)
-    result = [available[asset_id] for asset_id in ordered_ids]
-    for index, item in enumerate(result):
-        item["order"] = index
-    return result[: DEFAULT_PHOTO_LIMITS.max_images_per_draft]
-
-
-def _all_photo_references(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    for record in records:
-        candidates = record.get("_photo_candidates")
-        if isinstance(candidates, list):
-            result.extend(item for item in candidates if isinstance(item, dict))
-    return result
-
-
-def _provisional_project_records(
-    records: list[dict[str, Any]],
-    validation: dict[str, Any],
-    *,
-    project_no: str,
-    project_title: str,
-) -> list[dict[str, Any]]:
-    """Provisionally merge uploaded project identities for the review preview.
-
-    Source Data Validation remains unapplied/unconfirmed, so the reviewer must
-    still decide Merge vs Keep separate before Final issue.  Including all
-    uploaded identities in the provisional preview prevents a project-number
-    mismatch from being misreported as a *missing date* when the Daily Report
-    for that date was actually uploaded and parsed successfully.
-    """
-
-    groups = validation.get("project_groups") if isinstance(validation, dict) else []
-    resolutions = []
-    for group in groups if isinstance(groups, list) else []:
-        if not isinstance(group, dict) or not group.get("key"):
-            continue
-        resolutions.append({
-            "group_key": group["key"],
-            "decision": "merge",
-        })
-    try:
-        included, _ = resolve_project_records(
-            records,
-            validation,
-            project_no=project_no,
-            project_title=project_title,
-            resolutions=resolutions,
-        )
-    except ValueError as exc:
-        if "At least one project group" in str(exc):
-            return []
-        raise
-    return included
-
-
-
-def _source_validation_payload(review: Any) -> dict[str, Any]:
-    if not isinstance(review, dict):
-        raise ValueError("Invalid Source Data Validation.")
-    project_no = _clean_text(review.get("project_no"), 250)
-    project_title = _clean_text(review.get("project_title"), 500)
-    notes = _clean_text(review.get("notes"), 4_000)
-    resolutions = review.get("project_resolutions")
-    if not isinstance(resolutions, list):
-        resolutions = []
-    duplicate_resolutions = review.get("duplicate_resolutions")
-    if not isinstance(duplicate_resolutions, list):
-        duplicate_resolutions = []
-    return {
-        "confirmed": bool(review.get("confirmed")),
-        "project_no": project_no,
-        "project_title": project_title,
-        "notes": notes,
-        "project_resolutions": resolutions,
-        "duplicate_resolutions": duplicate_resolutions,
-    }
-
-
-def _normalize_progress(review: Any) -> dict[str, Any]:
-    raw_rows = review.get("rows", []) if isinstance(review, dict) else []
-    rows = []
-    for raw in raw_rows[:100]:
-        if not isinstance(raw, dict):
-            continue
-        description = _clean_text(raw.get("description"), 250)
-        if not description or description.lower() in {"total", "total overall"}:
-            continue
-        previous = _number(raw.get("previous"))
-        this_month = _number(raw.get(
-            "this_month",
-            raw.get("this_week", raw.get("this_period", raw.get("this_period_actual"))),
-        ))
-        to_date = previous + this_month
-        plan = _number(raw.get("plan", raw.get("cumulative_to_date_plan")))
-        rows.append({
-            "description": description,
-            "weight": max(0.0, _number(raw.get("weight", raw.get("weight_factor")))),
-            "previous": round(previous, 4),
-            "this_month": round(this_month, 4),
-            "to_date": round(to_date, 4),
-            "plan": round(plan, 4),
-            "variance": round(to_date - plan, 4),
-        })
-
-    weight_total = sum(row["weight"] for row in rows)
-    if rows and weight_total > 0:
-        def weighted(key: str) -> float:
-            return sum(row[key] * row["weight"] / 100.0 for row in rows)
-
-        total_previous = weighted("previous")
-        total_this = weighted("this_month")
-        total_to_date = total_previous + total_this
-        total_plan = weighted("plan")
-        rows.append({
-            "description": "Total Overall",
-            "weight": round(weight_total, 4),
-            "previous": round(total_previous, 4),
-            "this_month": round(total_this, 4),
-            "to_date": round(total_to_date, 4),
-            "plan": round(total_plan, 4),
-            "variance": round(total_to_date - total_plan, 4),
-            "is_total": True,
-        })
-    return {"rows": rows}
-
-
-def _apply_review(draft: dict[str, Any], review: dict[str, Any]) -> dict[str, Any]:
-    value = copy.deepcopy(draft)
-    kind = _report_type(value.get("report_type") or "monthly")
-    mode = _normalise_report_mode(kind, review.get("report_mode") or value.get("report_mode"))
-    period = value.get("period") if isinstance(value.get("period"), dict) else {}
-    _parse_period(period.get("start"), period.get("end"), kind, mode)
-    stored_validation = value.get("source_validation")
-    if isinstance(stored_validation, dict):
-        if not stored_validation.get("applied") or not stored_validation.get("confirmed"):
-            raise ValueError("Apply Source Data Validation before Preview or Generate.")
-        incoming_raw = review.get("source_validation")
-        if incoming_raw is not None:
-            incoming_validation = _source_validation_payload(incoming_raw)
-            if not incoming_validation["confirmed"]:
-                raise ValueError("Confirm Source Data Validation before Preview or Generate.")
-            if (
-                incoming_validation["project_no"] != str(value.get("project_no") or "")
-                or incoming_validation["project_title"] != str(value.get("project_title") or "")
-            ):
-                raise ValueError("Project identity changed. Apply Source Data Validation again.")
-            stored_decisions = {
-                str(group.get("key") or ""): str(group.get("decision") or "")
-                for group in stored_validation.get("project_groups", [])
-                if isinstance(group, dict)
-            }
-            incoming_decisions = {
-                str(row.get("group_key") or ""): str(row.get("decision") or "")
-                for row in incoming_validation["project_resolutions"]
-                if isinstance(row, dict)
-            }
-            if incoming_decisions != stored_decisions:
-                raise ValueError("Project decisions changed. Apply Source Data Validation again.")
-            stored_duplicates = {
-                str(group.get("key") or ""): str(group.get("selected_record_id") or "")
-                for group in stored_validation.get("duplicate_groups", [])
-                if isinstance(group, dict)
-            }
-            incoming_duplicates = {
-                str(row.get("group_key") or ""): str(row.get("selected_record_id") or "")
-                for row in incoming_validation["duplicate_resolutions"]
-                if isinstance(row, dict)
-            }
-            if incoming_duplicates != stored_duplicates:
-                raise ValueError("Duplicate source choices changed. Apply Source Data Validation again.")
-            stored_validation["notes"] = incoming_validation["notes"]
-        value["source_validation"] = stored_validation
-    if has_pending_workforce_review(value):
-        raise ValueError("Apply or keep every timesheet/overtime preview before Preview or Generate.")
-    ai_summary = value.get("ai_summary")
-    if isinstance(ai_summary, dict) and ai_summary.get("status") == "suggested":
-        raise ValueError("Accept or reject the pending AI narrative suggestions before Preview or Generate.")
-    value["report_type"] = kind
-    value["report_title"] = f"{_report_name(kind)} Progress Report"
-    value["report_mode"] = mode
-    value["status"] = value["report_mode"]
-    value["executive_summary"] = _clean_text(review.get("executive_summary", value.get("executive_summary")))
-    value["progress"] = _normalize_progress(review.get("progress", value.get("progress", {})))
-
-    current_safety = value.get("safety") if isinstance(value.get("safety"), dict) else {}
-    safety_review = review.get("safety") if isinstance(review.get("safety"), dict) else {}
-    safety = {
-        "total_manpower": _optional_non_negative(
-            safety_review.get("total_manpower", current_safety.get("total_manpower")),
-            integer=True,
-        ),
-        "total_man_hours": _optional_non_negative(
-            safety_review.get("total_man_hours", current_safety.get("total_man_hours")),
-        ),
-        "recordable_cases": _optional_non_negative(
-            safety_review.get("recordable_cases", current_safety.get("recordable_cases")),
-            integer=True,
-        ),
-        "lost_workdays": _optional_non_negative(
-            safety_review.get("lost_workdays", current_safety.get("lost_workdays")),
-            integer=True,
-        ),
-        "lost_time_injuries": _optional_non_negative(
-            safety_review.get("lost_time_injuries", current_safety.get("lost_time_injuries")),
-            integer=True,
-        ),
-    }
-    workforce = value.get("workforce_validation")
-    effective = workforce.get("effective") if isinstance(workforce, dict) and isinstance(workforce.get("effective"), dict) else {}
-    if effective.get("source") == "timesheet":
-        # Reviewed workbook facts are deterministic and cannot be changed by
-        # an editable text/number field or by an AI suggestion.  Apply these
-        # values before calculating rates so the denominator stays coherent.
-        safety["total_manpower"] = int(_number(effective.get("peak_headcount")))
-        safety["total_man_hours"] = max(0.0, _number(effective.get("total_man_hours")))
-    lost_days = safety["lost_workdays"]
-    man_hours = safety["total_man_hours"]
-    injuries = safety["lost_time_injuries"]
-    safety["severity_rate"] = (
-        round(float(lost_days) * 1_000_000 / float(man_hours), 2)
-        if lost_days is not None and man_hours not in (None, 0)
-        else None
-    )
-    safety["average_day_away"] = (
-        round(float(lost_days) / float(injuries), 2)
-        if lost_days is not None and injuries not in (None, 0)
-        else None
-    )
-    value["safety"] = safety
-
-    for key in ("engineering", "procurement"):
-        current = value.get(key) if isinstance(value.get(key), dict) else {}
-        incoming = review.get(key) if isinstance(review.get(key), dict) else {}
-        current["summary"] = _clean_text(incoming.get("summary", current.get("summary")))
-        value[key] = current
-
-    current_site = value.get("site") if isinstance(value.get("site"), dict) else {}
-    incoming_site = review.get("site") if isinstance(review.get("site"), dict) else {}
-    current_activities = incoming_site.get(
-        "current_period_activities",
-        incoming_site.get(
-            "this_period_activities",
-            incoming_site.get(
-                "this_week_activities",
-                incoming_site.get("this_month_activities", current_site.get(
-                    "current_period_activities",
-                    current_site.get("this_month_activities", []),
-                )),
-            ),
-        ),
-    )
-    next_activities = incoming_site.get(
-        "next_period_activities",
-        incoming_site.get(
-            "next_week_activities",
-            incoming_site.get("next_month_activities", current_site.get(
-                "next_period_activities",
-                current_site.get("next_month_activities", []),
-            )),
-        ),
-    )
-    current_site["this_month_activities"] = _list_text(current_activities)
-    current_site["next_month_activities"] = _list_text(next_activities)
-    current_site["current_period_activities"] = current_site["this_month_activities"]
-    current_site["this_period_activities"] = current_site["this_month_activities"]
-    current_site["next_period_activities"] = current_site["next_month_activities"]
-    if kind == "weekly":
-        current_site["this_week_activities"] = current_site["this_month_activities"]
-        current_site["next_week_activities"] = current_site["next_month_activities"]
-    concerns = []
-    for item in incoming_site.get("concerns", current_site.get("concerns", []))[:250]:
-        if isinstance(item, str):
-            concerns.append({"concern": _clean_text(item, 2_000), "corrective_action": ""})
-        elif isinstance(item, dict):
-            concern = _clean_text(item.get("concern", item.get("text", "")), 2_000)
-            action = _clean_text(item.get("corrective_action", item.get("action", "")), 2_000)
-            if concern or action:
-                concerns.append({"concern": concern, "corrective_action": action})
-    current_site["concerns"] = concerns
-    value["site"] = current_site
-    value["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    return value
-
-
-def _safe_filename_part(value: Any, fallback: str) -> str:
-    text = _SAFE_FILENAME_RE.sub("-", str(value or fallback)).strip(" ._-")
-    return text[:100] or fallback
-
-
-def _monthly_filename(draft: dict[str, Any], revision: int) -> str:
-    report_name = _report_name(draft.get("report_type") or "monthly")
-    project = _safe_filename_part(draft.get("project_no"), "Project")
-    period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
-    start = _safe_filename_part(period.get("start"), "Start")
-    end = _safe_filename_part(period.get("end"), "End")
-    mode = _safe_filename_part(str(draft.get("status", "draft")).upper(), "DRAFT")
-    return f"{report_name} Progress Report - {project} - {start} to {end} ({mode}) - R{revision}.pdf"
-
-
-def _draft_report_type(draft: dict[str, Any]) -> str:
-    """Read new report types while treating every legacy draft as monthly."""
-    return _report_type(draft.get("report_type") or "monthly")
-
-
-def _require_applied_source_validation(draft: dict[str, Any]) -> None:
-    validation = draft.get("source_validation")
-    if not isinstance(validation, dict) or not validation.get("applied") or not validation.get("confirmed"):
-        raise ValueError("Apply Source Data Validation before reviewing workforce data or AI suggestions.")
-
-
-def _workbook_uploads() -> list[tuple[str, bytes]]:
-    if request.content_length is not None and request.content_length > _MAX_WORKBOOK_REQUEST_BYTES:
-        raise ValueError("The workbook upload request exceeds 48 MB.")
-    files = request.files.getlist("files")
-    if not files:
-        raise ValueError("Choose at least one .xlsx workbook.")
-    if len(files) > _MAX_WORKBOOK_FILES:
-        raise ValueError(f"Choose no more than {_MAX_WORKBOOK_FILES} workbooks at once.")
-    result: list[tuple[str, bytes]] = []
-    total = 0
-    for upload in files:
-        filename = os.path.basename(str(upload.filename or ""))
-        if not filename.lower().endswith(".xlsx"):
-            raise ValueError(f"{filename or 'Upload'} is not an .xlsx workbook.")
-        payload = upload.stream.read(_MAX_WORKBOOK_FILE_BYTES + 1)
-        if len(payload) > _MAX_WORKBOOK_FILE_BYTES:
-            raise ValueError(f"{filename} exceeds the 16 MB workbook limit.")
-        if not payload:
-            raise ValueError(f"{filename} is empty.")
-        total += len(payload)
-        if total > _MAX_WORKBOOK_REQUEST_BYTES:
-            raise ValueError("The combined workbook upload exceeds 48 MB.")
-        result.append((filename, payload))
-    return result
-
-
-def _ai_admin_only() -> bool:
-    return str(os.environ.get("ANTHROPIC_AI_ADMIN_ONLY", "true")).strip().lower() not in {
-        "0", "false", "no", "off",
-    }
-
-
-def _claim_text(value: Any) -> str:
-    if isinstance(value, dict):
-        return _clean_text(value.get("text"), 4_000)
-    return _clean_text(value, 4_000)
-
-
-def _usable_ai_text(value: Any) -> str:
-    """Return AI text only when it contains a real narrative suggestion."""
-
-    text = _claim_text(value)
-    return "" if text.casefold() == "not supplied" else text
-
-
-
-
-def _clean_ai_references(value: Any) -> dict[str, list[str]]:
-    row = value if isinstance(value, dict) else {}
-    source_ids = []
-    for item in row.get("source_ids", [])[:40] if isinstance(row.get("source_ids"), list) else []:
-        text = _clean_text(item, 300)
-        if text and text not in source_ids:
-            source_ids.append(text)
-    dates = []
-    for item in row.get("dates", [])[:40] if isinstance(row.get("dates"), list) else []:
-        text = _clean_text(item, 10)
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) and text not in dates:
-            dates.append(text)
-    return {"source_ids": source_ids, "dates": dates}
-
-
-def _clean_ai_missing_data(value: Any) -> list[str]:
-    rows = value if isinstance(value, list) else []
-    result = []
-    for row in rows[:75]:
-        text = _clean_text(row, 500)
-        if text and text not in result:
-            result.append(text)
-    return result
-
-
-def _clean_ai_citation_evidence(value: Any) -> dict[str, Any]:
-    evidence = value if isinstance(value, dict) else {}
-    result = {
-        key: _clean_ai_references(evidence.get(key))
-        for key in (
-            "executive_summary",
-            "engineering_summary",
-            "procurement_summary",
-            "site_summary",
-        )
-    }
-    for key in ("current_activities", "concern_actions", "lookahead", "claims"):
-        rows = evidence.get(key) if isinstance(evidence.get(key), list) else []
-        result[key] = [_clean_ai_references(row) for row in rows[:75]]
-    return result
-
-
-def _clean_ai_review(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError("AI suggestion review must be an object.")
-    concerns = []
-    for row in value.get("concerns", [])[:100] if isinstance(value.get("concerns"), list) else []:
-        if not isinstance(row, dict):
-            continue
-        concern = _clean_text(row.get("concern"), 2_000)
-        action = _clean_text(row.get("corrective_action"), 2_000)
-        if concern or action:
-            concerns.append({"concern": concern, "corrective_action": action})
-    lookahead = [
-        _clean_text(row, 2_000)
-        for row in (value.get("lookahead", [])[:250] if isinstance(value.get("lookahead"), list) else [])
-        if _clean_text(row, 2_000)
+        for number, title in DEFAULT_APPENDICES
     ]
-    current_activities = _clean_activity_rows(value.get("current_activities"))
-    return {
-        "executive_summary": _clean_text(value.get("executive_summary"), 4_000),
-        "engineering_summary": _clean_text(value.get("engineering_summary"), 4_000),
-        "procurement_summary": _clean_text(value.get("procurement_summary"), 4_000),
-        "site_summary": _clean_text(value.get("site_summary"), 4_000),
-        "current_activities": current_activities,
-        "concerns": concerns,
-        "lookahead": lookahead,
-    }
-
-
-def _audit_source_manifest(value: Any) -> list[dict[str, Any]]:
-    """Keep content hashes needed for an audit without retaining upload names."""
-
-    rows = value if isinstance(value, list) else []
-    result: list[dict[str, Any]] = []
-    for row in rows:
-        if not isinstance(row, dict):
+    by_source_number = {item["source_number"]: item for item in appendices}
+    next_index = 9
+    for raw in _as_list(value):
+        if isinstance(raw, Mapping):
+            source_number = _plain(raw.get("source_number") or raw.get("number"))
+            title = _plain(_value(raw, "title", "name", "description"))
+            status = _plain(raw.get("status"))
+            content = _value(raw, "content", "items", "notes", default=None)
+        else:
+            source_number, title, status, content = "", _plain(raw), "", None
+        if not title and not source_number:
             continue
+        if source_number in by_source_number:
+            item = by_source_number[source_number]
+            if title:
+                item["title"] = title
+            if status:
+                item["status"] = status
+            if content not in (None, "", [], {}):
+                item["content"] = content
+                if not status:
+                    item["status"] = "Included"
+            continue
+        source_number = source_number or f"6.{next_index}"
         item = {
-            key: copy.deepcopy(row.get(key))
-            for key in ("source_id", "sha256", "size_bytes", "status")
-            if row.get(key) not in (None, "")
+            "source_number": source_number,
+            "number": source_number,
+            "title": title or "Appendix",
+            "status": status or ("Included" if content else "Not supplied"),
+            "content": content,
         }
-        if item:
-            result.append(item)
-    return result
+        next_index += 1
+        appendices.append(item)
+        by_source_number[source_number] = item
+    if has_s_curve and "6.2" in by_source_number:
+        by_source_number["6.2"]["status"] = "Included (generated)"
+    return appendices
 
 
-def _workforce_issue_audit(value: Any) -> dict[str, Any] | None:
-    """Remove employee-level workbook data from an issued report JSON.
+def _appendix_source_number(item: Mapping[str, Any]) -> str:
+    return _plain(item.get("source_number") or item.get("number"))
 
-    Full previews remain in the owner's editable draft.  The issued artifact
-    needs only reproducible source hashes, deterministic totals, decisions,
-    and reviewer metadata; names, per-day attendance statuses, raw overtime
-    rows, and workbook filenames are not report content.
+
+def _renumber_visible_appendices(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Assign contiguous display numbers to appendices that will be rendered.
+
+    The stable ``source_number`` remains unchanged, so internal mapping still
+    knows that manpower originated from slot 6.5, photographs from 6.6, etc.
+    Only the client-facing number is compacted to 6.1, 6.2, ... .
     """
 
-    if not isinstance(value, dict):
-        return None
-    result: dict[str, Any] = {
-        "version": value.get("version"),
-        "privacy_compacted": True,
-        "effective": copy.deepcopy(value.get("effective", {})),
-    }
+    for index, item in enumerate(items, start=1):
+        item["number"] = f"6.{index}"
+    return items
 
-    timesheet = value.get("timesheet") if isinstance(value.get("timesheet"), dict) else {}
-    timesheet_preview = (
-        timesheet.get("preview") if isinstance(timesheet.get("preview"), dict) else {}
-    )
-    timesheet_audit = {
-        key: copy.deepcopy(timesheet.get(key))
-        for key in (
-            "status", "reviewed_by", "reviewed_at", "decided_by", "decided_at",
-            "confirmed_exceptions",
-        )
-        if timesheet.get(key) not in (None, "")
-    }
-    timesheet_audit.update({
-        "formula_version": timesheet_preview.get("formula_version"),
-        "hours_per_present_day": timesheet_preview.get("hours_per_present_day"),
-        "period": copy.deepcopy(timesheet_preview.get("period", {})),
-        "coverage": copy.deepcopy(timesheet_preview.get("coverage", {})),
-        "totals": copy.deepcopy(timesheet_preview.get("totals", {})),
-        "source_manifest": _audit_source_manifest(timesheet_preview.get("source_manifest")),
-        "warning_count": len(timesheet_preview.get("warnings", []))
-        if isinstance(timesheet_preview.get("warnings"), list) else 0,
-        "unresolved_count": len(timesheet_preview.get("unresolved", []))
-        if isinstance(timesheet_preview.get("unresolved"), list) else 0,
-    })
-    result["timesheet"] = timesheet_audit
 
-    overtime = value.get("overtime") if isinstance(value.get("overtime"), dict) else {}
-    overtime_preview = (
-        overtime.get("preview") if isinstance(overtime.get("preview"), dict) else {}
-    )
-    overtime_manifest = (
-        overtime_preview.get("manifest")
-        if isinstance(overtime_preview.get("manifest"), dict)
-        else {}
-    )
-    resolution_rows = []
-    resolutions = overtime.get("resolutions") if isinstance(overtime.get("resolutions"), dict) else {}
-    for employee_key, decision in sorted(resolutions.items()):
-        resolution_rows.append({
-            "employee_hash": hashlib.sha256(str(employee_key).encode("utf-8")).hexdigest(),
-            "decision": str(decision),
-        })
-    accepted_ids = sorted({
-        str(row.get("record_id"))
-        for row in overtime.get("accepted_records", [])
-        if isinstance(row, dict) and row.get("record_id")
-    }) if isinstance(overtime.get("accepted_records"), list) else []
-    record_resolution_rows = []
-    record_resolutions = (
-        overtime.get("record_resolutions")
-        if isinstance(overtime.get("record_resolutions"), dict)
-        else {}
-    )
-    for record_id, decision in sorted(record_resolutions.items()):
-        if not isinstance(decision, dict):
+def _appendix_label(item: Mapping[str, Any]) -> str:
+    number = _plain(item.get("number"))
+    title = _plain(item.get("title"), "Appendix")
+    status = _plain(item.get("status"))
+    label = f"{number}    {title}".strip()
+    if status:
+        label += f"  [{status}]"
+    return label
+
+
+def _appendix_is_visible(item: Mapping[str, Any]) -> bool:
+    """Return True when an appendix should be shown in the issued report.
+
+    Appendix definitions are intentionally retained even when they are not
+    supplied.  This keeps the fixed 6.1-6.8 structure available for future
+    reports, while preventing empty ``[Not supplied]`` rows from cluttering the
+    current report and its table of contents.
+
+    Content always wins over a stale status value: if an appendix has actual
+    content, it remains visible even if its status was not updated correctly.
+    """
+
+    content = item.get("content")
+    if content not in (None, "", [], {}):
+        return True
+
+    status = _plain(item.get("status")).strip().casefold()
+    return status not in {"", "not supplied"}
+
+
+def _photo_grid_flowables(
+    photos: list[Any],
+    styles: Mapping[str, ParagraphStyle],
+    *,
+    photo_base_dir: str | os.PathLike[str] | None,
+) -> list[Flowable]:
+    """Render reviewed draft-local photo references in a three-column grid."""
+
+    if photo_base_dir is None:
+        return [Paragraph("Photo assets are unavailable.", styles["placeholder"])]
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return [Paragraph("Photo rendering requires Pillow.", styles["placeholder"])]
+
+    root = os.path.realpath(os.fspath(photo_base_dir))
+    columns = 3
+    cell_width = BODY_WIDTH / columns
+    image_width = cell_width - 8
+    image_height = 122.0
+    rows: list[list[Any]] = []
+    current: list[Any] = []
+
+    for raw in photos:
+        if not isinstance(raw, Mapping):
             continue
-        record_resolution_rows.append({
-            "record_id": str(record_id),
-            "decision": str(decision.get("decision") or ""),
-            "duration_hours": decision.get("duration_hours"),
-        })
-    overtime_audit = {
-        key: copy.deepcopy(overtime.get(key))
-        for key in (
-            "status", "reviewed_by", "reviewed_at", "decided_by", "decided_at",
-            "confirmed_exceptions",
+        asset_id = _plain(raw.get("asset_id"))
+        if not is_asset_id(asset_id):
+            continue
+        path = os.path.realpath(os.path.join(root, asset_filename(asset_id)))
+        if os.path.dirname(path) != root or not os.path.isfile(path):
+            continue
+        try:
+            with Image.open(path) as opened:
+                if str(opened.format or "").upper() != "JPEG":
+                    continue
+                image = ImageOps.exif_transpose(opened).convert("RGB")
+                fitted = ImageOps.fit(
+                    image,
+                    (max(1, int(image_width * 2)), max(1, int(image_height * 2))),
+                    method=Image.Resampling.LANCZOS,
+                )
+                image_buffer = io.BytesIO()
+                fitted.save(image_buffer, format="JPEG", quality=82, optimize=True)
+                image_buffer.seek(0)
+            rendered_image: Any = RLImage(
+                image_buffer,
+                width=image_width,
+                height=image_height,
+            )
+        except Exception:
+            continue
+
+        source = _plain(raw.get("source"))
+        page = _plain(raw.get("page"))
+        area = _plain(raw.get("source_area"))
+        fallback = f"{source} - p.{page}" if source and page else source
+        caption = _plain(raw.get("caption"), fallback)
+
+        card_rows: list[list[Any]] = []
+        if area:
+            card_rows.append([Paragraph(f"<b>{_xml(area)}</b>", styles["small"])])
+        if caption:
+            card_rows.append([Paragraph(f"<i>{_xml(caption)}</i>", styles["small"])])
+        card_rows.append([rendered_image])
+
+        card = Table(
+            card_rows,
+            colWidths=[cell_width - 4],
         )
-        if overtime.get(key) not in (None, "")
-    }
-    overtime_audit.update({
-        "formula_version": overtime_preview.get("formula_version"),
-        "calculation_policy": copy.deepcopy(overtime_preview.get("calculation_policy", {})),
-        "period": copy.deepcopy(overtime_preview.get("period", {})),
-        "coverage": copy.deepcopy(overtime_preview.get("coverage", {})),
-        "totals": copy.deepcopy(overtime_preview.get("totals", {})),
-        "source_manifest": _audit_source_manifest(overtime_manifest.get("files")),
-        "warning_count": len(overtime_preview.get("warnings", []))
-        if isinstance(overtime_preview.get("warnings"), list) else 0,
-        "conflict_count": len(overtime_preview.get("conflicts", []))
-        if isinstance(overtime_preview.get("conflicts"), list) else 0,
-        "resolutions": resolution_rows,
-        "record_resolutions": record_resolution_rows,
-        "accepted_record_ids": accepted_ids,
-    })
-    result["overtime"] = overtime_audit
+        card_style = [
+            ("BOX", (0, 0), (-1, -1), 0.55, CYAN),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 3),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]
+        if area:
+            card_style.extend([
+                ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#DDEBF7")),
+                ("LINEBELOW", (0, 0), (0, 0), 0.35, CYAN),
+            ])
+            if caption:
+                card_style.append(("BACKGROUND", (0, 1), (0, 1), LIGHT_GREY))
+        elif caption:
+            card_style.append(("BACKGROUND", (0, 0), (0, 0), LIGHT_GREY))
+        card.setStyle(TableStyle(card_style))
+        current.append(card)
+        if len(current) == columns:
+            rows.append(current)
+            current = []
+
+    if current:
+        current.extend([""] * (columns - len(current)))
+        rows.append(current)
+    if not rows:
+        return [Paragraph("No selected photo assets are available.", styles["placeholder"])]
+
+    grid = Table(rows, colWidths=[cell_width] * columns, hAlign="LEFT", splitByRow=1)
+    grid.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return [grid]
+
+
+def _manpower_appendix_flowables(
+    manpower: Any,
+    styles: Mapping[str, ParagraphStyle],
+) -> list[Flowable]:
+    """Render deterministic attendance and man-hour details in Appendix 6.5."""
+
+    value = manpower if isinstance(manpower, Mapping) else {}
+    totals = value.get("totals") if isinstance(value.get("totals"), Mapping) else {}
+    daily = [row for row in _as_list(value.get("daily")) if isinstance(row, Mapping)]
+    roles = [row for row in _as_list(value.get("roles")) if isinstance(row, Mapping)]
+    header = styles["table_header"]
+    body = styles["table"]
+    center = styles["table_center"]
+    summary_rows = [
+        ["Category", "Person-days", "Regular MH", "OT MH", "Total MH"],
+        [
+            "Direct", totals.get("direct_person_days", "Not supplied"),
+            totals.get("regular_direct_man_hours", totals.get("direct_man_hours", "Not supplied")),
+            totals.get("direct_overtime_man_hours", "Not supplied"), totals.get("direct_man_hours", "Not supplied"),
+        ],
+        [
+            "Indirect", totals.get("indirect_person_days", "Not supplied"),
+            totals.get("regular_indirect_man_hours", totals.get("indirect_man_hours", "Not supplied")),
+            totals.get("indirect_overtime_man_hours", "Not supplied"), totals.get("indirect_man_hours", "Not supplied"),
+        ],
+        [
+            "Total", totals.get("total_person_days", "Not supplied"),
+            totals.get("regular_man_hours", totals.get("total_man_hours", "Not supplied")),
+            totals.get("overtime_man_hours", "Not supplied"), totals.get("total_man_hours", "Not supplied"),
+        ],
+    ]
+    summary = Table(
+        [[_paragraph(cell, header if row_index == 0 else (body if column_index == 0 else center))
+          for column_index, cell in enumerate(row)] for row_index, row in enumerate(summary_rows)],
+        colWidths=[118, 86, 90, 82, 90], repeatRows=1, hAlign="CENTER",
+    )
+    summary.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), GREY_HEADER),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    result: list[Flowable] = [summary, Spacer(1, 10)]
+    if daily:
+        table_rows: list[list[Any]] = [[
+            "Date", "Direct HC", "Indirect HC", "Total HC", "Regular MH", "OT MH", "Total MH",
+        ]]
+        for row in daily:
+            regular = row.get("regular_man_hours")
+            if regular is None:
+                direct_value = _number(row.get("direct_man_hours")) or 0
+                indirect_value = _number(row.get("indirect_man_hours")) or 0
+                regular = direct_value + indirect_value
+            table_rows.append([
+                row.get("date", ""), row.get("direct_headcount", 0), row.get("indirect_headcount", 0),
+                row.get("total_headcount", 0), regular, row.get("overtime_man_hours", "Not supplied"),
+                row.get("total_man_hours", regular),
+            ])
+        table = LongTable(
+            [[_paragraph(cell, header if row_index == 0 else center) for cell in row]
+             for row_index, row in enumerate(table_rows)],
+            colWidths=[74, 61, 66, 61, 70, 65, 72], repeatRows=1, splitByRow=1,
+        )
+        table.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.45, BLACK),
+            ("BACKGROUND", (0, 0), (-1, 0), CYAN),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        result.extend([_heading("Daily Headcount and Man-hours", styles["h2"], 1), table, Spacer(1, 10)])
+    if roles:
+        role_rows: list[list[Any]] = [["Role / Position", "Person-days", "Man-hours"]]
+        for row in roles:
+            role_rows.append([
+                row.get("role", "Unspecified"),
+                row.get("person_days", row.get("present_person_days", "")),
+                row.get("man_hours", row.get("physical_manhours", "")),
+            ])
+        table = LongTable(
+            [[_paragraph(cell, header if row_index == 0 else (body if column_index == 0 else center))
+              for column_index, cell in enumerate(row)] for row_index, row in enumerate(role_rows)],
+            colWidths=[270, 100, 100], repeatRows=1,
+        )
+        table.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.45, BLACK),
+            ("BACKGROUND", (0, 0), (-1, 0), CYAN),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        result.extend([_heading("Role Summary", styles["h2"], 1), table])
+    if totals.get("source"):
+        result.extend([Spacer(1, 8), _paragraph(
+            "Source: reviewed attendance workbook. Regular physical man-hours use 10 hours per present day; "
+            "overtime is elapsed clock time only when explicitly applied.", styles["placeholder"],
+        )])
     return result
 
 
-def _ai_issue_audit(value: Any) -> dict[str, Any] | None:
-    """Keep provider accounting metadata but not the raw suggestion envelope."""
-
-    if not isinstance(value, dict):
-        return None
-    envelope = value.get("provider_envelope") if isinstance(value.get("provider_envelope"), dict) else {}
-    result = {
-        key: copy.deepcopy(value.get(key))
-        for key in ("status", "requested_at", "requested_by", "decided_at", "decided_by")
-        if value.get(key) not in (None, "")
-    }
-    result.update({
-        key: copy.deepcopy(envelope.get(key))
-        for key in (
-            "version", "prompt", "prompt_version", "model", "input_hash",
-            "generated_at", "usage", "request_id",
-        )
-        if envelope.get(key) not in (None, "")
-    })
-    suggestion = value.get("suggestion") if isinstance(value.get("suggestion"), dict) else {}
-    evidence = suggestion.get("citation_evidence")
-    if isinstance(evidence, dict):
-        result["citation_evidence"] = _clean_ai_citation_evidence(evidence)
-    missing_data = _clean_ai_missing_data(suggestion.get("missing_data"))
-    if missing_data:
-        result["missing_data"] = missing_data
-    result["privacy_compacted"] = True
-    return result
-
-
-def _issued_report_copy(report: dict[str, Any]) -> dict[str, Any]:
-    """Create the persistent report artifact without draft-only sensitive data."""
-
-    value = copy.deepcopy(report)
-    value.pop("_source_records", None)
-    value.pop("ai_request_control", None)
-    workforce = _workforce_issue_audit(value.get("workforce_validation"))
-    if workforce is None:
-        value.pop("workforce_validation", None)
-    else:
-        value["workforce_validation"] = workforce
-    ai_audit = _ai_issue_audit(value.get("ai_summary"))
-    if ai_audit is None:
-        value.pop("ai_summary", None)
-    else:
-        value["ai_summary"] = ai_audit
-    return value
-
-
-def _render(
-    draft: dict[str, Any],
-    config: dict[str, Any],
+def _build_story(
+    report: Mapping[str, Any],
+    styles: Mapping[str, ParagraphStyle],
     *,
     photo_base_dir: str | os.PathLike[str] | None = None,
-):
-    configured_logo = config.get("logo_gpa") if isinstance(config, dict) else None
-    bundled_logo = Path(__file__).resolve().parent.parent / "static" / "pdf_assets" / "gpa_logo.png"
-    configured_path = Path(str(configured_logo)) if configured_logo else None
-    logo_path = (
-        str(configured_path)
-        if configured_path is not None and configured_path.is_file()
-        else (str(bundled_logo) if bundled_logo.is_file() else None)
+) -> list[Flowable]:
+    report_type = _report_type(report)
+    progress = _normalise_progress(report.get("progress", report.get("overall_progress", [])))
+    include_s_curve = _coerce_bool(report.get("include_s_curve"), bool(progress))
+    curve = _normalise_s_curve(report.get("s_curve"), progress) if include_s_curve else None
+    appendices = _normalise_appendices(report.get("appendices"), has_s_curve=curve is not None)
+    manpower = report.get("manpower") if isinstance(report.get("manpower"), Mapping) else {}
+    manpower_totals = manpower.get("totals") if isinstance(manpower.get("totals"), Mapping) else {}
+    if manpower.get("daily") or manpower_totals:
+        for item in appendices:
+            if _appendix_source_number(item) == "6.5":
+                item["status"] = "Attached"
+                item["content"] = "__reviewed_manpower__"
+                break
+    photos = [item for item in _as_list(report.get("photo_documentation")) if isinstance(item, Mapping)]
+    if photos:
+        for item in appendices:
+            if _appendix_source_number(item) == "6.6":
+                item["status"] = "Attached"
+                item["content"] = "__reviewed_photos__"
+                break
+
+    # Keep all appendix definitions in ``appendices`` for future data, but only
+    # render appendices that are actually available for this report.  Hidden
+    # entries are therefore also omitted automatically from the TOC because no
+    # heading flowable is emitted for them.
+    visible_appendices = _renumber_visible_appendices(
+        [item for item in appendices if _appendix_is_visible(item)]
     )
-    result = render_monthly_report(
-        draft,
-        logo_path=logo_path,
-        photo_base_dir=photo_base_dir,
+
+    story: list[Flowable] = [
+        Spacer(1, 1),
+        NextPageTemplate("body"),
+        PageBreak(),
+        Paragraph("Table of Contents", styles["toc_title"]),
+    ]
+    toc = TableOfContents()
+    toc.dotsMinLevel = 0
+    toc.levelStyles = [
+        ParagraphStyle(
+            "MonthlyTOCLevel0",
+            fontName="Helvetica",
+            fontSize=10.5,
+            leading=11.5,
+            leftIndent=10,
+            firstLineIndent=-10,
+            spaceBefore=1,
+            spaceAfter=0,
+            textColor=BLACK,
+        ),
+        ParagraphStyle(
+            "MonthlyTOCLevel1",
+            fontName="Helvetica",
+            fontSize=9.5,
+            leading=10.5,
+            leftIndent=26,
+            firstLineIndent=-10,
+            spaceBefore=0,
+            spaceAfter=0,
+            textColor=BLACK,
+        ),
+    ]
+    story.extend([toc, PageBreak()])
+
+    story.extend([
+        _heading("1. Executive Summary", styles["h1"], 0),
+        _paragraph(_executive_summary(report, progress), styles["body"]),
+        Spacer(1, 6),
+        _progress_table(progress, styles, report_type=report_type),
+        Spacer(1, 18),
+        _heading("2. Safety Status", styles["h1"], 0),
+        Paragraph("<b>Status summary:</b>", styles["body"]),
+        _safety_table(report.get("safety"), styles),
+        PageBreak(),
+    ])
+
+    story.append(_heading("3. Engineering", styles["h1"], 0))
+    story.append(_heading("3.1 Status Engineering", styles["h2"], 1))
+    story.extend(_content_flowables(
+        _client_facing_missing_summary(report.get("engineering"), section="engineering"),
+        styles,
+        empty_message="No engineering status data was supplied in the available Daily Reports.",
+        bullets=True,
+    ))
+    story.append(PageBreak())
+
+    procurement = _client_facing_missing_summary(
+        report.get("procurement"),
+        section="procurement",
     )
-    if hasattr(result, "seek") and hasattr(result, "getvalue"):
-        result.seek(0)
-        return result
-    raise TypeError(f"{_report_name(draft.get('report_type') or 'monthly')} PDF renderer did not return a BytesIO object")
+    summary, po_rows, embedded_equipment, embedded_shipments = _po_rows(procurement)
+    if _plain(summary):
+        procurement_intro = [_paragraph(summary, styles["body"]), Spacer(1, 3)]
+    else:
+        procurement_intro = []
+    equipment = report.get("equipment_delivery", embedded_equipment)
+    shipments = report.get("shipments", embedded_shipments)
 
+    story.append(_heading("4. Procurement", styles["h1"], 0))
+    story.extend(procurement_intro)
+    story.append(_heading("4.1 Procurement Status", styles["h2"], 1))
+    story.extend([_procurement_table(po_rows, styles), Spacer(1, 10)])
+    story.append(_heading("4.2 Equipment Delivery Status", styles["h2"], 1))
+    equipment_rows = []
+    equipment_summary = equipment
+    if isinstance(equipment, Mapping):
+        equipment_summary = equipment.get("summary")
+        equipment_rows = [
+            row for row in _as_list(_value(equipment, "rows", "items", default=[]))
+            if isinstance(row, Mapping)
+        ]
+    elif isinstance(equipment, Sequence) and not isinstance(equipment, (str, bytes, bytearray)):
+        equipment_rows = [row for row in equipment if isinstance(row, Mapping)]
+        if equipment_rows:
+            equipment_summary = None
+    if equipment_rows:
+        story.extend([_equipment_table(equipment_rows, styles), Spacer(1, 10)])
+    else:
+        story.extend(_content_flowables(
+            equipment_summary, styles,
+            empty_message="No equipment delivery information supplied.", bullets=True,
+        ))
+    story.append(_heading("4.3 Shipment Status", styles["h2"], 1))
+    shipment_rows = [row for row in _as_list(shipments) if isinstance(row, Mapping)]
+    if isinstance(shipments, Mapping):
+        shipment_rows = [
+            row for row in _as_list(_value(shipments, "rows", "items", default=[]))
+            if isinstance(row, Mapping)
+        ]
+    story.append(_shipment_table(shipment_rows, styles))
+    story.append(PageBreak())
 
-def register_monthly_routes(
-    app,
-    *,
-    data_dir: str,
-    config_provider: Callable[[], dict[str, Any]],
-    activity_logger: Callable[[str, str, str], None] | None = None,
-) -> None:
-    """Register Weekly/Monthly Report endpoints on the existing Flask application."""
-
-    def require_login_json():
-        if "username" not in session:
-            return jsonify({"error": "Login required."}), 401
-        return None
-
-    @app.post("/monthly/compile/stored")
-    def compile_monthly_stored():
-        auth = require_login_json()
-        if auth:
-            return auth
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return jsonify({"error": "Invalid report compile request."}), 400
-        kind = "monthly"
-        pending_draft_id = ""
-        draft_saved = False
-        try:
-            kind = _report_type(body.get("report_type") or "monthly")
-            mode = _normalise_report_mode(kind, body.get("report_mode"))
-            start, end = _parse_period(body.get("date_from"), body.get("date_to"), kind, mode)
-            project_no = _clean_text(body.get("project_no"), 250)
-            project_title = _clean_text(body.get("project_title"), 500)
-            if not project_no:
-                raise ValueError("Select a project first.")
-            include_all = bool(body.get("include_all_users")) and bool(session.get("is_admin"))
-            username = None if include_all else session["username"]
-            records = list_canonical_records(
-                data_dir,
-                username=username,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-            )
-            if not records:
-                error = (
-                    "No final stored JSON was found for this project and weekly period. "
-                    "Use Upload Daily Report PDF for older reports."
-                    if kind == "weekly"
-                    else "No final stored JSON was found for this project and period. Use Upload Daily Report PDF for older reports."
-                )
-                return jsonify({
-                    "error": error
-                }), 404
-
-            source_validation = build_source_validation(
-                records,
-                selected_project_no=project_no,
-                selected_project_title=project_title,
-            )
-            provisional_records = _provisional_project_records(
-                records,
-                source_validation,
-                project_no=project_no,
-                project_title=project_title,
-            )
-            aggregated = aggregate_monthly_records(
-                provisional_records,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                project_no=project_no,
-                expected_dates=_expected_dates(start, end),
-            )
-            selected_ids = {
-                str(item.get("report_id") or "")
-                for item in aggregated.get("source_records", [])
-                if isinstance(item, dict)
-            }
-            selected_records = [
-                record for record in provisional_records
-                if not selected_ids or str(record.get("report_id") or "") in selected_ids
-            ]
-
-            # Hydrate only the records that aggregation actually selected.
-            # Unrelated projects and superseded revisions must not consume the
-            # draft's 60-photo/byte budget.
-            pending_draft_id = uuid.uuid4().hex
-            draft_photo_dir = _draft_photo_dir(
-                data_dir,
-                session["username"],
-                pending_draft_id,
-            )
-            if draft_photo_dir is None:
-                raise ValueError("Invalid report draft photo directory")
-            photo_warnings = attach_canonical_photo_candidates(
-                selected_records,
-                data_dir,
-                draft_photo_dir,
-            )
-            photo_warnings.extend(_bound_record_photo_candidates(selected_records))
-            # Rebuild the same source groups with photo warnings included in
-            # the confirmation form. Selection itself remains unchanged.
-            source_validation = build_source_validation(
-                records,
-                selected_project_no=project_no,
-                selected_project_title=project_title,
-                issues=photo_warnings,
-            )
-            manifest = _source_manifest(selected_records, "stored_json")
-            draft = _prepare_draft(
-                aggregated,
-                project_no=project_no,
-                project_title=project_title,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                report_mode=mode,
-                source_method="stored_json",
-                source_manifest=manifest,
-                report_context=_latest_report_context(selected_records),
-                extra_warnings=photo_warnings,
-                report_type=kind,
-            )
-            draft["source_validation"] = source_validation
-            draft["_source_records"] = copy.deepcopy(records)
-            draft["photo_documentation"] = _photo_references_for_records(selected_records)
-            draft_id = _save_draft(
-                data_dir,
-                session["username"],
-                draft,
-                draft_id=pending_draft_id,
-            )
-            draft_saved = True
-            draft["draft_id"] = draft_id
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except ValueError as exc:
-            if pending_draft_id and not draft_saved:
-                _remove_draft_assets(data_dir, session["username"], pending_draft_id)
-            return jsonify({"error": str(exc)}), 400
-        except Exception as exc:
-            if pending_draft_id and not draft_saved:
-                _remove_draft_assets(data_dir, session["username"], pending_draft_id)
-            report_name = _report_name(kind)
-            app.logger.exception("Stored JSON %s compilation failed", kind)
-            return jsonify({"error": f"{report_name} compilation failed: {exc}"}), 500
-
-    @app.post("/monthly/upload-session/start")
-    def start_monthly_upload_session():
-        auth = require_login_json()
-        if auth:
-            return auth
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return jsonify({"error": "Invalid upload session request."}), 400
-        try:
-            kind = _report_type(body.get("report_type") or "monthly")
-            mode = _normalise_report_mode(kind, body.get("report_mode"))
-            start, end = _parse_period(body.get("date_from"), body.get("date_to"), kind, mode)
-            project_no = _clean_text(body.get("project_no"), 250)
-            project_title = _clean_text(body.get("project_title"), 500)
-            if not project_no:
-                raise ValueError("Select a project first.")
-
-            raw_files = body.get("files")
-            if not isinstance(raw_files, list) or not raw_files:
-                raise ValueError("Choose at least one Daily Report PDF.")
-            if len(raw_files) > _MAX_UPLOAD_FILES:
-                return jsonify({
-                    "error": f"A maximum of {_MAX_UPLOAD_FILES} PDF files can be compiled at once."
-                }), 413
-
-            planned_files: dict[str, dict[str, Any]] = {}
-            for raw in raw_files:
-                if not isinstance(raw, dict):
-                    raise ValueError("Invalid PDF upload list.")
-                file_id = str(raw.get("file_id") or "")
-                if not _UPLOAD_FILE_ID_RE.fullmatch(file_id) or file_id in planned_files:
-                    raise ValueError("Each PDF must have a unique upload ID.")
-                filename = _clean_text(raw.get("filename"), 255) or "report.pdf"
-                try:
-                    size_bytes = int(raw.get("size_bytes") or 0)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(f"{filename}: invalid file size.") from exc
-                if size_bytes < 0:
-                    raise ValueError(f"{filename}: invalid file size.")
-                if size_bytes > DEFAULT_LIMITS.max_bytes:
-                    return jsonify({
-                        "error": (
-                            f"{filename} is larger than the {DEFAULT_LIMITS.max_bytes // (1024 * 1024)} MB "
-                            "per-file limit."
-                        )
-                    }), 413
-                planned_files[file_id] = {
-                    "file_id": file_id,
-                    "filename": filename,
-                    "size_bytes": size_bytes,
-                }
-
-            username = session["username"]
-            _cleanup_upload_sessions(data_dir, username)
-            root = _upload_sessions_dir(data_dir, username)
-            requested_session_id = str(body.get("upload_session_id") or "")
-            if requested_session_id and not _DRAFT_ID_RE.fullmatch(requested_session_id):
-                raise ValueError("Invalid upload session ID.")
-            upload_session_id = requested_session_id or uuid.uuid4().hex
-            directory = root / upload_session_id
-            if directory.exists():
-                loaded = _load_upload_session(data_dir, username, upload_session_id)
-                if loaded is None:
-                    return jsonify({
-                        "error": "This upload session is still being prepared. Retry shortly."
-                    }), 409
-                _, existing = loaded
-                comparable_keys = (
-                    "report_type", "report_mode", "project_no", "project_title", "date_from", "date_to", "files"
-                )
-                candidate = {
-                    "report_type": kind,
-                    "report_mode": mode,
-                    "project_no": project_no,
-                    "project_title": project_title,
-                    "date_from": start.strftime("%Y-%m-%d"),
-                    "date_to": end.strftime("%Y-%m-%d"),
-                    "files": planned_files,
-                }
-                if all(existing.get(key) == candidate.get(key) for key in comparable_keys):
-                    return jsonify({
-                        "ok": True,
-                        "cached": True,
-                        "upload_session_id": upload_session_id,
-                        "file_count": len(planned_files),
-                        "max_file_bytes": DEFAULT_LIMITS.max_bytes,
-                    })
-                return jsonify({
-                    "error": "Upload session ID is already used for a different report setup."
-                }), 409
-
-            active_count = sum(
-                1
-                for path in root.iterdir()
-                if path.is_dir()
-                and _DRAFT_ID_RE.fullmatch(path.name)
-                and not (path / "result.json").is_file()
-            )
-            if active_count >= _MAX_ACTIVE_UPLOAD_SESSIONS:
-                return jsonify({
-                    "error": "Too many unfinished upload sessions. Finish or retry the current report first."
-                }), 429
-
-            directory.mkdir()
-            (directory / "items").mkdir()
-            manifest = {
-                "schema_version": "report-upload-session/1",
-                "upload_session_id": upload_session_id,
-                "owner": username,
-                "created_at": datetime.now().isoformat(timespec="seconds"),
-                "report_type": kind,
-                "report_mode": mode,
-                "project_no": project_no,
-                "project_title": project_title,
-                "date_from": start.strftime("%Y-%m-%d"),
-                "date_to": end.strftime("%Y-%m-%d"),
-                "files": planned_files,
-            }
-            _atomic_json(directory / "session.json", manifest)
-            return jsonify({
-                "ok": True,
-                "cached": False,
-                "upload_session_id": upload_session_id,
-                "file_count": len(planned_files),
-                "max_file_bytes": DEFAULT_LIMITS.max_bytes,
-            })
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception:
-            app.logger.exception("Could not start PDF upload session")
-            return jsonify({"error": "Could not start PDF upload session. Retry or check the server logs."}), 500
-
-    @app.post("/monthly/upload-session/<upload_session_id>/file")
-    def upload_monthly_session_file(upload_session_id: str):
-        auth = require_login_json()
-        if auth:
-            return auth
-        if request.content_length is not None and request.content_length > _MAX_STAGED_REQUEST_BYTES:
-            return jsonify({
-                "error": f"Upload exceeds the {DEFAULT_LIMITS.max_bytes // (1024 * 1024)} MB per-file limit."
-            }), 413
-        loaded = _load_upload_session(data_dir, session["username"], upload_session_id)
-        if loaded is None:
-            return jsonify({"error": "Upload session not found or expired."}), 404
-        directory, manifest = loaded
-        if (directory / "result.json").is_file():
-            return jsonify({"error": "This upload session has already been compiled."}), 409
-
-        # The UI sends the stable ID as a header so a retry can be rejected as
-        # busy before Werkzeug parses another large multipart body.
-        file_id = str(request.headers.get("X-Upload-File-ID") or "")
-        if not file_id:
-            file_id = str(request.form.get("file_id") or "")
-        planned = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
-        if not _UPLOAD_FILE_ID_RE.fullmatch(file_id) or file_id not in planned:
-            return jsonify({"error": "Unknown PDF upload ID."}), 400
-
-        existing = _load_upload_item(directory, file_id)
-        if existing is not None:
-            return jsonify({"ok": True, "cached": True, "item": _public_upload_item(existing)})
-
-        operation_lock = _acquire_upload_operation_lock(directory)
-        if operation_lock is None:
-            return jsonify({
-                "error": "This upload session is busy processing another request. Retry this file shortly."
-            }), 409
-        try:
-            loaded = _load_upload_session(data_dir, session["username"], upload_session_id)
-            if loaded is None:
-                return jsonify({"error": "Upload session not found or expired."}), 404
-            directory, manifest = loaded
-            if (directory / "result.json").is_file():
-                return jsonify({"error": "This upload session has already been compiled."}), 409
-            existing = _load_upload_item(directory, file_id)
-            if existing is not None:
-                return jsonify({"ok": True, "cached": True, "item": _public_upload_item(existing)})
-
-            uploads = request.files.getlist("file")
-            if len(uploads) != 1:
-                return jsonify({"error": "Upload exactly one Daily Report PDF per request."}), 400
-            upload = uploads[0]
-            planned_file = planned[file_id] if isinstance(planned[file_id], dict) else {}
-            filename = _clean_text(upload.filename, 255) or str(planned_file.get("filename") or "report.pdf")
-            warnings: list[str] = []
-            record: dict[str, Any] | None = None
-            source_size = int(planned_file.get("size_bytes") or 0)
-
-            if not filename.lower().endswith(".pdf"):
-                warnings.append(f"{filename}: only PDF files can be uploaded; file excluded.")
-            else:
-                try:
-                    config = config_provider()
-                    known_projects = config.get("projects", []) if isinstance(config, dict) else []
-                    imported = import_daily_report_pdf(
-                        upload.stream,
-                        filename=filename,
-                        known_projects=known_projects,
-                    )
-                    record, warnings = _record_from_uploaded_pdf(
-                        imported,
-                        filename=filename,
-                        username=session["username"],
-                        project_no=str(manifest.get("project_no") or ""),
-                        project_title=str(manifest.get("project_title") or ""),
-                        date_from=str(manifest.get("date_from") or ""),
-                        date_to=str(manifest.get("date_to") or ""),
-                        report_type=str(manifest.get("report_type") or "monthly"),
-                    )
-                    if record is not None:
-                        candidates, photo_warnings = extract_pdf_photo_candidates(
-                            upload.stream,
-                            filename=filename,
-                            areas=_record_photo_areas(record),
-                        )
-                        photo_references = store_photo_candidates(
-                            candidates,
-                            directory / "assets",
-                            source_report_id=str(record.get("report_id") or ""),
-                            max_total_bytes=DEFAULT_PHOTO_LIMITS.max_total_asset_bytes_per_draft,
-                        )
-                        record["_photo_candidates"] = photo_references
-                        if len(photo_references) < len(candidates):
-                            warnings.append(
-                                f"{filename}: some photos were excluded by the report draft asset limit."
-                            )
-                        warnings.extend(photo_warnings)
-                    source = imported.get("source") if isinstance(imported.get("source"), dict) else {}
-                    source_size = int(source.get("size_bytes") or source_size)
-                except PDFImportError as exc:
-                    warnings.append(f"{filename}: {exc}; file excluded.")
-                except Exception:
-                    app.logger.exception("Staged PDF import failed for %s", filename)
-                    return jsonify({
-                        "error": f"{filename}: PDF processing failed. Retry this file or check the server logs."
-                    }), 500
-
-            item = {
-                "file_id": file_id,
-                "filename": filename,
-                "status": "uploaded" if record is not None else "skipped",
-                "included": record is not None,
-                "report_date": _record_date(record) if record is not None else "",
-                "size_bytes": source_size,
-                "warnings": warnings,
-                "record": record,
-            }
-            _atomic_json(directory / "items" / f"{file_id}.json", item)
-            try:
-                os.utime(directory, None)
-            except OSError:
-                pass
-            return jsonify({"ok": True, "cached": False, "item": _public_upload_item(item)})
-        finally:
-            try:
-                operation_lock.rmdir()
-            except OSError:
-                pass
-
-    @app.post("/monthly/upload-session/<upload_session_id>/compile")
-    def compile_monthly_upload_session(upload_session_id: str):
-        auth = require_login_json()
-        if auth:
-            return auth
-        loaded = _load_upload_session(data_dir, session["username"], upload_session_id)
-        if loaded is None:
-            return jsonify({"error": "Upload session not found or expired."}), 404
-        directory, manifest = loaded
-
-        result_path = directory / "result.json"
-        if result_path.is_file():
-            try:
-                result = json.loads(result_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError):
-                result = {}
-            draft_id = str(result.get("draft_id") or "") if isinstance(result, dict) else ""
-            draft = _load_draft(data_dir, session["username"], draft_id)
-            if draft is None:
-                return jsonify({"error": "The compiled upload draft is no longer available."}), 410
-            return jsonify({"ok": True, "cached": True, "draft_id": draft_id, "draft": draft})
-
-        operation_lock = _acquire_upload_operation_lock(directory)
-        if operation_lock is None:
-            return jsonify({"error": "This upload session is already being compiled. Please wait."}), 409
-
-        try:
-            if result_path.is_file():
-                try:
-                    result = json.loads(result_path.read_text(encoding="utf-8"))
-                except (OSError, ValueError, TypeError):
-                    result = {}
-                draft_id = str(result.get("draft_id") or "") if isinstance(result, dict) else ""
-                draft = _load_draft(data_dir, session["username"], draft_id)
-                if draft is None:
-                    return jsonify({"error": "The compiled upload draft is no longer available."}), 410
-                return jsonify({"ok": True, "cached": True, "draft_id": draft_id, "draft": draft})
-
-            planned = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
-            items: list[dict[str, Any]] = []
-            missing: list[str] = []
-            for file_id in planned:
-                item = _load_upload_item(directory, file_id)
-                if item is None:
-                    missing.append(file_id)
-                else:
-                    items.append(item)
-            if missing:
-                return jsonify({
-                    "error": f"{len(missing)} PDF file(s) are still waiting to upload or retry.",
-                    "pending_file_ids": missing,
-                }), 409
-
-            kind = _report_type(manifest.get("report_type") or "monthly")
-            mode = _normalise_report_mode(kind, manifest.get("report_mode"))
-            start, end = _parse_period(
-                manifest.get("date_from"),
-                manifest.get("date_to"),
-                kind,
-                mode,
-            )
-            project_no = _clean_text(manifest.get("project_no"), 250)
-            project_title = _clean_text(manifest.get("project_title"), 500)
-            records: list[dict[str, Any]] = []
-            seen_hashes: set[str] = set()
-            warnings = [
-                "Uploaded PDF data was normalized from a Daily Report template. "
-                "Project identity, manpower, man-hours, warnings, and editable summaries must be validated before issue."
-            ]
-            for item in items:
-                for warning in item.get("warnings", []):
-                    warning_text = str(warning).strip()
-                    if warning_text:
-                        warnings.append(warning_text)
-                record = item.get("record") if isinstance(item.get("record"), dict) else None
-                if record is None:
-                    continue
-                source = record.get("source") if isinstance(record.get("source"), dict) else {}
-                digest = str(source.get("sha256") or "")
-                if digest and digest in seen_hashes:
-                    warnings.append(f"{item.get('filename', 'report.pdf')}: duplicate PDF skipped.")
-                    continue
-                if digest:
-                    seen_hashes.add(digest)
-                records.append(record)
-
-            if not records:
-                error = (
-                    "None of the uploaded PDFs could be included in this Weekly Report. "
-                    "Check the project, period, text layer, and file warnings."
-                    if kind == "weekly"
-                    else "None of the uploaded PDFs could be included. Check the project, period, text layer, and file warnings."
-                )
-                return jsonify({"error": error, "warnings": warnings}), 400
-
-            if kind == "weekly":
-                # The first day is derived from report content, not browser
-                # selection order or the provisional dates in the form.
-                start, end = _rolling_week_period(records)
-                end_text = end.strftime("%Y-%m-%d")
-                in_window: list[dict[str, Any]] = []
-                for record in records:
-                    report_date = _record_date(record)
-                    if report_date <= end_text:
-                        in_window.append(record)
-                    else:
-                        source = record.get("source") if isinstance(record.get("source"), dict) else {}
-                        warnings.append(
-                            f"{source.get('filename') or 'report.pdf'}: date {report_date} is outside the "
-                            f"rolling 7-day period ending {end_text}; file excluded."
-                        )
-                records = in_window
-
-            warnings.extend(_bound_record_photo_candidates(records))
-
-            source_validation = build_source_validation(
-                records,
-                selected_project_no=project_no,
-                selected_project_title=project_title,
-                issues=warnings,
-            )
-            provisional_records = _provisional_project_records(
-                records,
-                source_validation,
-                project_no=project_no,
-                project_title=project_title,
-            )
-            aggregated = aggregate_monthly_records(
-                provisional_records,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                project_no=project_no,
-                expected_dates=_expected_dates(start, end),
-            )
-            selected_ids = {
-                str(item.get("report_id") or "")
-                for item in aggregated.get("source_records", [])
-                if isinstance(item, dict)
-            }
-            selected_records = [
-                record for record in provisional_records
-                if not selected_ids or str(record.get("report_id") or "") in selected_ids
-            ]
-            source_manifest = _source_manifest(selected_records, "uploaded_pdf")
-            draft = _prepare_draft(
-                aggregated,
-                project_no=project_no,
-                project_title=project_title,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                report_mode=mode,
-                source_method="uploaded_pdf",
-                source_manifest=source_manifest,
-                report_context=_latest_report_context(selected_records),
-                extra_warnings=warnings,
-                report_type=kind,
-            )
-            draft["source_validation"] = source_validation
-            draft["_source_records"] = copy.deepcopy(records)
-            draft["photo_documentation"] = _photo_references_for_records(selected_records)
-            # Reusing the random upload-session ID closes the crash window
-            # between saving the draft and writing the small result tombstone.
-            draft_photo_dir = _draft_photo_dir(
-                data_dir,
-                session["username"],
-                upload_session_id,
-            )
-            if draft_photo_dir is None:
-                raise ValueError("Invalid report draft photo directory")
-            copy_photo_assets(
-                _all_photo_references(records),
-                directory / "assets",
-                draft_photo_dir,
-            )
-            draft_id = _save_draft(
-                data_dir,
-                session["username"],
-                draft,
-                draft_id=upload_session_id,
-            )
-            draft["draft_id"] = draft_id
-            _atomic_json(result_path, {
-                "status": "compiled",
-                "draft_id": draft_id,
-                "compiled_at": datetime.now().isoformat(timespec="seconds"),
-            })
-            try:
-                shutil.rmtree(directory / "items")
-            except OSError:
-                pass
-            return jsonify({"ok": True, "cached": False, "draft_id": draft_id, "draft": draft})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception:
-            kind = manifest.get("report_type") or "monthly"
-            app.logger.exception("Staged uploaded PDF %s compilation failed", kind)
-            return jsonify({
-                "error": f"{_report_name(kind)} PDF compilation failed. Retry or check the server logs."
-            }), 500
-        finally:
-            try:
-                operation_lock.rmdir()
-            except OSError:
-                pass
-
-    @app.delete("/monthly/upload-session/<upload_session_id>")
-    def delete_monthly_upload_session(upload_session_id: str):
-        auth = require_login_json()
-        if auth:
-            return auth
-        directory = _upload_session_dir(data_dir, session["username"], upload_session_id)
-        if directory is None or not directory.is_dir():
-            return jsonify({"error": "Upload session not found or expired."}), 404
-        operation_lock = _acquire_upload_operation_lock(directory)
-        if operation_lock is None:
-            return jsonify({"error": "Upload session is currently busy."}), 409
-        try:
-            _remove_upload_session(data_dir, session["username"], upload_session_id)
-            return jsonify({"ok": True})
-        finally:
-            try:
-                operation_lock.rmdir()
-            except OSError:
-                pass
-
-    @app.post("/monthly/compile/upload")
-    def compile_monthly_upload():
-        auth = require_login_json()
-        if auth:
-            return auth
-        uploads = request.files.getlist("files")
-        if not uploads:
-            return jsonify({"error": "Choose at least one Daily Report PDF."}), 400
-        if len(uploads) > _MAX_UPLOAD_FILES:
-            return jsonify({"error": f"A maximum of {_MAX_UPLOAD_FILES} PDF files can be compiled at once."}), 413
-        kind = "monthly"
-        pending_draft_id = uuid.uuid4().hex
-        draft_saved = False
-        try:
-            kind = _report_type(request.form.get("report_type") or "monthly")
-            mode = _normalise_report_mode(kind, request.form.get("report_mode"))
-            start, end = _parse_period(
-                request.form.get("date_from"),
-                request.form.get("date_to"),
-                kind,
-                mode,
-            )
-            project_no = _clean_text(request.form.get("project_no"), 250)
-            project_title = _clean_text(request.form.get("project_title"), 500)
-            if not project_no:
-                raise ValueError("Select a project first.")
-            config = config_provider()
-            known_projects = config.get("projects", []) if isinstance(config, dict) else []
-            records = []
-            warnings = [
-                "Uploaded PDF data was normalized from a Daily Report template. "
-                "Project identity, manpower, man-hours, warnings, and editable summaries must be validated before issue."
-            ]
-            for upload in uploads:
-                filename = str(upload.filename or "report.pdf")
-                if not filename.lower().endswith(".pdf"):
-                    warnings.append(f"Skipped non-PDF file: {filename}")
-                    continue
-                try:
-                    imported = import_daily_report_pdf(
-                        upload.stream,
-                        filename=filename,
-                        known_projects=known_projects,
-                    )
-                except PDFImportError as exc:
-                    warnings.append(f"{filename}: {exc}")
-                    continue
-                record, imported_warnings = _record_from_uploaded_pdf(
-                    imported,
-                    filename=filename,
-                    username=session["username"],
-                    project_no=project_no,
-                    project_title=project_title,
-                    date_from=start.strftime("%Y-%m-%d"),
-                    date_to=end.strftime("%Y-%m-%d"),
-                    report_type=kind,
-                )
-                warnings.extend(imported_warnings)
-                if record is not None:
-                    candidates, photo_warnings = extract_pdf_photo_candidates(
-                        upload.stream,
-                        filename=filename,
-                        areas=_record_photo_areas(record),
-                    )
-                    pending_assets = _draft_photo_dir(
-                        data_dir,
-                        session["username"],
-                        pending_draft_id,
-                    )
-                    if pending_assets is None:
-                        raise ValueError("Invalid report draft photo directory")
-                    photo_references = store_photo_candidates(
-                        candidates,
-                        pending_assets,
-                        source_report_id=str(record.get("report_id") or ""),
-                        max_total_bytes=DEFAULT_PHOTO_LIMITS.max_total_asset_bytes_per_draft,
-                    )
-                    record["_photo_candidates"] = photo_references
-                    if len(photo_references) < len(candidates):
-                        warnings.append(
-                            f"{filename}: some photos were excluded by the report draft asset limit."
-                        )
-                    warnings.extend(photo_warnings)
-                    records.append(record)
-
-            if not records:
-                _remove_draft_assets(data_dir, session["username"], pending_draft_id)
-                error = (
-                    "None of the uploaded PDFs could be included in this Weekly Report. "
-                    "Check the project, period, text layer, and file warnings."
-                    if kind == "weekly"
-                    else "None of the uploaded PDFs could be included. Check the project, period, text layer, and file warnings."
-                )
-                return jsonify({
-                    "error": error,
-                    "warnings": warnings,
-                }), 400
-            if kind == "weekly":
-                start, end = _rolling_week_period(records)
-                end_text = end.strftime("%Y-%m-%d")
-                in_window = []
-                for record in records:
-                    report_date = _record_date(record)
-                    if report_date <= end_text:
-                        in_window.append(record)
-                    else:
-                        source = record.get("source") if isinstance(record.get("source"), dict) else {}
-                        warnings.append(
-                            f"{source.get('filename') or 'report.pdf'}: date {report_date} is outside the "
-                            f"rolling 7-day period ending {end_text}; file excluded."
-                        )
-                records = in_window
-            warnings.extend(_bound_record_photo_candidates(records))
-            source_validation = build_source_validation(
-                records,
-                selected_project_no=project_no,
-                selected_project_title=project_title,
-                issues=warnings,
-            )
-            provisional_records = _provisional_project_records(
-                records,
-                source_validation,
-                project_no=project_no,
-                project_title=project_title,
-            )
-            aggregated = aggregate_monthly_records(
-                provisional_records,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                project_no=project_no,
-                expected_dates=_expected_dates(start, end),
-            )
-            selected_ids = {
-                str(item.get("report_id") or "")
-                for item in aggregated.get("source_records", [])
-                if isinstance(item, dict)
-            }
-            selected_records = [
-                record for record in provisional_records
-                if not selected_ids or str(record.get("report_id") or "") in selected_ids
-            ]
-            manifest = _source_manifest(selected_records, "uploaded_pdf")
-            draft = _prepare_draft(
-                aggregated,
-                project_no=project_no,
-                project_title=project_title,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                report_mode=mode,
-                source_method="uploaded_pdf",
-                source_manifest=manifest,
-                report_context=_latest_report_context(selected_records),
-                extra_warnings=warnings,
-                report_type=kind,
-            )
-            draft["source_validation"] = source_validation
-            draft["_source_records"] = copy.deepcopy(records)
-            draft["photo_documentation"] = _photo_references_for_records(selected_records)
-            draft_id = _save_draft(
-                data_dir,
-                session["username"],
-                draft,
-                draft_id=pending_draft_id,
-            )
-            draft_saved = True
-            draft["draft_id"] = draft_id
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except ValueError as exc:
-            if not draft_saved:
-                _remove_draft_assets(data_dir, session["username"], pending_draft_id)
-            return jsonify({"error": str(exc)}), 400
-        except Exception as exc:
-            if not draft_saved:
-                _remove_draft_assets(data_dir, session["username"], pending_draft_id)
-            app.logger.exception("Uploaded PDF %s compilation failed", kind)
-            prefix = "Weekly PDF" if kind == "weekly" else "PDF"
-            return jsonify({"error": f"{prefix} compilation failed: {exc}"}), 500
-
-    @app.post("/monthly/validate/<draft_id>")
-    def validate_monthly_report_sources(draft_id: str):
-        auth = require_login_json()
-        if auth:
-            return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return jsonify({"error": "Invalid Source Data Validation."}), 400
-        try:
-            review = _source_validation_payload(body.get("source_validation"))
-            if not review["confirmed"]:
-                raise ValueError("Confirm Source Data Validation before applying it.")
-            validation = draft.get("source_validation")
-            if not isinstance(validation, dict):
-                raise ValueError("This draft has no source validation data. Compile it again.")
-            raw_records = draft.get("_source_records")
-            if not isinstance(raw_records, list):
-                raise ValueError("The source records are unavailable. Compile the report again.")
-
-            project_records, project_excluded_records = resolve_project_records(
-                raw_records,
-                validation,
-                project_no=review["project_no"],
-                project_title=review["project_title"],
-                resolutions=review["project_resolutions"],
-            )
-            included_records, duplicate_excluded_records = resolve_duplicate_records(
-                project_records,
-                validation,
-                resolutions=review["duplicate_resolutions"],
-            )
-            excluded_records = project_excluded_records + duplicate_excluded_records
-            kind = _draft_report_type(draft)
-            mode = _normalise_report_mode(kind, draft.get("report_mode"))
-            period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
-            start, end = _parse_period(period.get("start"), period.get("end"), kind, mode)
-            project_no = review["project_no"]
-            project_title = review["project_title"]
-            aggregated = aggregate_monthly_records(
-                included_records,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                project_no=project_no,
-                expected_dates=_expected_dates(start, end),
-            )
-            selected_ids = {
-                str(item.get("report_id") or "")
-                for item in aggregated.get("source_records", [])
-                if isinstance(item, dict)
-            }
-            selected_records = [
-                record for record in included_records
-                if not selected_ids or str(record.get("report_id") or "") in selected_ids
-            ]
-            source_method = str(draft.get("source_method") or "stored_json")
-            photo_warnings: list[str] = []
-            if source_method == "stored_json":
-                draft_photo_dir = _draft_photo_dir(data_dir, username, draft_id)
-                if draft_photo_dir is None:
-                    raise ValueError("Invalid report draft photo directory")
-                # A changed project/revision choice gets a fresh, bounded
-                # hydration pass. Canonical files remain read-only.
-                photo_warnings = attach_canonical_photo_candidates(
-                    selected_records,
-                    data_dir,
-                    draft_photo_dir,
-                )
-                photo_warnings.extend(_bound_record_photo_candidates(selected_records))
-            warnings = [
-                str(value).strip()
-                for value in draft.get("warnings", [])
-                if str(value).strip()
-                and not (
-                    source_method == "stored_json"
-                    and _is_generated_stored_photo_warning(value)
-                )
-                and not re.fullmatch(
-                    r"(?:\d+ Daily Report source\(s\) were kept separate and excluded from this report"
-                    r"|\d+ duplicate Daily Report source\(s\) were not selected for this report)\.",
-                    str(value).strip(),
-                )
-            ]
-            if project_excluded_records:
-                warnings.append(
-                    f"{len(project_excluded_records)} Daily Report source(s) were kept separate and excluded from this report."
-                )
-            if duplicate_excluded_records:
-                warnings.append(
-                    f"{len(duplicate_excluded_records)} duplicate Daily Report source(s) were not selected for this report."
-                )
-            warnings.extend(photo_warnings)
-            refreshed = _prepare_draft(
-                aggregated,
-                project_no=project_no,
-                project_title=project_title,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                report_mode=mode,
-                source_method=source_method,
-                source_manifest=_source_manifest(
-                    selected_records,
-                    source_method,
-                ),
-                report_context=_latest_report_context(selected_records),
-                extra_warnings=warnings,
-                report_type=kind,
-            )
-            decisions = {
-                str(row.get("group_key") or ""): str(row.get("decision") or "")
-                for row in review["project_resolutions"]
-                if isinstance(row, dict)
-            }
-            applied_validation = copy.deepcopy(validation)
-            if source_method == "stored_json":
-                retained_issues = []
-                for issue in applied_validation.get("issues", []):
-                    if not isinstance(issue, dict):
-                        continue
-                    if not _is_generated_stored_photo_warning(issue.get("message")):
-                        retained_issues.append(issue)
-                retained_issues.extend(
-                    {"severity": "warning", "message": message}
-                    for message in photo_warnings
-                )
-                applied_validation["issues"] = retained_issues
-            for group in applied_validation.get("project_groups", []):
-                if isinstance(group, dict):
-                    group["decision"] = decisions.get(str(group.get("key") or ""), "")
-            duplicate_decisions = {
-                str(row.get("group_key") or ""): str(row.get("selected_record_id") or "")
-                for row in review["duplicate_resolutions"]
-                if isinstance(row, dict)
-            }
-            for group in applied_validation.get("duplicate_groups", []):
-                if isinstance(group, dict):
-                    group["selected_record_id"] = duplicate_decisions.get(
-                        str(group.get("key") or ""),
-                        "",
-                    )
-            applied_validation.update({
-                "applied": True,
-                "confirmed": True,
-                "confirmed_by": username,
-                "confirmed_at": datetime.now().isoformat(timespec="seconds"),
-                "selected_project_no": project_no,
-                "selected_project_title": project_title,
-                "notes": review["notes"],
-                "included_record_count": len(selected_records),
-                "excluded_record_count": len(excluded_records),
-                "project_excluded_record_count": len(project_excluded_records),
-                "duplicate_excluded_record_count": len(duplicate_excluded_records),
-            })
-            refreshed["source_validation"] = applied_validation
-            refreshed["_source_records"] = copy.deepcopy(raw_records)
-            refreshed["photo_documentation"] = _photo_references_for_records(
-                selected_records,
-                previous=draft.get("photo_documentation"),
-            )
-            refreshed["draft_id"] = draft_id
-            refreshed["owner"] = username
-            refreshed["created_at"] = draft.get(
-                "created_at", datetime.now().isoformat(timespec="seconds")
-            )
-            _update_draft(data_dir, username, refreshed)
-            if source_method == "stored_json":
-                _prune_draft_photo_assets(
-                    data_dir,
-                    username,
-                    draft_id,
-                    refreshed.get("photo_documentation"),
-                )
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": refreshed})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception:
-            app.logger.exception("Source validation failed for report draft %s", draft_id)
-            return jsonify({"error": "Source validation failed. Retry or check the server logs."}), 500
-
-    @app.post("/monthly/workforce/timesheet/<draft_id>/preview")
-    def preview_monthly_timesheet(draft_id: str):
-        auth = require_login_json()
-        if auth:
-            return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        try:
-            _require_applied_source_validation(draft)
-            period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
-            preview = compile_timesheets(
-                _workbook_uploads(),
-                start_date=period.get("start"),
-                end_date=period.get("end"),
-                cutoff_date=request.form.get("cutoff_date") or None,
-            )
-            set_timesheet_preview(draft, preview, actor=username)
-            draft.pop("ai_summary", None)
-            _update_draft(data_dir, username, draft)
-            if activity_logger:
-                activity_logger(username, "periodic_timesheet_reviewed", f"draft={draft_id}")
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except (TimesheetError, ValueError) as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception:
-            app.logger.exception("Timesheet preview failed for draft %s", draft_id)
-            return jsonify({"error": "Timesheet could not be analyzed. Check the workbook format."}), 500
-
-    @app.post("/monthly/workforce/timesheet/<draft_id>/decision")
-    def decide_monthly_timesheet(draft_id: str):
-        auth = require_login_json()
-        if auth:
-            return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return jsonify({"error": "Invalid timesheet decision."}), 400
-        try:
-            _require_applied_source_validation(draft)
-            decide_timesheet(
-                draft,
-                str(body.get("decision") or ""),
-                confirm_exceptions=bool(body.get("confirm_exceptions")),
-                actor=username,
-            )
-            draft.pop("ai_summary", None)
-            _update_draft(data_dir, username, draft)
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-
-    @app.post("/monthly/workforce/overtime/<draft_id>/preview")
-    def preview_monthly_overtime(draft_id: str):
-        auth = require_login_json()
-        if auth:
-            return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        try:
-            _require_applied_source_validation(draft)
-            period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
-            preview = parse_overtime_workbooks(
-                _workbook_uploads(),
-                period_start=period.get("start"),
-                period_end=period.get("end"),
-            )
-            set_overtime_preview(draft, preview, actor=username)
-            draft.pop("ai_summary", None)
-            _update_draft(data_dir, username, draft)
-            if activity_logger:
-                activity_logger(username, "periodic_overtime_reviewed", f"draft={draft_id}")
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception:
-            app.logger.exception("Overtime preview failed for draft %s", draft_id)
-            return jsonify({"error": "Overtime workbook could not be analyzed."}), 500
-
-    @app.post("/monthly/workforce/overtime/<draft_id>/decision")
-    def decide_monthly_overtime(draft_id: str):
-        auth = require_login_json()
-        if auth:
-            return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return jsonify({"error": "Invalid overtime decision."}), 400
-        try:
-            _require_applied_source_validation(draft)
-            decide_overtime(
-                draft,
-                str(body.get("decision") or ""),
-                resolutions=body.get("resolutions"),
-                record_resolutions=body.get("record_resolutions"),
-                confirm_exceptions=bool(body.get("confirm_exceptions")),
-                actor=username,
-            )
-            draft.pop("ai_summary", None)
-            _update_draft(data_dir, username, draft)
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-
-    @app.post("/monthly/workforce/reset/<draft_id>")
-    def reset_monthly_workforce(draft_id: str):
-        auth = require_login_json()
-        if auth:
-            return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        reset_workforce(draft)
-        draft.pop("ai_summary", None)
-        _update_draft(data_dir, username, draft)
-        return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-
-    @app.post("/monthly/ai-summary/<draft_id>")
-    def generate_monthly_ai_summary(draft_id: str):
-        auth = require_login_json()
-        if auth:
-            return auth
-        if _ai_admin_only() and not bool(session.get("is_admin")):
-            return jsonify({"error": "Only an administrator may use the paid AI summary service."}), 403
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        ai_lock: tuple[Path, str] | None = None
-        try:
-            _require_applied_source_validation(draft)
-            if has_pending_workforce_review(draft):
-                raise ValueError("Apply or keep every timesheet/overtime preview before generating AI suggestions.")
-            ai_lock = _acquire_ai_draft_lock(data_dir, username, draft_id)
-            if ai_lock is None:
-                return _ai_retry_response(
-                    "AI summary generation is already running for this report draft.",
-                    code="ai_generation_in_progress",
-                    status=409,
-                    retry_after=_AI_DRAFT_LOCK_RETRY_SECONDS,
-                )
-
-            # Reload after taking the cross-process lock. Another request may
-            # have updated validation or workforce decisions while this
-            # request was waiting to acquire it.
-            draft = _load_draft(data_dir, username, draft_id)
-            if draft is None:
-                return jsonify({"error": "Report draft not found."}), 404
-            _require_applied_source_validation(draft)
-            if has_pending_workforce_review(draft):
-                raise ValueError("Apply or keep every timesheet/overtime preview before generating AI suggestions.")
-
-            remaining = _ai_cooldown_remaining(draft)
-            if remaining:
-                return _ai_retry_response(
-                    f"Wait {remaining} seconds before retrying AI for this report draft.",
-                    code="ai_cooldown_active",
-                    status=429,
-                    retry_after=remaining,
-                )
-
-            # Persist the cooldown before the billable provider request. This
-            # prevents rapid retries after timeouts/provider failures and also
-            # closes the race between multiple Railway workers.
-            started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            draft["ai_request_control"] = {
-                "version": "periodic-ai-request-control/1",
-                "last_started_at": started_at,
-                "last_started_by": username,
-                "attempt_id": uuid.uuid4().hex,
-            }
-            _update_draft(data_dir, username, draft)
-            envelope = generate_ai_summary(draft)
-            raw = envelope.get("suggestion") if isinstance(envelope.get("suggestion"), dict) else {}
-            concerns = []
-            concern_evidence = []
-            concern_actions = (
-                raw.get("concern_actions")
-                if isinstance(raw.get("concern_actions"), list)
-                else []
-            )
-            for row in concern_actions[:75]:
-                if not isinstance(row, dict):
-                    continue
-                concern = _clean_text(row.get("concern"), 2_000)
-                action = _clean_text(row.get("corrective_action"), 2_000)
-                if concern or action:
-                    references = _clean_ai_references(row)
-                    concerns.append({
-                        "concern": concern,
-                        "corrective_action": action,
-                        **references,
-                    })
-                    concern_evidence.append(references)
-            lookahead = []
-            lookahead_evidence = []
-            for row in raw.get("lookahead", [])[:75] if isinstance(raw.get("lookahead"), list) else []:
-                text = _claim_text(row)
-                if text:
-                    lookahead.append(text)
-                    lookahead_evidence.append(_clean_ai_references(row))
-            current_activities = []
-            current_activity_evidence = []
-            for row in raw.get("current_activities", [])[:75] if isinstance(raw.get("current_activities"), list) else []:
-                if not isinstance(row, dict):
-                    continue
-                text = _claim_text(row)
-                area = _clean_text(row.get("area"), 200)
-                if text:
-                    references = _clean_ai_references(row)
-                    current_activities.append({
-                        "area": area or "Site",
-                        "text": text,
-                        **references,
-                    })
-                    current_activity_evidence.append(references)
-
-            # Preserve deterministic source status even when Claude omits it.
-            current_activities = _enrich_activity_statuses(current_activities, draft)
-
-            claim_evidence = [
-                _clean_ai_references(row)
-                for row in (raw.get("claims", [])[:75] if isinstance(raw.get("claims"), list) else [])
-            ]
-            citation_evidence = {
-                key: _clean_ai_references(raw.get(key))
-                for key in (
-                    "executive_summary",
-                    "engineering_summary",
-                    "procurement_summary",
-                    "site_summary",
-                )
-            }
-            citation_evidence.update({
-                "current_activities": current_activity_evidence,
-                "concern_actions": concern_evidence,
-                "lookahead": lookahead_evidence,
-                "claims": claim_evidence,
-            })
-            current_engineering = draft.get("engineering") if isinstance(draft.get("engineering"), dict) else {}
-            current_procurement = draft.get("procurement") if isinstance(draft.get("procurement"), dict) else {}
-            current_site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
-            display = {
-                # A missing AI section must never make the review look worse
-                # than the deterministic draft that existed before AI.
-                "executive_summary": _usable_ai_text(raw.get("executive_summary"))
-                or _clean_text(draft.get("executive_summary"), 4_000),
-                "engineering_summary": _usable_ai_text(raw.get("engineering_summary"))
-                or _clean_text(current_engineering.get("summary"), 4_000),
-                "procurement_summary": _usable_ai_text(raw.get("procurement_summary"))
-                or _clean_text(current_procurement.get("summary"), 4_000),
-                "site_summary": _usable_ai_text(raw.get("site_summary"))
-                or _clean_text(current_site.get("summary"), 4_000),
-                "current_activities": current_activities,
-                "concerns": concerns,
-                "lookahead": lookahead,
-                "citation_evidence": citation_evidence,
-                "missing_data": _clean_ai_missing_data(raw.get("missing_data")),
-            }
-            draft["ai_summary"] = {
-                "status": "suggested",
-                "requested_at": started_at,
-                "requested_by": username,
-                "suggestion": display,
-                "provider_envelope": envelope,
-            }
-            _update_draft(data_dir, username, draft)
-            if activity_logger:
-                activity_logger(username, "periodic_ai_suggestion_generated", f"draft={draft_id} model={envelope.get('model', '')}")
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except AISummaryError as exc:
-            app.logger.warning("AI summary failed code=%s retryable=%s", exc.code, exc.retryable)
-            if exc.code == "rate_limited":
-                return _ai_retry_response(
-                    str(exc),
-                    code="rate_limited",
-                    status=429,
-                    retry_after=30,
-                )
-            status = 503 if exc.code in {"missing_api_key", "billing_required"} else 502
-            return jsonify({"error": str(exc), "code": exc.code, "retryable": exc.retryable}), status
-        except Exception:
-            app.logger.exception("AI summary failed for draft %s", draft_id)
-            return jsonify({"error": "AI summary failed unexpectedly. The report content is unchanged."}), 500
-        finally:
-            _release_ai_draft_lock(ai_lock)
-
-    @app.post("/monthly/ai-summary/<draft_id>/decision")
-    def decide_monthly_ai_summary(draft_id: str):
-        auth = require_login_json()
-        if auth:
-            return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        state = draft.get("ai_summary") if isinstance(draft.get("ai_summary"), dict) else None
-        if state is None or state.get("status") != "suggested":
-            return jsonify({"error": "Generate an AI suggestion before saving a decision."}), 400
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict) or body.get("decision") not in {"accept", "reject"}:
-            return jsonify({"error": "AI decision must be accept or reject."}), 400
-        decision = str(body["decision"])
-        if decision == "accept":
-            try:
-                accepted = _clean_ai_review(body.get("suggestion"))
-            except ValueError as exc:
-                return jsonify({"error": str(exc)}), 400
-            engineering = draft.get("engineering") if isinstance(draft.get("engineering"), dict) else {}
-            procurement = draft.get("procurement") if isinstance(draft.get("procurement"), dict) else {}
-            site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
-
-            # Accept AI only where it actually improved/provided narrative.
-            # Empty/Not supplied values preserve the deterministic draft.
-            if accepted["executive_summary"] and accepted["executive_summary"].casefold() != "not supplied":
-                draft["executive_summary"] = accepted["executive_summary"]
-            if accepted["engineering_summary"] and accepted["engineering_summary"].casefold() != "not supplied":
-                engineering["summary"] = accepted["engineering_summary"]
-            if accepted["procurement_summary"] and accepted["procurement_summary"].casefold() != "not supplied":
-                procurement["summary"] = accepted["procurement_summary"]
-            if accepted["site_summary"] and accepted["site_summary"].casefold() != "not supplied":
-                site["summary"] = accepted["site_summary"]
-
-            # The original deterministic activities remain in draft["activities"].
-            # Once explicitly accepted, the site section may use Claude's
-            # source-grounded, de-duplicated bullets for the client-facing 5.2 section.
-            if accepted["current_activities"]:
-                ai_activities = _enrich_activity_statuses(
-                    copy.deepcopy(accepted["current_activities"]),
-                    draft,
-                )
-                site["this_month_activities"] = ai_activities
-                site["current_period_activities"] = ai_activities
-                site["this_period_activities"] = ai_activities
-                if _draft_report_type(draft) == "weekly":
-                    site["this_week_activities"] = ai_activities
-
-            # AI suggestions may improve wording, but accepting them must not
-            # erase deterministic constraints or look-ahead items already
-            # extracted from the Daily Reports.
-            existing_concerns = site.get("concerns") if isinstance(site.get("concerns"), list) else []
-            merged_concerns = copy.deepcopy(existing_concerns)
-            seen_concerns = {
-                (_clean_text(row.get("concern") if isinstance(row, dict) else row, 2_000).casefold(),
-                 _clean_text(row.get("corrective_action") if isinstance(row, dict) else "", 2_000).casefold())
-                for row in merged_concerns
-            }
-            for row in accepted["concerns"]:
-                key = (row["concern"].casefold(), row["corrective_action"].casefold())
-                if key not in seen_concerns:
-                    merged_concerns.append(row)
-                    seen_concerns.add(key)
-            existing_lookahead = site.get("next_period_activities", site.get("next_month_activities", []))
-            merged_lookahead = _list_text(existing_lookahead)
-            seen_lookahead = {item.casefold() for item in merged_lookahead}
-            for item in accepted["lookahead"]:
-                if item.casefold() not in seen_lookahead:
-                    merged_lookahead.append(item)
-                    seen_lookahead.add(item.casefold())
-            site["concerns"] = merged_concerns
-            site["next_month_activities"] = merged_lookahead
-            site["next_period_activities"] = merged_lookahead
-            if _draft_report_type(draft) == "weekly":
-                site["next_week_activities"] = merged_lookahead
-            draft["engineering"] = engineering
-            draft["procurement"] = procurement
-            draft["site"] = site
-            state["accepted_values"] = accepted
-        state["status"] = "accepted" if decision == "accept" else "rejected"
-        state["decided_by"] = username
-        state["decided_at"] = datetime.now().isoformat(timespec="seconds")
-        _update_draft(data_dir, username, draft)
-        return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-
-    @app.get("/monthly/photos/<draft_id>/<asset_id>")
-    def get_monthly_draft_photo(draft_id: str, asset_id: str):
-        auth = require_login_json()
-        if auth:
-            return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None or not is_asset_id(asset_id):
-            return jsonify({"error": "Photo not found."}), 404
-        photos = draft.get("photo_documentation")
-        allowed = {
-            str(item.get("asset_id") or "")
-            for item in (photos if isinstance(photos, list) else []) if isinstance(item, dict)
-        }
-        if asset_id not in allowed:
-            return jsonify({"error": "Photo not found."}), 404
-        directory = _draft_photo_dir(data_dir, username, draft_id, create=False)
-        path = directory / asset_filename(asset_id) if directory is not None else None
-        if path is None or not path.is_file():
-            return jsonify({"error": "Photo asset is unavailable."}), 404
-        return send_file(
-            path,
-            mimetype="image/jpeg",
-            as_attachment=False,
-            conditional=True,
-            max_age=3600,
+    site = report.get("site") if isinstance(report.get("site"), Mapping) else {}
+    if report_type == "weekly":
+        current_activity_keys = (
+            "this_period_activities",
+            "current_period_activities",
+            "this_period",
+            "current_period",
+            "this_week_activities",
+            "this_week",
+            "this_month_activities",
+            "this_month",
+            "activities",
         )
+        next_activity_keys = (
+            "next_period_activities",
+            "planned_next_period_activities",
+            "next_period",
+            "next_week_activities",
+            "next_week",
+            "next_month_activities",
+            "next_month",
+            "planned_activities",
+        )
+        current_heading = "5.2 This Week Activities"
+        next_heading = "5.3 Planned Activities Next Week"
+        current_empty = "No current-week activities supplied."
+        next_empty = "No next-week activities supplied."
+    else:
+        current_activity_keys = (
+            "this_month_activities",
+            "this_month",
+            "this_period_activities",
+            "current_period_activities",
+            "this_period",
+            "current_period",
+            "activities",
+        )
+        next_activity_keys = (
+            "next_month_activities",
+            "next_month",
+            "next_period_activities",
+            "planned_next_period_activities",
+            "next_period",
+            "planned_activities",
+        )
+        current_heading = "5.2 This Month Activities"
+        next_heading = "5.3 Planned Activities Next Month"
+        current_empty = "No current-month activities supplied."
+        next_empty = "No next-month activities supplied."
 
-    @app.patch("/monthly/photos/<draft_id>")
-    def update_monthly_draft_photos(draft_id: str):
-        auth = require_login_json()
-        if auth:
-            return auth
-        if request.content_length is not None and request.content_length > _MAX_PHOTO_REVIEW_BYTES:
-            return jsonify({"error": "Photo review request is too large."}), 413
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        body = request.get_json(silent=True)
-        photos = body.get("photos") if isinstance(body, dict) else None
-        if not isinstance(photos, list):
-            return jsonify({"error": "photos must be a list."}), 400
-        if len(photos) > DEFAULT_PHOTO_LIMITS.max_images_per_draft:
-            return jsonify({
-                "error": f"A report may contain at most {DEFAULT_PHOTO_LIMITS.max_images_per_draft} photos."
-            }), 400
+    current_activities = _value(
+        site,
+        *current_activity_keys,
+        default=_value(report, *current_activity_keys, default=[]),
+    )
+    next_activities = _value(
+        site,
+        *next_activity_keys,
+        default=_value(report, *next_activity_keys, default=[]),
+    )
+    story.append(_heading("5. Site Services / Construction", styles["h1"], 0))
+    site_summary = _plain(site.get("summary"))
+    if site_summary:
+        story.extend([_paragraph(site_summary, styles["body"]), Spacer(1, 3)])
+    story.append(_heading("5.1 Project Schedule Status", styles["h2"], 1))
+    story.extend(_content_flowables(
+        _value(site, "schedule_status", "project_schedule_status"), styles,
+        empty_message="See the overall schedule appendix when supplied.",
+    ))
+    story.append(_heading(current_heading, styles["h2"], 1))
+    story.extend(_activity_flowables(
+        current_activities,
+        styles, empty_message=current_empty,
+    ))
+    story.append(_heading(next_heading, styles["h2"], 1))
+    story.extend(_content_flowables(
+        next_activities,
+        styles, empty_message=next_empty, bullets=True,
+    ))
+    story.append(_heading(
+        "5.4 Area of Concern and Suggested Corrective Action", styles["h2"], 1
+    ))
+    concern_rows = _as_list(_value(site, "concerns", "constraints", default=report.get("constraints")))
+    concerns_table = _concerns_table(concern_rows, styles)
+    if concerns_table is None:
+        story.append(_paragraph(_constraint_reporting_message(report, site), styles["placeholder"]))
+    else:
+        story.append(concerns_table)
+    story.append(PageBreak())
 
-        current = draft.get("photo_documentation")
-        current_by_id = {
-            str(item.get("asset_id") or ""): item
-            for item in (current if isinstance(current, list) else []) if isinstance(item, dict)
-            and is_asset_id(item.get("asset_id"))
-        }
-        cleaned: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for index, item in enumerate(photos):
-            if not isinstance(item, dict):
-                return jsonify({"error": "Each photo review item must be an object."}), 400
-            asset_id = str(item.get("asset_id") or "")
-            if asset_id in seen or asset_id not in current_by_id:
-                return jsonify({"error": "Photo review contains an unknown or duplicate asset."}), 400
-            seen.add(asset_id)
-            reference = copy.deepcopy(current_by_id[asset_id])
-            reference.pop("data", None)
-            reference.pop("path", None)
-            reference["caption"] = _clean_text(item.get("caption"), 500)
-            reference["order"] = index
-            cleaned.append(reference)
+    if visible_appendices:
+        story.append(_heading("6. Appendices", styles["h1"], 0))
+        for item in visible_appendices:
+            story.append(_heading(_appendix_label(item), styles["appendix_item"], 1))
 
-        draft["photo_documentation"] = cleaned
-        _update_draft(data_dir, username, draft)
-        return jsonify({"ok": True, "count": len(cleaned), "photos": cleaned})
+    if curve is not None:
+        labels, planned, actual, illustrative = curve
+        curve_item = next(
+            (item for item in visible_appendices if _appendix_source_number(item) == "6.2"),
+            None,
+        )
+        curve_number = _plain(curve_item.get("number")) if curve_item else "6.1"
+        curve_title = _plain(curve_item.get("title"), "Progress S-Curve") if curve_item else "Progress S-Curve"
+        story.extend([
+            PageBreak(),
+            Paragraph(
+                escape(f"Appendix {curve_number} - {curve_title}", quote=False),
+                styles["h1"],
+            ),
+            Spacer(1, 10),
+            _SCurveFlowable(labels, planned, actual, illustrative=illustrative),
+        ])
 
-    @app.post("/monthly/preview/<draft_id>")
-    def preview_monthly_report(draft_id: str):
-        auth = require_login_json()
-        if auth:
-            return auth
-        draft = _load_draft(data_dir, session["username"], draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        kind = _draft_report_type(draft)
-        report_name = _report_name(kind)
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return jsonify({"error": "Invalid review data."}), 400
-        try:
-            reviewed = _apply_review(draft, body)
-            _update_draft(data_dir, session["username"], reviewed)
-            buffer = _render(
-                reviewed,
-                config_provider(),
-                photo_base_dir=_draft_photo_dir(
-                    data_dir,
-                    session["username"],
-                    draft_id,
-                    create=False,
-                ),
-            )
-            return send_file(
-                buffer,
-                mimetype="application/pdf",
-                as_attachment=False,
-                download_name=f"{report_name} Progress Report Preview.pdf",
-            )
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception as exc:
-            app.logger.exception("%s preview failed", report_name)
-            return jsonify({"error": f"{report_name} preview failed: {exc}"}), 500
+    for item in visible_appendices:
+        content = item.get("content")
+        if content in (None, "", [], {}):
+            continue
+        story.extend([
+            PageBreak(),
+            Paragraph(
+                escape(f"Appendix {item['number']} - {item['title']}", quote=False),
+                styles["h1"],
+            ),
+        ])
+        if content == "__reviewed_photos__":
+            story.extend(_photo_grid_flowables(
+                photos,
+                styles,
+                photo_base_dir=photo_base_dir,
+            ))
+        elif content == "__reviewed_manpower__":
+            story.extend(_manpower_appendix_flowables(manpower, styles))
+        else:
+            story.extend(_content_flowables(
+                content, styles, empty_message="No appendix content supplied.", bullets=True,
+            ))
+    return story
 
-    @app.post("/monthly/generate/<draft_id>")
-    def generate_monthly_report_route(draft_id: str):
-        auth = require_login_json()
-        if auth:
-            return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        kind = _draft_report_type(draft)
-        report_name = _report_name(kind)
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return jsonify({"error": "Invalid review data."}), 400
-        try:
-            reviewed = _apply_review(draft, body)
-            if reviewed.get("status") == "final" and not bool(body.get("confirm_final")):
-                return jsonify({
-                    "error": f"Confirm that all warnings, missing dates, and {kind} values were reviewed before saving a Final report."
-                }), 400
-            if reviewed.get("status") == "final":
-                reviewed["final_review"] = {
-                    "confirmed": True,
-                    "confirmed_by": username,
-                    "confirmed_at": datetime.now().isoformat(timespec="seconds"),
-                }
-            # Draft-local raw sources are needed only while applying project
-            # decisions. Do not copy them into the issued report JSON.
-            reviewed.pop("_source_records", None)
-            index = get_monthly_reports_index(data_dir, username)
-            same_period = [row for row in index if (
-                (row.get("report_type") or "monthly") == kind
-                and row.get("project_no") == reviewed.get("project_no")
-                and row.get("period_start") == reviewed.get("period", {}).get("start")
-                and row.get("period_end") == reviewed.get("period", {}).get("end")
-            )]
-            revision = max([int(row.get("revision", 0)) for row in same_period] or [0]) + 1
-            filename = _monthly_filename(reviewed, revision)
-            reports_dir = _monthly_user_dir(data_dir, username) / "reports"
-            pdf_path = reports_dir / filename
-            json_filename = f"{Path(filename).stem}.json"
-            json_path = reports_dir / json_filename
-            buffer = _render(
-                reviewed,
-                config_provider(),
-                photo_base_dir=_draft_photo_dir(
-                    data_dir,
-                    username,
-                    draft_id,
-                    create=False,
-                ),
-            )
-            pdf_bytes = buffer.getvalue()
-            temporary = pdf_path.with_name(f"{pdf_path.name}.{uuid.uuid4().hex}.tmp")
-            try:
-                with temporary.open("wb") as handle:
-                    handle.write(pdf_bytes)
-                os.replace(temporary, pdf_path)
-            finally:
-                if temporary.exists():
-                    try:
-                        temporary.unlink()
-                    except OSError:
-                        pass
 
-            reviewed["monthly_report_id"] = uuid.uuid4().hex
-            reviewed["report_id"] = reviewed["monthly_report_id"]
-            if kind == "weekly":
-                reviewed["weekly_report_id"] = reviewed["monthly_report_id"]
-            reviewed["revision"] = revision
-            reviewed["generated_at"] = datetime.now().isoformat(timespec="seconds")
-            reviewed["filename"] = filename
-            _atomic_json(json_path, _issued_report_copy(reviewed))
-            entry = {
-                "monthly_report_id": reviewed["monthly_report_id"],
-                "report_id": reviewed["monthly_report_id"],
-                "report_type": kind,
-                "filename": filename,
-                "json_filename": json_filename,
-                "project_no": reviewed.get("project_no", ""),
-                "project_title": reviewed.get("project_title", ""),
-                "period_start": reviewed.get("period", {}).get("start", ""),
-                "period_end": reviewed.get("period", {}).get("end", ""),
-                "status": reviewed.get("status", "draft"),
-                "source_method": reviewed.get("source_method", ""),
-                "revision": revision,
-                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "size_kb": round(len(pdf_bytes) / 1024, 1),
-            }
-            index.insert(0, entry)
-            _save_monthly_index(data_dir, username, index)
-            _update_draft(data_dir, username, reviewed)
-            if activity_logger:
-                detail = (
-                    f"project={entry['project_no']} period={entry['period_start']}..{entry['period_end']} revision={revision}"
-                )
-                if kind == "weekly":
-                    detail = f"type=weekly {detail}"
-                activity_logger(
-                    username,
-                    f"{kind}_report_generated",
-                    detail,
-                )
-            return jsonify({
-                "ok": True,
-                "filename": filename,
-                "download_url": url_for("download_monthly_report", filename=filename),
-            })
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception as exc:
-            app.logger.exception("%s report generation failed", report_name)
-            return jsonify({"error": f"{report_name} report generation failed: {exc}"}), 500
+def render_monthly_report(
+    report: Mapping[str, Any],
+    *,
+    logo_path: str | os.PathLike[str] | None = None,
+    photo_base_dir: str | os.PathLike[str] | None = None,
+) -> io.BytesIO:
+    """Render a Weekly or Monthly Progress Report and return a rewound buffer.
 
-    @app.get("/monthly/download/<path:filename>")
-    def download_monthly_report(filename: str):
-        if "username" not in session:
-            return "Login required", 401
-        username = session["username"]
-        basename = os.path.basename(filename)
-        if filename != basename:
-            return "Invalid filename", 400
-        index = get_monthly_reports_index(data_dir, username)
-        if not any(row.get("filename") == basename for row in index):
-            return "Not found", 404
-        path = _monthly_user_dir(data_dir, username) / "reports" / basename
-        if not path.is_file():
-            return "Not found", 404
-        return send_file(path, as_attachment=True, download_name=basename, mimetype="application/pdf")
+    ``report`` is a reviewed runtime mapping.  The main supported keys are
+    ``status``, project/document metadata, ``revision_rows``, ``progress``,
+    ``safety``, ``engineering``, ``procurement``, ``equipment_delivery``,
+    ``shipments``, ``site``, ``appendices``, and optional ``s_curve``.
 
-    @app.post("/monthly/delete")
-    def delete_monthly_report():
-        auth = require_login_json()
-        if auth:
-            return auth
-        body = request.get_json(silent=True) or {}
-        filename = str(body.get("filename") or "")
-        basename = os.path.basename(filename)
-        if not basename or filename != basename:
-            return jsonify({"error": "Invalid filename."}), 400
-        username = session["username"]
-        index = get_monthly_reports_index(data_dir, username)
-        matches = [row for row in index if row.get("filename") == basename]
-        if not matches:
-            return jsonify({"error": "Report not found."}), 404
-        reports_dir = _monthly_user_dir(data_dir, username) / "reports"
-        for match in matches:
-            for name in (match.get("filename"), match.get("json_filename")):
-                if not name or os.path.basename(str(name)) != str(name):
-                    continue
-                path = reports_dir / str(name)
-                if path.is_file():
-                    path.unlink()
-        _save_monthly_index(data_dir, username, [row for row in index if row.get("filename") != basename])
-        if activity_logger:
-            report_type = str(matches[0].get("report_type") or "monthly")
-            activity_logger(username, f"{report_type}_report_deleted", basename)
-        return jsonify({"ok": True})
+    ``report_type`` accepts ``weekly`` or ``monthly`` and defaults to monthly
+    for backward compatibility. ``status`` accepts ``draft``, ``wtd``, ``mtd``,
+    or ``final``. Missing/unknown statuses deliberately render as DRAFT. The
+    function never writes to disk.
+    """
+    if not isinstance(report, Mapping):
+        raise TypeError("report must be a mapping")
+
+    report_type = _report_type(report)
+    status = _normalise_status(
+        _value(report, "status", "report_mode", default="draft"),
+        report_type=report_type,
+    )
+    resolved_logo = logo_path if logo_path is not None else report.get("logo_path")
+    styles = _styles()
+    buffer = io.BytesIO()
+    document = _MonthlyDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=BODY_LEFT,
+        rightMargin=BODY_RIGHT,
+        topMargin=BODY_TOP_MARGIN,
+        bottomMargin=BODY_BOTTOM,
+        allowSplitting=1,
+        title=(
+            f"{_progress_report_title(report)} - "
+            f"{_plain(_value(report, 'project_name', 'project_title'), 'Project')}"
+        ),
+        author=_plain(_value(report, "company_name", "vendor_name")),
+    )
+    cover_frame = Frame(
+        24, 24, PAGE_WIDTH - 48, PAGE_HEIGHT - 48,
+        leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0,
+        id="monthly-cover-frame",
+    )
+    body_frame = Frame(
+        BODY_LEFT, BODY_BOTTOM, BODY_WIDTH, BODY_HEIGHT,
+        leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0,
+        id="monthly-body-frame",
+    )
+    document.addPageTemplates([
+        PageTemplate(
+            id="cover",
+            frames=[cover_frame],
+            onPage=lambda canv, doc: _draw_cover(
+                canv, doc, report, status, resolved_logo
+            ),
+        ),
+        PageTemplate(
+            id="body",
+            frames=[body_frame],
+            onPage=lambda canv, doc: _draw_body_page(
+                canv, doc, report, status, resolved_logo
+            ),
+        ),
+    ])
+
+    def canvas_maker(*args, **kwargs):
+        return _NumberedCanvas(*args, status=status, **kwargs)
+
+    document.multiBuild(
+        _build_story(report, styles, photo_base_dir=photo_base_dir),
+        canvasmaker=canvas_maker,
+    )
+    buffer.seek(0)
+    return buffer
