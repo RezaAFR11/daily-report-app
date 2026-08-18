@@ -762,6 +762,13 @@ def _payload(record: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _record_photo_areas(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return parsed Daily Report areas used to label extracted PDF photographs."""
+
+    areas = _payload(record).get("areas")
+    return [item for item in areas if isinstance(item, dict)] if isinstance(areas, list) else []
+
+
 def _warning_text(value: Any) -> str:
     if isinstance(value, dict):
         message = value.get("message") or value.get("code") or "PDF parsing warning"
@@ -1202,9 +1209,15 @@ def _photo_references_for_records(
             }
             if page_number > 0:
                 reference["page"] = page_number
+            for metadata_key, maximum_length in (("source_date", 10), ("source_area", 255)):
+                metadata_value = _clean_text(item.get(metadata_key), maximum_length)
+                if metadata_value:
+                    reference[metadata_key] = metadata_value
             previous_item = prior_by_id.get(asset_id)
             if previous_item is not None:
-                reference["caption"] = _clean_text(previous_item.get("caption"), 500)
+                previous_caption = _clean_text(previous_item.get("caption"), 500)
+                if previous_caption:
+                    reference["caption"] = previous_caption
             available[asset_id] = reference
             discovered_order.append(asset_id)
 
@@ -2188,6 +2201,7 @@ def register_monthly_routes(
                         candidates, photo_warnings = extract_pdf_photo_candidates(
                             upload.stream,
                             filename=filename,
+                            areas=_record_photo_areas(record),
                         )
                         photo_references = store_photo_candidates(
                             candidates,
@@ -2520,6 +2534,7 @@ def register_monthly_routes(
                     candidates, photo_warnings = extract_pdf_photo_candidates(
                         upload.stream,
                         filename=filename,
+                        areas=_record_photo_areas(record),
                     )
                     pending_assets = _draft_photo_dir(
                         data_dir,
