@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/6"
-PROMPT_VERSION = "periodic-narrative-grounding/6"
+SUGGESTION_VERSION = "periodic-ai-suggestion/7"
+PROMPT_VERSION = "periodic-narrative-grounding/7"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -46,6 +46,27 @@ DEFAULT_TEMPERATURE = 0.1
 
 _NOT_SUPPLIED = "Not supplied"
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+_INTERNAL_MANUAL_SUMMARY_PLACEHOLDERS = {
+    "manual input required",
+    "manual input required.",
+    "manual weekly input required",
+    "manual weekly input required.",
+    "manual monthly input required",
+    "manual monthly input required.",
+}
+
+# Broad zero-incident language is intentionally disallowed in AI narrative.
+# Exact supplied metrics (for example, ``Total Recordable Cases: 0``) remain
+# allowed and are safer than collapsing multiple HSE concepts into "no incidents".
+_BROAD_SAFETY_ABSENCE_RE = re.compile(
+    r"(?:\bno\b(?=[^.!?\n]{0,100}\b(?:safety\s+)?(?:incidents?|accidents?|injuries?)\b)"
+    r"[^.!?\n]{0,100}\b(?:safety\s+)?(?:incidents?|accidents?|injuries?)\b"
+    r"|\bwithout\s+(?:any\s+)?(?:safety\s+)?(?:incidents?|accidents?|injuries?)\b"
+    r"|\bzero\s+(?:safety\s+)?(?:incidents?|accidents?|injuries?)\b"
+    r"|\bincident[- ]free\b)",
+    re.IGNORECASE,
+)
 
 # Keep only report content that can legitimately become client-facing narrative.
 # Parser/import warnings deliberately stay out of the model input so they cannot
@@ -270,8 +291,10 @@ Reporting rules:
     separately; never redefine the official weekly/monthly period as only the
     dates currently supplied.
    Prefer useful project narrative over administrative boilerplate. Do not mention
-   parsers, normalization, uploads, source validation, application warnings, or
-   instructions to review the report.
+   parsers, normalization, uploads, source validation, application warnings, manual
+   entry/input requirements, or instructions to review the report. If engineering
+   or procurement evidence is absent, omit it from the executive summary rather
+   than describing an internal workflow requirement.
 7. site_summary: consolidate repeated daily activities into a short coherent
    summary. Preserve project terminology, area/equipment labels, abbreviations,
    and explicit completion/status. When weather observations are supplied, include
@@ -289,19 +312,26 @@ Reporting rules:
    status bullet per affected area rather than repeating it by day.
 9. engineering_summary and procurement_summary: use only facts explicitly
    belonging to those subjects. Do not relabel site work as engineering or
-   procurement. Use Not supplied when evidence is absent.
-10. concern_actions: include only real construction/project concerns supported by
+   procurement. Use Not supplied when evidence is absent. Never convert an
+   internal placeholder such as "Manual weekly input required" into report prose.
+10. safety language: missing, null, blank, or Not supplied incident metrics are
+    NOT evidence of zero incidents. Do not use broad wording such as "no safety
+    incidents", "incident-free", or equivalent. Report exact supplied HSE metrics
+    faithfully instead (for example, a supplied Total Recordable Cases value of 0).
+    When the metrics are missing, say "Safety incident metrics were not supplied"
+    or omit the safety sentence.
+11. concern_actions: include only real construction/project concerns supported by
     source data. A corrective action must also be explicitly supported. If an
     action is not supplied, do not invent one; omit that item and record missing
     data instead. An explicit constraint_reporting status of none_reported is
     valid information, not missing data, and must not be turned into a concern.
     Internal data-quality or project-identity validation warnings are not project
     concerns.
-11. lookahead: use only explicitly supplied next-period, tomorrow, or planned
+12. lookahead: use only explicitly supplied next-period, tomorrow, or planned
     activities. Do not turn current activities into future plans.
-12. claims is optional supporting narrative evidence for the review UI. Do not add
+13. claims is optional supporting narrative evidence for the review UI. Do not add
     "claims: Not supplied" to missing_data when no extra claims are needed.
-13. Avoid repetitive bullet-by-bullet copying. Merge duplicates and write concise
+14. Avoid repetitive bullet-by-bullet copying. Merge duplicates and write concise
     professional English suitable for a client-facing construction report.
 """
 
@@ -441,6 +471,31 @@ def _compact_workforce_validation(draft: Mapping[str, Any]) -> dict[str, Any] | 
     return result
 
 
+def _scrub_internal_summary_placeholders(compact: dict[str, Any]) -> None:
+    """Remove internal workflow placeholders before data is sent to Claude."""
+
+    for section in ("engineering", "procurement"):
+        value = compact.get(section)
+        if not isinstance(value, Mapping):
+            continue
+        summary = " ".join(str(value.get("summary") or "").split()).strip()
+        if summary.casefold() not in _INTERNAL_MANUAL_SUMMARY_PLACEHOLDERS:
+            continue
+        cleaned = dict(value)
+        cleaned["summary"] = _NOT_SUPPLIED
+        compact[section] = cleaned
+
+
+def _reject_unsupported_broad_safety_claim(text: str, *, path: str) -> None:
+    """Reject broad zero-incident claims that can be inferred from missing data."""
+
+    if _BROAD_SAFETY_ABSENCE_RE.search(str(text or "")):
+        raise AIUnsupportedClaimsError(
+            f"{path} uses broad zero-incident safety wording. Report exact supplied "
+            "safety metrics instead; missing/Not supplied metrics are not zero."
+        )
+
+
 def compact_periodic_draft(draft: Mapping[str, Any]) -> dict[str, Any]:
     """Return the bounded, allow-listed input sent to the model."""
 
@@ -452,6 +507,7 @@ def compact_periodic_draft(draft: Mapping[str, Any]) -> dict[str, Any]:
         for key in _COMPACT_KEYS
         if key in draft
     }
+    _scrub_internal_summary_placeholders(compact)
     workforce = _compact_workforce_validation(draft)
     if workforce is not None:
         compact["workforce_validation"] = workforce
@@ -740,6 +796,11 @@ def validate_narrative_suggestion(
             source_index=sources,
             max_chars=MAX_SUMMARY_CHARS,
         )
+        if result[key]["text"] != _NOT_SUPPLIED:
+            _reject_unsupported_broad_safety_claim(
+                result[key]["text"],
+                path=f"$.{key}.text",
+            )
 
     activity_rows = value[_ACTIVITY_LIST_KEY]
     if not isinstance(activity_rows, list):
@@ -754,6 +815,11 @@ def validate_narrative_suggestion(
         )
         for index, row in enumerate(activity_rows)
     ]
+    for index, row in enumerate(result[_ACTIVITY_LIST_KEY]):
+        _reject_unsupported_broad_safety_claim(
+            row.get("text", ""),
+            path=f"$.{_ACTIVITY_LIST_KEY}[{index}].text",
+        )
 
     concern_actions = value["concern_actions"]
     if not isinstance(concern_actions, list):
@@ -784,6 +850,12 @@ def validate_narrative_suggestion(
             )
             for index, row in enumerate(rows)
         ]
+        for index, row in enumerate(result[key]):
+            if row["text"] != _NOT_SUPPLIED:
+                _reject_unsupported_broad_safety_claim(
+                    row["text"],
+                    path=f"$.{key}[{index}].text",
+                )
 
     result["missing_data"] = _normalise_missing_data_items(value["missing_data"])
     return result
@@ -821,6 +893,11 @@ def _safe_validated_suggestion(
                 source_index=sources,
                 max_chars=MAX_SUMMARY_CHARS,
             )
+            if result[key]["text"] != _NOT_SUPPLIED:
+                _reject_unsupported_broad_safety_claim(
+                    result[key]["text"],
+                    path=f"$.{key}.text",
+                )
         except (AIMalformedResponseError, AIUnsupportedClaimsError) as exc:
             result[key] = _placeholder_claim()
             warnings.append(str(exc))
@@ -829,13 +906,16 @@ def _safe_validated_suggestion(
     rows = raw.get(_ACTIVITY_LIST_KEY) if isinstance(raw.get(_ACTIVITY_LIST_KEY), list) else []
     for index, row in enumerate(rows[:MAX_CLAIMS_PER_SECTION]):
         try:
-            current_activities.append(
-                _validate_activity_claim(
-                    row,
-                    path=f"$.{_ACTIVITY_LIST_KEY}[{index}]",
-                    source_index=sources,
-                )
+            validated = _validate_activity_claim(
+                row,
+                path=f"$.{_ACTIVITY_LIST_KEY}[{index}]",
+                source_index=sources,
             )
+            _reject_unsupported_broad_safety_claim(
+                validated.get("text", ""),
+                path=f"$.{_ACTIVITY_LIST_KEY}[{index}].text",
+            )
+            current_activities.append(validated)
         except (AIMalformedResponseError, AIUnsupportedClaimsError) as exc:
             warnings.append(str(exc))
     result[_ACTIVITY_LIST_KEY] = current_activities
@@ -860,14 +940,18 @@ def _safe_validated_suggestion(
         rows = raw.get(key) if isinstance(raw.get(key), list) else []
         for index, row in enumerate(rows[:MAX_CLAIMS_PER_SECTION]):
             try:
-                accepted.append(
-                    _validate_claim(
-                        row,
-                        path=f"$.{key}[{index}]",
-                        source_index=sources,
-                        max_chars=MAX_CLAIM_CHARS,
-                    )
+                validated = _validate_claim(
+                    row,
+                    path=f"$.{key}[{index}]",
+                    source_index=sources,
+                    max_chars=MAX_CLAIM_CHARS,
                 )
+                if validated["text"] != _NOT_SUPPLIED:
+                    _reject_unsupported_broad_safety_claim(
+                        validated["text"],
+                        path=f"$.{key}[{index}].text",
+                    )
+                accepted.append(validated)
             except (AIMalformedResponseError, AIUnsupportedClaimsError) as exc:
                 warnings.append(str(exc))
         result[key] = accepted
