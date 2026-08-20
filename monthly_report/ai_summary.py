@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/10"
-PROMPT_VERSION = "periodic-narrative-grounding/10"
+SUGGESTION_VERSION = "periodic-ai-suggestion/11"
+PROMPT_VERSION = "periodic-narrative-grounding/11"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -102,8 +102,8 @@ _COMPACT_KEYS = (
     "activities",
     "this_month_activities",
     "this_week_activities",
-    "tomorrow_activities",
-    "planned_activities",
+    # Daily "Activity Tomorrow" is intentionally excluded from periodic AI input.
+    # A tomorrow task is not equivalent to next-week/next-month look-ahead.
     "constraints",
     "constraint_reporting",
     "concerns",
@@ -344,8 +344,10 @@ Reporting rules:
     valid information, not missing data, and must not be turned into a concern.
     Internal data-quality or project-identity validation warnings are not project
     concerns.
-12. lookahead: use only explicitly supplied next-period, tomorrow, or planned
-    activities. Do not turn current activities into future plans.
+12. lookahead: use only activities explicitly identified by the periodic source
+    as next-period / next-week / next-month work. Daily "Activity Tomorrow" is not
+    periodic look-ahead and must never be promoted into a weekly/monthly lookahead.
+    Do not turn current activities into future plans.
 13. claims is optional supporting narrative evidence for the review UI. Do not add
     "claims: Not supplied" to missing_data when no extra claims are needed.
 14. Avoid repetitive bullet-by-bullet copying. Merge duplicates and write concise
