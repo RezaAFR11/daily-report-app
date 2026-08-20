@@ -39,6 +39,57 @@ def _has_approved_s_curve(report: Mapping[str, Any]) -> bool:
     return _bool(value.get("approved"), False) and not _bool(value.get("illustrative"), False)
 
 
+def _has_s_curve_data(report: Mapping[str, Any]) -> bool:
+    """Return True only when an explicit S-Curve time series is actually supplied."""
+    value = report.get("s_curve")
+    if not isinstance(value, Mapping):
+        return False
+    labels = _as_list(value.get("labels"))
+    plan = _as_list(value.get("plan", value.get("planned")))
+    actual = _as_list(value.get("actual"))
+    return min(len(labels), len(plan), len(actual)) >= 2
+
+
+def _has_progress_rows(value: Any) -> bool:
+    """Detect real progress rows without treating metadata-only mappings as data.
+
+    ``aggregate.py`` always returns an ``overall_progress`` mapping, even when
+    ``available`` is false and ``rows`` is empty.  Likewise ``web.py`` stores
+    ``progress`` as ``{"rows": []}`` for reports without progress.  A plain
+    ``bool(mapping)`` therefore produces false-positive S-Curve blockers.
+    """
+    if isinstance(value, Mapping):
+        rows = value.get("rows")
+        if rows is None:
+            return False
+    else:
+        rows = value
+
+    if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes, bytearray, Mapping)):
+        return any(isinstance(row, Mapping) for row in rows)
+    return False
+
+
+def _s_curve_requested(report: Mapping[str, Any], *, for_final: bool) -> bool:
+    """Mirror renderer intent while keeping Final reports safe.
+
+    Explicit ``include_s_curve`` always wins.  An explicitly supplied S-Curve
+    also counts as requested.  Progress rows alone may create an illustrative
+    preview, but they must not make a Final report impossible to issue; when no
+    approved time series was supplied, Final simply omits that appendix.
+    """
+    if "include_s_curve" in report:
+        return _bool(report.get("include_s_curve"), False)
+    if _has_s_curve_data(report):
+        return True
+    if for_final:
+        return False
+    return (
+        _has_progress_rows(report.get("progress"))
+        or _has_progress_rows(report.get("overall_progress"))
+    )
+
+
 def _pending_workforce(report: Mapping[str, Any]) -> bool:
     state = report.get("workforce_validation")
     if not isinstance(state, Mapping):
@@ -99,11 +150,20 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
     else:
         info.append({"code": "coverage_complete", "message": "Daily Report coverage is complete for the selected period."})
 
-    include_s_curve = _bool(report.get("include_s_curve"), bool(report.get("progress") or report.get("overall_progress")))
+    include_s_curve = _s_curve_requested(report, for_final=for_final)
+    progress_available = (
+        _has_progress_rows(report.get("progress"))
+        or _has_progress_rows(report.get("overall_progress"))
+    )
     if for_final and include_s_curve and not _has_approved_s_curve(report):
         blockers.append({
             "code": "illustrative_s_curve",
             "message": "Final reports may not use an illustrative/generated S-Curve. Supply an approved time series or disable the S-Curve.",
+        })
+    elif for_final and progress_available and not include_s_curve:
+        info.append({
+            "code": "s_curve_omitted_final",
+            "message": "Progress rows are available, but no approved S-Curve time series was supplied; the S-Curve appendix will be omitted from Final.",
         })
 
     for message in _manual_source_issues(report):
