@@ -1638,7 +1638,16 @@ def _build_story(
     report_type = _report_type(report)
     status = _normalise_status(_value(report, "status", "report_mode", default="draft"), report_type=report_type)
     progress = _normalise_progress(report.get("progress", report.get("overall_progress", [])))
-    include_s_curve = _coerce_bool(report.get("include_s_curve"), bool(progress))
+    explicit_curve = _normalise_s_curve(report.get("s_curve"), []) if isinstance(report.get("s_curve"), Mapping) else None
+    if "include_s_curve" in report:
+        include_s_curve = _coerce_bool(report.get("include_s_curve"), False)
+    elif explicit_curve is not None:
+        include_s_curve = True
+    else:
+        # Progress rows can produce an illustrative S-Curve in Preview/Draft.
+        # A Final report without an approved explicit time series omits the
+        # appendix instead of becoming impossible to issue.
+        include_s_curve = bool(progress) and status != "FINAL"
     curve = _normalise_s_curve(report.get("s_curve"), progress) if include_s_curve else None
     if status == "FINAL" and curve is not None and curve[3]:
         raise ValueError(
