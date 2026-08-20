@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/13"
-PROMPT_VERSION = "periodic-narrative-grounding/13"
+SUGGESTION_VERSION = "periodic-ai-suggestion/14"
+PROMPT_VERSION = "periodic-narrative-grounding/14"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -37,16 +37,16 @@ MAX_LIST_ITEMS = 1_500
 MAX_TEXT_CHARS = 8_000
 MAX_SUMMARY_CHARS = 4_000
 MAX_CLAIM_CHARS = 1_500
-MAX_CLAIMS_PER_SECTION = 75
+MAX_CLAIMS_PER_SECTION = 24
 MAX_REFERENCES_PER_CLAIM = 40
 DEFAULT_MAX_TOKENS = 4_096
-DEFAULT_TIMEOUT_SECONDS = 70.0
-DEFAULT_TOTAL_BUDGET_SECONDS = 120.0
+DEFAULT_TIMEOUT_SECONDS = 210.0
+DEFAULT_TOTAL_BUDGET_SECONDS = 240.0
 DEFAULT_MAX_RETRIES = 0
-DEFAULT_VALIDATION_RETRIES = 2
+DEFAULT_VALIDATION_RETRIES = 0
 DEFAULT_TEMPERATURE = 0.1
-_MIN_PROVIDER_CALL_BUDGET_SECONDS = 5.0
-_BUDGET_SAFETY_MARGIN_SECONDS = 2.0
+_MIN_PROVIDER_CALL_BUDGET_SECONDS = 10.0
+_BUDGET_SAFETY_MARGIN_SECONDS = 5.0
 
 _NOT_SUPPLIED = "Not supplied"
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -252,11 +252,11 @@ AI_NARRATIVE_SCHEMA: dict[str, Any] = {
         "engineering_summary": _claim_schema(),
         "procurement_summary": _claim_schema(),
         "site_summary": _claim_schema(),
-        "current_activities": {"type": "array", "items": _activity_claim_schema()},
-        "concern_actions": {"type": "array", "items": _concern_action_schema()},
-        "lookahead": {"type": "array", "items": _claim_schema()},
-        "claims": {"type": "array", "items": _claim_schema()},
-        "missing_data": {"type": "array", "items": {"type": "string"}},
+        "current_activities": {"type": "array", "maxItems": 24, "items": _activity_claim_schema()},
+        "concern_actions": {"type": "array", "maxItems": 12, "items": _concern_action_schema()},
+        "lookahead": {"type": "array", "maxItems": 12, "items": _claim_schema()},
+        "claims": {"type": "array", "maxItems": 8, "items": _claim_schema()},
+        "missing_data": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
     },
     "required": [
         "executive_summary",
@@ -359,6 +359,13 @@ Reporting rules:
     "claims: Not supplied" to missing_data when no extra claims are needed.
 14. Avoid repetitive bullet-by-bullet copying. Merge duplicates and write concise
     professional English suitable for a client-facing construction report.
+    Keep executive_summary and site_summary concise (normally 2-5 sentences each).
+    Return no more than 24 current_activities bullets, 12 concern_actions, and
+    12 lookahead items. Prefer consolidation over exhaustive repetition. The
+    application retains the complete Daily Report activity list separately, so
+    this narrative is a summary and must not try to reproduce every source row.
+    Return claims as an empty array unless an extra review-only claim is truly
+    necessary.
 15. The activities section may be deterministically compacted by the application.
     A grouped activity stores repeated wording once and keeps source_dates,
     source_report_ids, and per-occurrence equipment_tags. Treat those values as
@@ -1650,17 +1657,37 @@ def generate_ai_summary(
         raise AIConfigurationError("ANTHROPIC_API_KEY is not configured for this service.")
     if not selected_model:
         raise AIConfigurationError("ANTHROPIC_MODEL must not be empty.", code="missing_model")
-    if not isinstance(timeout, (int, float)) or not (1 <= float(timeout) <= 180):
-        raise AIInputError("Claude per-call timeout must be between 1 and 180 seconds.")
-    if not isinstance(total_budget, (int, float)) or not (10 <= float(total_budget) <= 240):
-        raise AIInputError("Claude total generation budget must be between 10 and 240 seconds.")
+    if not isinstance(timeout, (int, float)) or not (1 <= float(timeout) <= 240):
+        raise AIInputError("Claude per-call timeout must be between 1 and 240 seconds.")
+    if not isinstance(total_budget, (int, float)) or not (15 <= float(total_budget) <= 270):
+        raise AIInputError("Claude total generation budget must be between 15 and 270 seconds.")
     if float(timeout) >= float(total_budget):
         # Keep a real application-level deadline above the provider timeout.
-        timeout = max(1.0, float(total_budget) - 5.0)
+        timeout = max(1.0, float(total_budget) - 10.0)
     if not isinstance(max_tokens, int) or not (256 <= max_tokens <= 8_192):
         raise AIInputError("Claude max_tokens must be between 256 and 8192.")
     if not isinstance(temperature, (int, float)) or not (0 <= float(temperature) <= 1):
         raise AIInputError("Claude temperature must be between 0 and 1.")
+    # Optional Railway tuning knobs. Explicit function arguments still win when
+    # callers override the defaults. Invalid environment values are ignored so a
+    # typo cannot take the report service down.
+    if float(timeout) == DEFAULT_TIMEOUT_SECONDS:
+        try:
+            configured_timeout = float(os.environ.get("ANTHROPIC_TIMEOUT_SECONDS", "") or timeout)
+            if 1 <= configured_timeout <= 240:
+                timeout = configured_timeout
+        except (TypeError, ValueError):
+            pass
+    if float(total_budget) == DEFAULT_TOTAL_BUDGET_SECONDS:
+        try:
+            configured_budget = float(os.environ.get("AI_TOTAL_BUDGET_SECONDS", "") or total_budget)
+            if 15 <= configured_budget <= 270:
+                total_budget = configured_budget
+        except (TypeError, ValueError):
+            pass
+    if float(timeout) >= float(total_budget):
+        timeout = max(1.0, float(total_budget) - 10.0)
+
     if not isinstance(validation_retries, int) or not (0 <= validation_retries <= 3):
         raise AIInputError("Claude validation_retries must be between 0 and 3.")
 
@@ -1759,13 +1786,12 @@ def generate_ai_summary(
     token_limit = max_tokens
     response = call_model(token_limit=token_limit)
     last_response = response
-    if str(getattr(response, "stop_reason", "") or "") == "max_tokens" and token_limit < 8_192:
-        token_limit = min(8_192, max(token_limit * 2, token_limit + 1024))
-        response = call_model(
-            token_limit=token_limit,
-            repair_error="The previous response was truncated at max_tokens. Return a shorter complete response.",
+    if str(getattr(response, "stop_reason", "") or "") == "max_tokens":
+        raise AIProviderError(
+            "Claude response reached the output limit. The source report is unchanged; retry the AI summary.",
+            code="output_limit_reached",
+            retryable=True,
         )
-        last_response = response
 
     parsed: Any = None
     last_error = ""
