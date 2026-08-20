@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/14"
-PROMPT_VERSION = "periodic-narrative-grounding/14"
+SUGGESTION_VERSION = "periodic-ai-suggestion/15"
+PROMPT_VERSION = "periodic-narrative-grounding/15"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -39,7 +39,7 @@ MAX_SUMMARY_CHARS = 4_000
 MAX_CLAIM_CHARS = 1_500
 MAX_CLAIMS_PER_SECTION = 24
 MAX_REFERENCES_PER_CLAIM = 40
-DEFAULT_MAX_TOKENS = 4_096
+DEFAULT_MAX_TOKENS = 8_192
 DEFAULT_TIMEOUT_SECONDS = 210.0
 DEFAULT_TOTAL_BUDGET_SECONDS = 240.0
 DEFAULT_MAX_RETRIES = 0
@@ -359,13 +359,19 @@ Reporting rules:
     "claims: Not supplied" to missing_data when no extra claims are needed.
 14. Avoid repetitive bullet-by-bullet copying. Merge duplicates and write concise
     professional English suitable for a client-facing construction report.
-    Keep executive_summary and site_summary concise (normally 2-5 sentences each).
+    The response must fit comfortably inside the output budget:
+    - executive_summary: normally 2-4 sentences and preferably <= 900 characters.
+    - site_summary: normally 2-4 sentences and preferably <= 900 characters.
+    - engineering_summary/procurement_summary: preferably <= 500 characters each.
+    - each current_activities, lookahead, claim, concern, or corrective_action
+      text: preferably <= 350 characters.
     Return no more than 24 current_activities bullets, 12 concern_actions, and
     12 lookahead items. Prefer consolidation over exhaustive repetition. The
     application retains the complete Daily Report activity list separately, so
     this narrative is a summary and must not try to reproduce every source row.
     Return claims as an empty array unless an extra review-only claim is truly
-    necessary.
+    necessary. Do not repeat the same source IDs or dates in prose because they
+    are already provided in the JSON citation fields.
 15. The activities section may be deterministically compacted by the application.
     A grouped activity stores repeated wording once and keeps source_dates,
     source_report_ids, and per-occurrence equipment_tags. Treat those values as
@@ -1788,7 +1794,8 @@ def generate_ai_summary(
     last_response = response
     if str(getattr(response, "stop_reason", "") or "") == "max_tokens":
         raise AIProviderError(
-            "Claude response reached the output limit. The source report is unchanged; retry the AI summary.",
+            "Claude response still exceeded the 8192-token narrative limit after compaction. "
+            "The source report is unchanged. Reduce only the AI narrative scope or split the reporting period.",
             code="output_limit_reached",
             retryable=True,
         )
