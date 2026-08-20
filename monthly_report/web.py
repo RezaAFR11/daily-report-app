@@ -69,12 +69,20 @@ _AI_DRAFT_LOCK_STALE_SECONDS = 5 * 60
 _AI_DRAFT_LOCK_RETRY_SECONDS = 5
 _MAKASSAR_TIMEZONE = ZoneInfo("Asia/Makassar")
 
-# Testing-only escape hatch for deleting issued Final periodic reports.
-# Keep this disabled in production. Set ALLOW_FINAL_REPORT_DELETE=true only
-# on an isolated sandbox/test deployment when test revisions need cleanup.
-_ALLOW_FINAL_REPORT_DELETE = str(os.getenv("ALLOW_FINAL_REPORT_DELETE", "")).strip().lower() in {
-    "1", "true", "yes", "on",
-}
+# Sandbox/testing policy for issued Final periodic reports.
+#
+# This branch is used for report-development testing, so Final revisions may be
+# hard-deleted and repeated Final issues do not require a revision reason by
+# default.  Before using this code in production, set:
+#
+#     PROTECT_FINAL_PERIODIC_REPORTS=true
+#
+# That restores immutable Final reports and mandatory revision reasons.
+_PROTECT_FINAL_PERIODIC_REPORTS = str(
+    os.getenv("PROTECT_FINAL_PERIODIC_REPORTS", "false")
+).strip().lower() in {"1", "true", "yes", "on"}
+_ALLOW_FINAL_REPORT_DELETE = not _PROTECT_FINAL_PERIODIC_REPORTS
+_REQUIRE_FINAL_REVISION_REASON = _PROTECT_FINAL_PERIODIC_REPORTS
 
 
 def _report_type(value: Any) -> str:
@@ -3778,7 +3786,12 @@ def register_monthly_routes(
             revision = max([int(row.get("revision", 0)) for row in same_period] or [0]) + 1
             prior_final = [row for row in same_period if str(row.get("status") or "").lower() == "final"]
             revision_reason = _clean_text(body.get("revision_reason"), 2_000)
-            if is_final and prior_final and not revision_reason:
+            if (
+                is_final
+                and prior_final
+                and not revision_reason
+                and _REQUIRE_FINAL_REVISION_REASON
+            ):
                 return jsonify({
                     "error": "Revision reason is required when issuing a new Final revision for the same period."
                 }), 400
@@ -3913,10 +3926,11 @@ def register_monthly_routes(
         if deleting_final and not _ALLOW_FINAL_REPORT_DELETE:
             return jsonify({
                 "error": (
-                    "Final reports are immutable and cannot be deleted. Void the report instead, "
-                    "or enable ALLOW_FINAL_REPORT_DELETE=true on a sandbox/test deployment."
+                    "Final reports are protected and cannot be deleted while "
+                    "PROTECT_FINAL_PERIODIC_REPORTS=true."
                 )
             }), 409
+
         reports_dir = _monthly_user_dir(data_dir, username) / "reports"
         for match in matches:
             for name in (match.get("filename"), match.get("json_filename")):
@@ -3925,17 +3939,54 @@ def register_monthly_routes(
                 path = reports_dir / str(name)
                 if path.is_file():
                     path.unlink()
-        _save_monthly_index(data_dir, username, [row for row in index if row.get("filename") != basename])
+
+        remaining_index = [row for row in index if row.get("filename") != basename]
+
+        # When the active/latest Final is hard-deleted during testing, restore the
+        # newest remaining Final for the same project/period to "active".  Without
+        # this repair, an older revision can remain permanently marked superseded
+        # even though the revision that superseded it no longer exists.
+        if deleting_final:
+            deleted = matches[0]
+            kind = str(deleted.get("report_type") or "monthly")
+            project_no = deleted.get("project_no")
+            period_start = deleted.get("period_start")
+            period_end = deleted.get("period_end")
+            same_period_finals = [
+                row for row in remaining_index
+                if (
+                    (row.get("report_type") or "monthly") == kind
+                    and row.get("project_no") == project_no
+                    and row.get("period_start") == period_start
+                    and row.get("period_end") == period_end
+                    and str(row.get("status") or "").lower() == "final"
+                    and str(row.get("lifecycle_status") or "active").lower() != "void"
+                )
+            ]
+            if same_period_finals and not any(
+                str(row.get("lifecycle_status") or "active").lower() == "active"
+                for row in same_period_finals
+            ):
+                latest_remaining = max(
+                    same_period_finals,
+                    key=lambda row: int(row.get("revision", 0) or 0),
+                )
+                latest_remaining["lifecycle_status"] = "active"
+                latest_remaining.pop("superseded_by", None)
+                latest_remaining.pop("superseded_at", None)
+
+        _save_monthly_index(data_dir, username, remaining_index)
         if activity_logger:
             report_type = str(matches[0].get("report_type") or "monthly")
             detail = basename
             if deleting_final:
-                detail = f"{basename} [FINAL hard-delete testing override]"
+                detail = f"{basename} [FINAL hard-delete sandbox/testing]"
             activity_logger(username, f"{report_type}_report_deleted", detail)
         return jsonify({
             "ok": True,
             "deleted_final": deleting_final,
             "testing_override": bool(deleting_final and _ALLOW_FINAL_REPORT_DELETE),
+            "final_protection_enabled": _PROTECT_FINAL_PERIODIC_REPORTS,
         })
 
     @app.post("/monthly/void")
