@@ -610,10 +610,15 @@ def aggregate_monthly_records(
     constraint_daily = []
     daily_manpower = []
     role_rows = []
+    planned_next_week = []
+    planned_next_month = []
     for report_date, record in selected:
         payload = _payload(record)
+        source_report_id = str(record.get("report_id") or "")
         weather_item = _weather_row(payload, report_date)
         if weather_item is not None:
+            weather_item["source_report_id"] = source_report_id
+            weather_item["source_path"] = "$.weather"
             weather_daily.append(weather_item)
         constraint_state = _clean_text(payload.get("constraint_status"))
         if constraint_state not in {"none_reported", "reported", "not_supplied"}:
@@ -622,21 +627,46 @@ def aggregate_monthly_records(
         areas = payload.get("areas")
         if not isinstance(areas, list):
             areas = []
-        for area in areas:
+        for area_index, area in enumerate(areas):
             if not isinstance(area, Mapping):
                 continue
             area_name = _clean_text(area.get("id")) or "Unspecified"
             status_map = _activity_status_map(area)
-            for description in _iter_text_values(area.get("activities_today")):
-                item = {"date": report_date, "area": area_name, "description": description}
+            for activity_index, description in enumerate(_iter_text_values(area.get("activities_today"))):
+                item = {
+                    "date": report_date,
+                    "area": area_name,
+                    "description": description,
+                    "source_report_id": source_report_id,
+                    "source_path": f"$.areas[{area_index}].activities_today[{activity_index}]",
+                }
                 status = status_map.get(_normalise_text(description))
                 if status:
                     item["status"] = status
                 activities.append(item)
-            for text in _iter_text_values(area.get("constraints")):
-                constraints.append({"date": report_date, "area": area_name, "text": text})
-            for text in _iter_text_values(area.get("remarks")):
-                remarks.append({"date": report_date, "area": area_name, "text": text})
+            for constraint_index, text in enumerate(_iter_text_values(area.get("constraints"))):
+                constraints.append({
+                    "date": report_date, "area": area_name, "text": text,
+                    "source_report_id": source_report_id,
+                    "source_path": f"$.areas[{area_index}].constraints[{constraint_index}]",
+                })
+            for remark_index, text in enumerate(_iter_text_values(area.get("remarks"))):
+                remarks.append({
+                    "date": report_date, "area": area_name, "text": text,
+                    "source_report_id": source_report_id,
+                    "source_path": f"$.areas[{area_index}].remarks[{remark_index}]",
+                })
+
+            # Explicit period look-ahead is intentionally separate from Activity Tomorrow.
+            # A Daily Report tomorrow item is not automatically a next-week/month commitment.
+            for key, target in (("planned_next_week", planned_next_week), ("next_week_activities", planned_next_week),
+                                ("planned_next_month", planned_next_month), ("next_month_activities", planned_next_month)):
+                for plan_index, description in enumerate(_iter_text_values(area.get(key))):
+                    target.append({
+                        "source_date": report_date, "area": area_name, "description": description,
+                        "source_report_id": source_report_id,
+                        "source_path": f"$.areas[{area_index}].{key}[{plan_index}]",
+                    })
         day, day_roles = _daily_manpower(payload, report_date)
         daily_manpower.append(day)
         role_rows.extend(day_roles)
@@ -652,6 +682,21 @@ def aggregate_monthly_records(
             row["status"] = item["status"]
         activities_by_area[item["area"]].append(row)
 
+    # Top-level explicit period look-ahead fields are also accepted when present.
+    for report_date, record in selected:
+        payload = _payload(record)
+        source_report_id = str(record.get("report_id") or "")
+        for key, target in (("planned_next_week", planned_next_week), ("next_week_activities", planned_next_week),
+                            ("planned_next_month", planned_next_month), ("next_month_activities", planned_next_month)):
+            for plan_index, description in enumerate(_iter_text_values(payload.get(key))):
+                target.append({
+                    "source_date": report_date, "area": "", "description": description,
+                    "source_report_id": source_report_id,
+                    "source_path": f"$.{key}[{plan_index}]",
+                })
+    planned_next_week = _dedupe_entries(planned_next_week, "source_date", "area", "description")
+    planned_next_month = _dedupe_entries(planned_next_month, "source_date", "area", "description")
+
     tomorrow_activities = []
     last_report_date = covered[-1] if covered else None
     if selected:
@@ -663,9 +708,11 @@ def aggregate_monthly_records(
                     continue
                 area_name = _clean_text(area.get("id")) or "Unspecified"
                 for description in _iter_text_values(area.get("activities_tomorrow")):
-                    tomorrow_activities.append(
-                        {"source_date": last_date, "area": area_name, "description": description}
-                    )
+                    tomorrow_activities.append({
+                        "source_date": last_date, "area": area_name, "description": description,
+                        "source_report_id": str(last_record.get("report_id") or ""),
+                        "source_path": f"$.areas[{areas.index(area)}].activities_tomorrow",
+                    })
     tomorrow_activities = _dedupe_entries(
         tomorrow_activities, "source_date", "area", "description"
     )
@@ -774,6 +821,8 @@ def aggregate_monthly_records(
             for area, values in sorted(activities_by_area.items(), key=lambda item: _normalise_text(item[0]))
         ],
         "tomorrow_activities": tomorrow_activities,
+        "planned_next_week": planned_next_week,
+        "planned_next_month": planned_next_month,
         "constraints": constraints,
         "remarks": remarks,
         "weather": weather_daily,

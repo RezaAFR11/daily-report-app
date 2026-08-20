@@ -10,6 +10,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -29,6 +30,7 @@ from .photos import (
     store_photo_candidates,
 )
 from .renderer import render_monthly_report
+from .report_quality import build_report_preflight
 from .storage import list_canonical_records
 from .timesheet import TimesheetError, compile_timesheets
 from .validation import (
@@ -967,17 +969,43 @@ def _prepare_draft(
     # and not an instruction for the client-facing report.  Keep the draft
     # neutral so AI cannot turn an internal workflow placeholder such as
     # "Manual weekly input required" into narrative prose.
-    draft.setdefault("engineering", {"summary": "Not supplied"})
-    draft.setdefault("procurement", {"summary": "Not supplied"})
+    draft.setdefault("engineering", {
+        "summary": "Not supplied",
+        "source_meta": {"source_type": "not_supplied"},
+    })
+    draft.setdefault("procurement", {
+        "summary": "Not supplied",
+        "source_meta": {"source_type": "not_supplied"},
+    })
 
     site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
     if not site.get("this_month_activities"):
         site["this_month_activities"] = draft.get("this_month_activities", draft.get("activities", []))
-    if not site.get("next_month_activities"):
-        site["next_month_activities"] = draft.get(
-            "next_month_activities",
-            draft.get("tomorrow_activities", draft.get("planned_activities", [])),
-        )
+
+    # Activity Tomorrow is deliberately NOT promoted to next-week/next-month.
+    # Period look-ahead is shown only when the source explicitly supplies it.
+    explicit_lookahead = (
+        draft.get("planned_next_week", []) if kind == "weekly"
+        else draft.get("planned_next_month", [])
+    )
+    cleaned_lookahead: list[Any] = []
+    for row in explicit_lookahead if isinstance(explicit_lookahead, list) else []:
+        if isinstance(row, dict):
+            description = _clean_text(row.get("description", row.get("text")), 2_000)
+            if description:
+                cleaned_lookahead.append({
+                    "area": _clean_text(row.get("area"), 255) or "General",
+                    "description": description,
+                    "source_date": _clean_text(row.get("source_date"), 10),
+                    "source_report_id": _clean_text(row.get("source_report_id"), 200),
+                    "source_path": _clean_text(row.get("source_path"), 500),
+                })
+        else:
+            text = _clean_text(row, 2_000)
+            if text:
+                cleaned_lookahead.append(text)
+    site["next_month_activities"] = cleaned_lookahead
+    site["tomorrow_activities"] = copy.deepcopy(draft.get("tomorrow_activities", []))
     if not site.get("concerns"):
         site["concerns"] = draft.get("concerns", draft.get("constraints", []))
     if isinstance(draft.get("constraint_reporting"), dict):
@@ -1213,7 +1241,16 @@ def _photo_references_for_records(
             }
             if page_number > 0:
                 reference["page"] = page_number
-            for metadata_key, maximum_length in (("source_date", 10), ("source_area", 255)):
+            for metadata_key, maximum_length in (
+                ("source_date", 10),
+                ("source_area", 255),
+                ("activity_id", 100),
+                ("activity_description", 500),
+                ("activity_status", 80),
+                ("source_type", 80),
+                ("photo_match_method", 80),
+                ("context_type", 40),
+            ):
                 metadata_value = _clean_text(item.get(metadata_key), maximum_length)
                 if metadata_value:
                     reference[metadata_key] = metadata_value
@@ -1353,7 +1390,19 @@ def _normalize_progress(review: Any) -> dict[str, Any]:
     return {"rows": rows}
 
 
-def _apply_review(draft: dict[str, Any], review: dict[str, Any]) -> dict[str, Any]:
+
+def _manual_source_meta(review: Mapping[str, Any], section: str, actor: str) -> dict[str, Any]:
+    refs = review.get("source_references") if isinstance(review.get("source_references"), dict) else {}
+    reference = _clean_text(refs.get(section), 1_000) if isinstance(refs, dict) else ""
+    return {
+        "source_type": "manual",
+        "entered_by": _clean_text(actor, 200),
+        "entered_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "reference": reference,
+    }
+
+
+def _apply_review(draft: dict[str, Any], review: dict[str, Any], *, actor: str = "") -> dict[str, Any]:
     value = copy.deepcopy(draft)
     kind = _report_type(value.get("report_type") or "monthly")
     mode = _normalise_report_mode(kind, review.get("report_mode") or value.get("report_mode"))
@@ -1455,12 +1504,24 @@ def _apply_review(draft: dict[str, Any], review: dict[str, Any]) -> dict[str, An
         if lost_days is not None and injuries not in (None, 0)
         else None
     )
+    safety_changed = any(
+        key in safety_review and safety.get(key) != current_safety.get(key)
+        for key in ("total_manpower", "total_man_hours", "recordable_cases", "lost_workdays", "lost_time_injuries")
+    )
+    if safety_changed:
+        safety["source_meta"] = _manual_source_meta(review, "safety", actor)
+    elif isinstance(current_safety.get("source_meta"), dict):
+        safety["source_meta"] = copy.deepcopy(current_safety["source_meta"])
     value["safety"] = safety
 
     for key in ("engineering", "procurement"):
         current = value.get(key) if isinstance(value.get(key), dict) else {}
         incoming = review.get(key) if isinstance(review.get(key), dict) else {}
-        current["summary"] = _clean_text(incoming.get("summary", current.get("summary")))
+        old_summary = _clean_text(current.get("summary"))
+        new_summary = _clean_text(incoming.get("summary", current.get("summary")))
+        current["summary"] = new_summary
+        if "summary" in incoming and new_summary != old_summary:
+            current["source_meta"] = _manual_source_meta(review, key, actor)
         value[key] = current
 
     current_site = value.get("site") if isinstance(value.get("site"), dict) else {}
@@ -1596,7 +1657,12 @@ def _clean_ai_references(value: Any) -> dict[str, list[str]]:
         text = _clean_text(item, 10)
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) and text not in dates:
             dates.append(text)
-    return {"source_ids": source_ids, "dates": dates}
+    evidence_paths = []
+    for item in row.get("evidence_paths", [])[:40] if isinstance(row.get("evidence_paths"), list) else []:
+        text = _clean_text(item, 500)
+        if text and text not in evidence_paths:
+            evidence_paths.append(text)
+    return {"source_ids": source_ids, "dates": dates, "evidence_paths": evidence_paths}
 
 
 def _clean_ai_missing_data(value: Any) -> list[str]:
@@ -1826,6 +1892,149 @@ def _issued_report_copy(report: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+
+
+
+
+def _revision_history_rows(
+    reports_dir: Path,
+    prior_entries: list[dict[str, Any]],
+    current: Mapping[str, Any],
+    revision: int,
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for entry in sorted(prior_entries, key=lambda row: int(row.get("revision", 0) or 0)):
+        detail: dict[str, Any] = {}
+        json_name = str(entry.get("json_filename") or "")
+        if json_name and os.path.basename(json_name) == json_name:
+            path = reports_dir / json_name
+            try:
+                with path.open(encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    detail = loaded
+            except (OSError, ValueError, TypeError):
+                detail = {}
+        rows.append({
+            "rev": f"R{int(entry.get('revision', 0) or 0)}",
+            "description": _clean_text(
+                detail.get("revision_reason") or entry.get("revision_reason")
+                or detail.get("revision_description") or entry.get("status"), 500
+            ),
+            "date": _clean_text(detail.get("issued_date") or entry.get("generated_at"), 20)[:10],
+            "prepared": _clean_text(detail.get("prepared_by"), 200),
+            "checked": _clean_text(detail.get("checked_by"), 200),
+            "vendor_approved": _clean_text(detail.get("approved_by"), 200),
+            "kn_approved": _clean_text(detail.get("kn_approved_by"), 200),
+        })
+    rows.append({
+        "rev": f"R{revision}",
+        "description": _clean_text(
+            current.get("revision_reason") or current.get("revision_description")
+            or current.get("status"), 500
+        ),
+        "date": _clean_text(current.get("issued_date"), 20)[:10],
+        "prepared": _clean_text(current.get("prepared_by"), 200),
+        "checked": _clean_text(current.get("checked_by"), 200),
+        "vendor_approved": _clean_text(current.get("approved_by"), 200),
+        "kn_approved": _clean_text(current.get("kn_approved_by"), 200),
+    })
+    return rows[-3:]
+
+
+def _set_appendix_content(
+    draft: dict[str, Any],
+    source_number: str,
+    title: str,
+    content: Any,
+    source_meta: Mapping[str, Any],
+) -> None:
+    rows = draft.get("appendices") if isinstance(draft.get("appendices"), list) else []
+    rows = copy.deepcopy(rows)
+    found = None
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("source_number") or row.get("number") or "") == source_number:
+            found = row
+            break
+    if found is None:
+        found = {"source_number": source_number, "number": source_number, "title": title}
+        rows.append(found)
+    found.update({
+        "title": title,
+        "status": "Included",
+        "content": copy.deepcopy(content),
+        "source_meta": copy.deepcopy(dict(source_meta)),
+    })
+    draft["appendices"] = rows
+
+
+def _apply_structured_source(
+    draft: dict[str, Any],
+    *,
+    section: str,
+    payload: Any,
+    actor: str,
+    reference: str,
+) -> None:
+    allowed = {
+        "engineering", "procurement", "equipment_delivery", "shipments", "safety",
+        "schedule", "document_deliverables", "qc", "s_curve", "manpower_equipment",
+    }
+    if section not in allowed:
+        raise ValueError("Unsupported structured source section.")
+    source_type = {
+        "engineering": "engineering_input",
+        "procurement": "procurement_input",
+        "equipment_delivery": "delivery_input",
+        "shipments": "shipment_input",
+        "safety": "safety_input",
+        "schedule": "schedule_input",
+        "document_deliverables": "document_register_input",
+        "qc": "qc_input",
+        "s_curve": "approved_progress_timeseries",
+        "manpower_equipment": "manpower_equipment_input",
+    }[section]
+    meta = {
+        "source_type": source_type,
+        "entered_by": _clean_text(actor, 200),
+        "entered_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "reference": _clean_text(reference, 1_000),
+    }
+    draft.setdefault("structured_sources", {})[section] = {
+        "payload": copy.deepcopy(payload),
+        "source_meta": copy.deepcopy(meta),
+    }
+    if section in {"engineering", "procurement", "equipment_delivery", "safety"}:
+        value = copy.deepcopy(payload) if isinstance(payload, dict) else {"summary": _clean_text(payload, 10_000)}
+        value["source_meta"] = copy.deepcopy(meta)
+        draft[section] = value
+        if section == "safety":
+            _set_appendix_content(draft, "6.7", "Safety Report", payload, meta)
+    elif section == "shipments":
+        draft["shipments"] = copy.deepcopy(payload)
+        draft["shipments_source_meta"] = copy.deepcopy(meta)
+    elif section == "schedule":
+        site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
+        site["schedule_status"] = copy.deepcopy(payload)
+        site["schedule_source_meta"] = copy.deepcopy(meta)
+        draft["site"] = site
+        _set_appendix_content(draft, "6.3", "Overall Schedule", payload, meta)
+    elif section == "document_deliverables":
+        _set_appendix_content(draft, "6.4", "Document Deliverable List / Drawing Status", payload, meta)
+    elif section == "qc":
+        _set_appendix_content(draft, "6.8", "QC Document", payload, meta)
+    elif section == "manpower_equipment":
+        _set_appendix_content(draft, "6.5", "Manning Manpower / Equipment Loading", payload, meta)
+    elif section == "s_curve":
+        if not isinstance(payload, dict):
+            raise ValueError("S-Curve payload must be an object with labels/plan/actual.")
+        curve = copy.deepcopy(payload)
+        curve.setdefault("approved", False)
+        curve["source_meta"] = copy.deepcopy(meta)
+        draft["s_curve"] = curve
+        draft["include_s_curve"] = True
+
+
 def _render(
     draft: dict[str, Any],
     config: dict[str, Any],
@@ -1864,6 +2073,45 @@ def register_monthly_routes(
         if "username" not in session:
             return jsonify({"error": "Login required."}), 401
         return None
+
+    @app.get("/monthly/preflight/<draft_id>")
+    def periodic_report_preflight(draft_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        draft = _load_draft(data_dir, session["username"], draft_id)
+        if draft is None:
+            return jsonify({"error": "Report draft not found."}), 404
+        for_final = str(request.args.get("final") or "").strip().lower() in {"1", "true", "yes"}
+        return jsonify({"ok": True, "preflight": build_report_preflight(draft, for_final=for_final)})
+
+    @app.post("/monthly/structured-source/<draft_id>")
+    def update_periodic_structured_source(draft_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        username = session["username"]
+        draft = _load_draft(data_dir, username, draft_id)
+        if draft is None:
+            return jsonify({"error": "Report draft not found."}), 404
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify({"error": "Invalid structured source payload."}), 400
+        try:
+            _require_applied_source_validation(draft)
+            section = _clean_text(body.get("section"), 80).lower()
+            _apply_structured_source(
+                draft,
+                section=section,
+                payload=body.get("payload"),
+                actor=username,
+                reference=_clean_text(body.get("reference"), 1_000),
+            )
+            draft.pop("ai_summary", None)
+            _update_draft(data_dir, username, draft)
+            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
 
     @app.post("/monthly/compile/stored")
     def compile_monthly_stored():
@@ -2207,6 +2455,10 @@ def register_monthly_routes(
                             filename=filename,
                             areas=_record_photo_areas(record),
                         )
+                        report_date = _record_date(record)
+                        for candidate in candidates:
+                            candidate.setdefault("source_date", report_date)
+                            candidate.setdefault("source_type", "legacy_pdf_extraction")
                         photo_references = store_photo_candidates(
                             candidates,
                             directory / "assets",
@@ -2540,6 +2792,10 @@ def register_monthly_routes(
                         filename=filename,
                         areas=_record_photo_areas(record),
                     )
+                    report_date = _record_date(record)
+                    for candidate in candidates:
+                        candidate.setdefault("source_date", report_date)
+                        candidate.setdefault("source_type", "legacy_pdf_extraction")
                     pending_assets = _draft_photo_dir(
                         data_dir,
                         session["username"],
@@ -3164,12 +3420,41 @@ def register_monthly_routes(
             # Empty/Not supplied values preserve the deterministic draft.
             if accepted["executive_summary"] and accepted["executive_summary"].casefold() != "not supplied":
                 draft["executive_summary"] = accepted["executive_summary"]
+            ai_meta = {
+                "source_type": "ai_narrative",
+                "accepted_by": username,
+                "accepted_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "provider_model": _clean_text(
+                    state.get("provider_envelope", {}).get("model")
+                    if isinstance(state.get("provider_envelope"), dict) else "",
+                    200,
+                ),
+            }
+            citation_evidence = (
+                state.get("suggestion", {}).get("citation_evidence")
+                if isinstance(state.get("suggestion"), dict) else {}
+            )
             if accepted["engineering_summary"] and accepted["engineering_summary"].casefold() != "not supplied":
                 engineering["summary"] = accepted["engineering_summary"]
+                engineering["narrative_source_meta"] = {
+                    **ai_meta,
+                    "evidence": copy.deepcopy(citation_evidence.get("engineering_summary", {}))
+                    if isinstance(citation_evidence, dict) else {},
+                }
             if accepted["procurement_summary"] and accepted["procurement_summary"].casefold() != "not supplied":
                 procurement["summary"] = accepted["procurement_summary"]
+                procurement["narrative_source_meta"] = {
+                    **ai_meta,
+                    "evidence": copy.deepcopy(citation_evidence.get("procurement_summary", {}))
+                    if isinstance(citation_evidence, dict) else {},
+                }
             if accepted["site_summary"] and accepted["site_summary"].casefold() != "not supplied":
                 site["summary"] = accepted["site_summary"]
+                site["narrative_source_meta"] = {
+                    **ai_meta,
+                    "evidence": copy.deepcopy(citation_evidence.get("site_summary", {}))
+                    if isinstance(citation_evidence, dict) else {},
+                }
 
             # The original deterministic activities remain in draft["activities"].
             # Once explicitly accepted, the site section may use Claude's
@@ -3293,8 +3578,14 @@ def register_monthly_routes(
             cleaned.append(reference)
 
         draft["photo_documentation"] = cleaned
+        draft["photo_review"] = {
+            "confirmed": True,
+            "confirmed_by": username,
+            "confirmed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "count": len(cleaned),
+        }
         _update_draft(data_dir, username, draft)
-        return jsonify({"ok": True, "count": len(cleaned), "photos": cleaned})
+        return jsonify({"ok": True, "count": len(cleaned), "photos": cleaned, "photo_review": draft["photo_review"]})
 
     @app.post("/monthly/preview/<draft_id>")
     def preview_monthly_report(draft_id: str):
@@ -3310,7 +3601,7 @@ def register_monthly_routes(
         if not isinstance(body, dict):
             return jsonify({"error": "Invalid review data."}), 400
         try:
-            reviewed = _apply_review(draft, body)
+            reviewed = _apply_review(draft, body, actor=session.get("username", ""))
             _update_draft(data_dir, session["username"], reviewed)
             buffer = _render(
                 reviewed,
@@ -3349,16 +3640,40 @@ def register_monthly_routes(
         if not isinstance(body, dict):
             return jsonify({"error": "Invalid review data."}), 400
         try:
-            reviewed = _apply_review(draft, body)
-            if reviewed.get("status") == "final" and not bool(body.get("confirm_final")):
+            reviewed = _apply_review(draft, body, actor=session.get("username", ""))
+            is_final = reviewed.get("status") == "final"
+            preflight = build_report_preflight(reviewed, for_final=is_final)
+            if preflight["blockers"]:
                 return jsonify({
-                    "error": f"Confirm that all warnings, missing dates, and {kind} values were reviewed before saving a Final report."
+                    "error": "Report preflight failed.",
+                    "preflight": preflight,
                 }), 400
-            if reviewed.get("status") == "final":
+            if is_final and not bool(body.get("confirm_final")):
+                return jsonify({
+                    "error": f"Confirm that all warnings, missing dates, and {kind} values were reviewed before saving a Final report.",
+                    "preflight": preflight,
+                }), 400
+            override_reason = _clean_text(
+                body.get("final_review_reason")
+                or body.get("notes")
+                or (reviewed.get("source_validation", {}).get("notes")
+                    if isinstance(reviewed.get("source_validation"), dict) else ""),
+                2_000,
+            )
+            if (
+                is_final and preflight.get("requires_override_reason")
+                and not override_reason and bool(body.get("confirm_final"))
+            ):
+                # Backward-compatible with the existing Final-confirmation UI:
+                # the system still persists an explicit reason and approver.
+                override_reason = "Partial Daily Report coverage explicitly confirmed for Final issue."
+            if is_final:
                 reviewed["final_review"] = {
                     "confirmed": True,
                     "confirmed_by": username,
-                    "confirmed_at": datetime.now().isoformat(timespec="seconds"),
+                    "confirmed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "override_reason": override_reason,
+                    "preflight": preflight,
                 }
             # Draft-local raw sources are needed only while applying project
             # decisions. Do not copy them into the issued report JSON.
@@ -3371,8 +3686,18 @@ def register_monthly_routes(
                 and row.get("period_end") == reviewed.get("period", {}).get("end")
             )]
             revision = max([int(row.get("revision", 0)) for row in same_period] or [0]) + 1
+            prior_final = [row for row in same_period if str(row.get("status") or "").lower() == "final"]
+            revision_reason = _clean_text(body.get("revision_reason"), 2_000)
+            if is_final and prior_final and not revision_reason:
+                return jsonify({
+                    "error": "Revision reason is required when issuing a new Final revision for the same period."
+                }), 400
+            reviewed["revision_reason"] = revision_reason
             filename = _monthly_filename(reviewed, revision)
             reports_dir = _monthly_user_dir(data_dir, username) / "reports"
+            reviewed["revision_rows"] = _revision_history_rows(
+                reports_dir, same_period, reviewed, revision
+            )
             pdf_path = reports_dir / filename
             json_filename = f"{Path(filename).stem}.json"
             json_path = reports_dir / json_filename
@@ -3420,9 +3745,24 @@ def register_monthly_routes(
                 "status": reviewed.get("status", "draft"),
                 "source_method": reviewed.get("source_method", ""),
                 "revision": revision,
+                "revision_reason": revision_reason,
                 "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "size_kb": round(len(pdf_bytes) / 1024, 1),
+                "lifecycle_status": "active",
             }
+            if is_final:
+                for row in index:
+                    if (
+                        (row.get("report_type") or "monthly") == kind
+                        and row.get("project_no") == entry["project_no"]
+                        and row.get("period_start") == entry["period_start"]
+                        and row.get("period_end") == entry["period_end"]
+                        and str(row.get("status") or "").lower() == "final"
+                        and str(row.get("lifecycle_status") or "active") == "active"
+                    ):
+                        row["lifecycle_status"] = "superseded"
+                        row["superseded_by"] = reviewed["monthly_report_id"]
+                        row["superseded_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             index.insert(0, entry)
             _save_monthly_index(data_dir, username, index)
             _update_draft(data_dir, username, reviewed)
@@ -3479,6 +3819,10 @@ def register_monthly_routes(
         matches = [row for row in index if row.get("filename") == basename]
         if not matches:
             return jsonify({"error": "Report not found."}), 404
+        if any(str(row.get("status") or "").lower() == "final" for row in matches):
+            return jsonify({
+                "error": "Final reports are immutable and cannot be deleted. Void the report instead."
+            }), 409
         reports_dir = _monthly_user_dir(data_dir, username) / "reports"
         for match in matches:
             for name in (match.get("filename"), match.get("json_filename")):
@@ -3492,3 +3836,36 @@ def register_monthly_routes(
             report_type = str(matches[0].get("report_type") or "monthly")
             activity_logger(username, f"{report_type}_report_deleted", basename)
         return jsonify({"ok": True})
+
+    @app.post("/monthly/void")
+    def void_monthly_report():
+        auth = require_login_json()
+        if auth:
+            return auth
+        body = request.get_json(silent=True) or {}
+        filename = str(body.get("filename") or "")
+        basename = os.path.basename(filename)
+        reason = _clean_text(body.get("reason"), 2_000)
+        if not basename or filename != basename:
+            return jsonify({"error": "Invalid filename."}), 400
+        if not reason:
+            return jsonify({"error": "A void reason is required."}), 400
+        username = session["username"]
+        index = get_monthly_reports_index(data_dir, username)
+        matches = [row for row in index if row.get("filename") == basename]
+        if not matches:
+            return jsonify({"error": "Report not found."}), 404
+        if not all(str(row.get("status") or "").lower() == "final" for row in matches):
+            return jsonify({"error": "Only Final reports use the void lifecycle action."}), 400
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        for row in index:
+            if row.get("filename") == basename:
+                row["lifecycle_status"] = "void"
+                row["void_reason"] = reason
+                row["voided_by"] = username
+                row["voided_at"] = now
+        _save_monthly_index(data_dir, username, index)
+        if activity_logger:
+            report_type = str(matches[0].get("report_type") or "monthly")
+            activity_logger(username, f"{report_type}_report_voided", f"{basename} reason={reason}")
+        return jsonify({"ok": True, "filename": basename, "lifecycle_status": "void"})

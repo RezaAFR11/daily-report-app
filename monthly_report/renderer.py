@@ -869,6 +869,29 @@ def _activity_display_text(value: Mapping[str, Any]) -> str:
     return text
 
 
+
+
+def _coverage_flowables(report: Mapping[str, Any], styles: Mapping[str, ParagraphStyle]) -> list[Flowable]:
+    coverage = report.get("coverage") if isinstance(report.get("coverage"), Mapping) else {}
+    expected = [str(x) for x in _as_list(coverage.get("expected_dates")) if str(x).strip()]
+    covered = [str(x) for x in _as_list(coverage.get("covered_dates", coverage.get("found_dates"))) if str(x).strip()]
+    missing = [str(x) for x in _as_list(coverage.get("missing_dates")) if str(x).strip()]
+    if not expected and not covered and not missing:
+        return []
+    total = len(expected) if expected else len(set(covered + missing))
+    text = f"Daily Report Coverage: {len(covered)} / {total or len(covered)} day(s)"
+    if covered:
+        text += f" | Available: {', '.join(covered)}"
+    if missing:
+        text += f" | Missing: {', '.join(missing)}"
+    else:
+        text += " | Missing: None"
+    return [
+        Paragraph("<b>Source Coverage</b>", styles["body"]),
+        _paragraph(text, styles["placeholder"]),
+        Spacer(1, 6),
+    ]
+
 def _client_facing_missing_summary(value: Any, *, section: str) -> Any:
     """Replace internal manual-input placeholders with client-facing wording."""
 
@@ -1174,7 +1197,9 @@ def _normalise_s_curve(
             plan = [_number(item) for item in plan_raw[:count]]
             actual = [_number(item) for item in actual_raw[:count]]
             if all(item is not None for item in plan + actual):
-                return labels[:count], [float(item) for item in plan], [float(item) for item in actual], False
+                approved = _coerce_bool(value.get("approved"), False)
+                illustrative = _coerce_bool(value.get("illustrative"), False) or not approved
+                return labels[:count], [float(item) for item in plan], [float(item) for item in actual], illustrative
 
     total = next(
         (row for row in reversed(progress)
@@ -1611,9 +1636,15 @@ def _build_story(
     photo_base_dir: str | os.PathLike[str] | None = None,
 ) -> list[Flowable]:
     report_type = _report_type(report)
+    status = _normalise_status(_value(report, "status", "report_mode", default="draft"), report_type=report_type)
     progress = _normalise_progress(report.get("progress", report.get("overall_progress", [])))
     include_s_curve = _coerce_bool(report.get("include_s_curve"), bool(progress))
     curve = _normalise_s_curve(report.get("s_curve"), progress) if include_s_curve else None
+    if status == "FINAL" and curve is not None and curve[3]:
+        raise ValueError(
+            "Final reports cannot render an illustrative/unapproved S-Curve. "
+            "Supply an approved time series or disable the S-Curve."
+        )
     appendices = _normalise_appendices(report.get("appendices"), has_s_curve=curve is not None)
     manpower = report.get("manpower") if isinstance(report.get("manpower"), Mapping) else {}
     manpower_totals = manpower.get("totals") if isinstance(manpower.get("totals"), Mapping) else {}
@@ -1677,6 +1708,9 @@ def _build_story(
         _heading("1. Executive Summary", styles["h1"], 0),
         _paragraph(_executive_summary(report, progress), styles["body"]),
         Spacer(1, 6),
+    ])
+    story.extend(_coverage_flowables(report, styles))
+    story.extend([
         _progress_table(progress, styles, report_type=report_type),
         Spacer(1, 18),
         _heading("2. Safety Status", styles["h1"], 0),
@@ -1757,12 +1791,8 @@ def _build_story(
         next_activity_keys = (
             "next_period_activities",
             "planned_next_period_activities",
-            "next_period",
             "next_week_activities",
-            "next_week",
-            "next_month_activities",
-            "next_month",
-            "planned_activities",
+            "planned_next_week",
         )
         current_heading = "5.2 This Week Activities"
         next_heading = "5.3 Planned Activities Next Week"
@@ -1780,11 +1810,9 @@ def _build_story(
         )
         next_activity_keys = (
             "next_month_activities",
-            "next_month",
             "next_period_activities",
             "planned_next_period_activities",
-            "next_period",
-            "planned_activities",
+            "planned_next_month",
         )
         current_heading = "5.2 This Month Activities"
         next_heading = "5.3 Planned Activities Next Month"
@@ -1816,9 +1844,9 @@ def _build_story(
         styles, empty_message=current_empty,
     ))
     story.append(_heading(next_heading, styles["h2"], 1))
-    story.extend(_content_flowables(
+    story.extend(_activity_flowables(
         next_activities,
-        styles, empty_message=next_empty, bullets=True,
+        styles, empty_message=next_empty,
     ))
     story.append(_heading(
         "5.4 Area of Concern and Suggested Corrective Action", styles["h2"], 1
