@@ -135,10 +135,8 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
     if isinstance(ai, Mapping) and ai.get("status") == "suggested":
         blockers.append({"code": "ai_review", "message": "AI narrative suggestions are still pending acceptance/rejection."})
 
-    photos = [row for row in _as_list(report.get("photo_documentation")) if isinstance(row, Mapping)]
-    photo_review = report.get("photo_review")
-    if for_final and photos and not (isinstance(photo_review, Mapping) and photo_review.get("confirmed") is True):
-        blockers.append({"code": "photo_review", "message": "Photo mapping/captions must be reviewed before Final issue."})
+    # Photo review is optional. Automatic photo mapping/captions may be used
+    # directly for Final issue; users can still review/edit photos when needed.
 
     coverage = report.get("coverage") if isinstance(report.get("coverage"), Mapping) else {}
     missing = [str(x) for x in _as_list(coverage.get("missing_dates")) if str(x).strip()]
