@@ -81,6 +81,22 @@ def _report_name(report_type: Any) -> str:
     return "Weekly" if _report_type(report_type) == "weekly" else "Monthly"
 
 
+def _preflight_failure_message(preflight: Mapping[str, Any]) -> str:
+    blockers = preflight.get("blockers") if isinstance(preflight, Mapping) else []
+    messages: list[str] = []
+    if isinstance(blockers, list):
+        for row in blockers:
+            if isinstance(row, Mapping):
+                message = _clean_text(row.get("message"), 1_000)
+            else:
+                message = _clean_text(row, 1_000)
+            if message and message not in messages:
+                messages.append(message)
+    if not messages:
+        return "Report preflight failed."
+    return "Report preflight failed:\n- " + "\n- ".join(messages)
+
+
 def _normalise_report_mode(report_type: Any, value: Any) -> str:
     kind = _report_type(report_type)
     default = "wtd" if kind == "weekly" else "mtd"
@@ -269,6 +285,56 @@ def _draft_photo_dir(
     if create:
         directory.mkdir(parents=True, exist_ok=True)
     return directory
+
+
+def _photo_asset_preflight_issues(
+    data_dir: str | Path,
+    username: str,
+    draft_id: str,
+    report: Mapping[str, Any],
+) -> list[str]:
+    """Return reviewed photo references whose draft-local JPEG asset is unavailable."""
+    photos = report.get("photo_documentation")
+    if not isinstance(photos, list) or not photos:
+        return []
+
+    directory = _draft_photo_dir(data_dir, username, draft_id, create=False)
+    issues: list[str] = []
+    for index, row in enumerate(photos, start=1):
+        if not isinstance(row, Mapping):
+            issues.append(f"Photo {index} has invalid metadata.")
+            continue
+        asset_id = str(row.get("asset_id") or "")
+        if not is_asset_id(asset_id):
+            issues.append(f"Photo {index} has an invalid asset reference.")
+            continue
+        path = directory / asset_filename(asset_id) if directory is not None else None
+        if path is None or not path.is_file():
+            caption = _clean_text(row.get("caption"), 120)
+            label = f" ({caption})" if caption else ""
+            issues.append(f"Photo {index}{label} asset is unavailable.")
+
+    return issues
+
+
+def _append_runtime_preflight_blockers(
+    preflight: dict[str, Any],
+    *,
+    data_dir: str | Path,
+    username: str,
+    draft_id: str,
+    report: Mapping[str, Any],
+    for_final: bool,
+) -> dict[str, Any]:
+    """Add checks that need filesystem/runtime context to the pure preflight result."""
+    if for_final:
+        for message in _photo_asset_preflight_issues(data_dir, username, draft_id, report):
+            preflight.setdefault("blockers", []).append({
+                "code": "photo_asset_unavailable",
+                "message": message,
+            })
+    preflight["ready"] = not bool(preflight.get("blockers"))
+    return preflight
 
 
 def _remove_draft_assets(data_dir: str | Path, username: str, draft_id: str) -> None:
@@ -2083,7 +2149,16 @@ def register_monthly_routes(
         if draft is None:
             return jsonify({"error": "Report draft not found."}), 404
         for_final = str(request.args.get("final") or "").strip().lower() in {"1", "true", "yes"}
-        return jsonify({"ok": True, "preflight": build_report_preflight(draft, for_final=for_final)})
+        preflight = build_report_preflight(draft, for_final=for_final)
+        preflight = _append_runtime_preflight_blockers(
+            preflight,
+            data_dir=data_dir,
+            username=session["username"],
+            draft_id=draft_id,
+            report=draft,
+            for_final=for_final,
+        )
+        return jsonify({"ok": True, "preflight": preflight})
 
     @app.post("/monthly/structured-source/<draft_id>")
     def update_periodic_structured_source(draft_id: str):
@@ -3643,9 +3718,17 @@ def register_monthly_routes(
             reviewed = _apply_review(draft, body, actor=session.get("username", ""))
             is_final = reviewed.get("status") == "final"
             preflight = build_report_preflight(reviewed, for_final=is_final)
+            preflight = _append_runtime_preflight_blockers(
+                preflight,
+                data_dir=data_dir,
+                username=username,
+                draft_id=draft_id,
+                report=reviewed,
+                for_final=is_final,
+            )
             if preflight["blockers"]:
                 return jsonify({
-                    "error": "Report preflight failed.",
+                    "error": _preflight_failure_message(preflight),
                     "preflight": preflight,
                 }), 400
             if is_final and not bool(body.get("confirm_final")):
