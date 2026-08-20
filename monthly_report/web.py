@@ -69,6 +69,13 @@ _AI_DRAFT_LOCK_STALE_SECONDS = 5 * 60
 _AI_DRAFT_LOCK_RETRY_SECONDS = 5
 _MAKASSAR_TIMEZONE = ZoneInfo("Asia/Makassar")
 
+# Testing-only escape hatch for deleting issued Final periodic reports.
+# Keep this disabled in production. Set ALLOW_FINAL_REPORT_DELETE=true only
+# on an isolated sandbox/test deployment when test revisions need cleanup.
+_ALLOW_FINAL_REPORT_DELETE = str(os.getenv("ALLOW_FINAL_REPORT_DELETE", "")).strip().lower() in {
+    "1", "true", "yes", "on",
+}
+
 
 def _report_type(value: Any) -> str:
     text = str(value or "monthly").strip().lower()
@@ -3902,9 +3909,13 @@ def register_monthly_routes(
         matches = [row for row in index if row.get("filename") == basename]
         if not matches:
             return jsonify({"error": "Report not found."}), 404
-        if any(str(row.get("status") or "").lower() == "final" for row in matches):
+        deleting_final = any(str(row.get("status") or "").lower() == "final" for row in matches)
+        if deleting_final and not _ALLOW_FINAL_REPORT_DELETE:
             return jsonify({
-                "error": "Final reports are immutable and cannot be deleted. Void the report instead."
+                "error": (
+                    "Final reports are immutable and cannot be deleted. Void the report instead, "
+                    "or enable ALLOW_FINAL_REPORT_DELETE=true on a sandbox/test deployment."
+                )
             }), 409
         reports_dir = _monthly_user_dir(data_dir, username) / "reports"
         for match in matches:
@@ -3917,8 +3928,15 @@ def register_monthly_routes(
         _save_monthly_index(data_dir, username, [row for row in index if row.get("filename") != basename])
         if activity_logger:
             report_type = str(matches[0].get("report_type") or "monthly")
-            activity_logger(username, f"{report_type}_report_deleted", basename)
-        return jsonify({"ok": True})
+            detail = basename
+            if deleting_final:
+                detail = f"{basename} [FINAL hard-delete testing override]"
+            activity_logger(username, f"{report_type}_report_deleted", detail)
+        return jsonify({
+            "ok": True,
+            "deleted_final": deleting_final,
+            "testing_override": bool(deleting_final and _ALLOW_FINAL_REPORT_DELETE),
+        })
 
     @app.post("/monthly/void")
     def void_monthly_report():
