@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/9"
-PROMPT_VERSION = "periodic-narrative-grounding/9"
+SUGGESTION_VERSION = "periodic-ai-suggestion/10"
+PROMPT_VERSION = "periodic-narrative-grounding/10"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -202,9 +202,8 @@ def _claim_schema() -> dict[str, Any]:
             "text": {"type": "string"},
             "source_ids": {"type": "array", "items": {"type": "string"}},
             "dates": {"type": "array", "items": {"type": "string"}},
-            "evidence_paths": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["text", "source_ids", "dates", "evidence_paths"],
+        "required": ["text", "source_ids", "dates"],
     }
 
 
@@ -217,9 +216,8 @@ def _concern_action_schema() -> dict[str, Any]:
             "corrective_action": {"type": "string"},
             "source_ids": {"type": "array", "items": {"type": "string"}},
             "dates": {"type": "array", "items": {"type": "string"}},
-            "evidence_paths": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["concern", "corrective_action", "source_ids", "dates", "evidence_paths"],
+        "required": ["concern", "corrective_action", "source_ids", "dates"],
     }
 
 
@@ -234,9 +232,8 @@ def _activity_claim_schema() -> dict[str, Any]:
             "text": {"type": "string"},
             "source_ids": {"type": "array", "items": {"type": "string"}},
             "dates": {"type": "array", "items": {"type": "string"}},
-            "evidence_paths": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["area", "text", "source_ids", "dates", "evidence_paths"],
+        "required": ["area", "text", "source_ids", "dates"],
     }
 
 
@@ -289,12 +286,11 @@ Grounding rules:
    data. Copy them faithfully. Never calculate, estimate, extrapolate, total, or
    derive a new numeric fact in prose.
 4. Every non-placeholder narrative item must cite source_id values and report
-   dates from source_manifest AND evidence_paths pointing to exact fields inside
-   <source_data> (for example $.activities[0].description or $.manpower.totals.total_man_hours).
-   Use only source/date pairs and evidence paths that actually exist. Do not cite
-   a broad section when a more specific field supports the claim.
+   dates from source_manifest. Use only source/date pairs that actually exist.
+   Do NOT return evidence_paths; the application attaches field-level evidence
+   deterministically after validating your source/date citations.
 5. If a section has no supported content, use exactly "Not supplied" with empty
-   source_ids, dates, and evidence_paths, and add "<field>: Not supplied" to missing_data.
+   source_ids and dates, and add "<field>: Not supplied" to missing_data.
 
 Reporting rules:
 6. executive_summary: synthesize the most important work performed, meaningful
@@ -669,85 +665,202 @@ def _source_index(manifest: Sequence[Mapping[str, Any]]) -> dict[str, set[str]]:
 
 
 
-_EVIDENCE_TOKEN_RE = re.compile(r"(?:\.([A-Za-z_][A-Za-z0-9_]*)|\[(\d+)\])")
 _NUMERIC_TOKEN_RE = re.compile(r"(?<![A-Za-z])\d+(?:[.,]\d+)?")
-
-
-def _resolve_evidence_path(root: Mapping[str, Any], path: str) -> tuple[Any, list[Mapping[str, Any]]]:
-    if not isinstance(path, str) or not path.startswith("$.") or len(path) > 500:
-        raise AIUnsupportedClaimsError(f"Invalid evidence path: {path!r}.")
-    cursor: Any = root
-    ancestors: list[Mapping[str, Any]] = []
-    if isinstance(cursor, Mapping):
-        ancestors.append(cursor)
-    position = 1
-    for match in _EVIDENCE_TOKEN_RE.finditer(path, position):
-        if match.start() != position:
-            raise AIUnsupportedClaimsError(f"Invalid evidence path syntax: {path}.")
-        key, index = match.groups()
-        if key is not None:
-            if not isinstance(cursor, Mapping) or key not in cursor:
-                raise AIUnsupportedClaimsError(f"Evidence path does not exist: {path}.")
-            cursor = cursor[key]
-        else:
-            if not isinstance(cursor, Sequence) or isinstance(cursor, (str, bytes, bytearray)):
-                raise AIUnsupportedClaimsError(f"Evidence path is not indexable: {path}.")
-            idx = int(index)
-            if idx >= len(cursor):
-                raise AIUnsupportedClaimsError(f"Evidence path index is out of range: {path}.")
-            cursor = cursor[idx]
-        if isinstance(cursor, Mapping):
-            ancestors.append(cursor)
-        position = match.end()
-    if position != len(path):
-        raise AIUnsupportedClaimsError(f"Invalid evidence path syntax: {path}.")
-    return cursor, ancestors
+_WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}")
+_EVIDENCE_SKIP_KEYS = {"source_manifest", "source_validation"}
+_EVIDENCE_GENERIC_WORDS = {
+    "this", "that", "with", "from", "into", "were", "was", "are", "and", "the",
+    "for", "during", "report", "weekly", "monthly", "progress", "period", "reported",
+    "available", "data", "total", "each", "both", "only", "not", "supplied",
+}
 
 
 def _normalised_number_tokens(value: Any) -> set[str]:
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-    result: set[str] = set()
-    for token in _NUMERIC_TOKEN_RE.findall(raw):
-        result.add(token.replace(",", "."))
-    return result
+    return {token.replace(",", ".") for token in _NUMERIC_TOKEN_RE.findall(raw)}
 
 
-def _validate_evidence(
-    text: str, evidence_paths: list[str], compact_draft: Mapping[str, Any],
-    source_ids: list[str], dates: list[str], *, path: str,
+def _word_tokens(value: Any) -> set[str]:
+    text = str(value or "").casefold()
+    return {
+        token for token in _WORD_TOKEN_RE.findall(text)
+        if token not in _EVIDENCE_GENERIC_WORDS
+    }
+
+
+def _path_key(path: str, key: Any) -> str:
+    key_text = str(key)
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key_text):
+        return f"{path}.{key_text}"
+    return f"{path}[{json.dumps(key_text, ensure_ascii=False)}]"
+
+
+def _collect_evidence_leaves(
+    value: Any,
+    *,
+    path: str = "$",
+    inherited_sources: frozenset[str] = frozenset(),
+    inherited_dates: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    """Flatten compact source data into scalar evidence with inherited provenance.
+
+    Aggregated activity/weather/constraint rows carry source_report_id/date metadata.
+    Deterministic totals often carry only a date or no row-level source ID, so both
+    source/date and date-only provenance are retained for ranking rather than guessed.
+    """
+
+    rows: list[dict[str, Any]] = []
+    if isinstance(value, Mapping):
+        local_sources = set(inherited_sources)
+        local_dates = set(inherited_dates)
+        source_id = str(value.get("source_report_id") or value.get("source_id") or "").strip()
+        report_date = str(value.get("date") or value.get("source_date") or "").strip()
+        if source_id:
+            local_sources.add(source_id)
+        if _DATE_RE.fullmatch(report_date):
+            local_dates.add(report_date)
+        for key, item in value.items():
+            if path == "$" and str(key) in _EVIDENCE_SKIP_KEYS:
+                continue
+            rows.extend(
+                _collect_evidence_leaves(
+                    item,
+                    path=_path_key(path, key),
+                    inherited_sources=frozenset(local_sources),
+                    inherited_dates=frozenset(local_dates),
+                )
+            )
+        return rows
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for index, item in enumerate(value):
+            rows.extend(
+                _collect_evidence_leaves(
+                    item,
+                    path=f"{path}[{index}]",
+                    inherited_sources=inherited_sources,
+                    inherited_dates=inherited_dates,
+                )
+            )
+        return rows
+    if value in (None, ""):
+        return rows
+    rows.append({
+        "path": path,
+        "value": value,
+        "sources": set(inherited_sources),
+        "dates": set(inherited_dates),
+    })
+    return rows
+
+
+def _evidence_candidate_score(
+    row: Mapping[str, Any],
+    *,
+    claim_words: set[str],
+    claim_numbers: set[str],
+    source_ids: set[str],
+    dates: set[str],
+) -> tuple[float, set[str]]:
+    row_sources = set(row.get("sources") or ())
+    row_dates = set(row.get("dates") or ())
+    value = row.get("value")
+    path = str(row.get("path") or "")
+    value_words = _word_tokens(value) | _word_tokens(path.replace("_", " "))
+    value_numbers = _normalised_number_tokens(value)
+    matched_numbers = claim_numbers & value_numbers
+    overlap = claim_words & value_words
+
+    provenance = 0.0
+    if row_sources & source_ids and row_dates & dates:
+        provenance = 18.0
+    elif row_sources & source_ids:
+        provenance = 12.0
+    elif row_dates & dates:
+        provenance = 9.0
+    elif path.startswith(("$.period", "$.coverage", "$.manpower.totals", "$.overall_progress", "$.progress", "$.safety", "$.engineering", "$.procurement")):
+        provenance = 3.0
+
+    score = provenance + (8.0 * len(matched_numbers)) + (1.5 * len(overlap))
+    if claim_words and overlap:
+        score += 2.0
+    return score, matched_numbers
+
+
+def _infer_evidence_paths(
+    text: str,
+    compact_draft: Mapping[str, Any],
+    source_ids: list[str],
+    dates: list[str],
+    *,
+    path: str,
 ) -> list[str]:
-    if not evidence_paths:
-        raise AIUnsupportedClaimsError(f"{path} has no field-level evidence_paths.")
-    if len(evidence_paths) > MAX_REFERENCES_PER_CLAIM:
-        raise AIMalformedResponseError(f"{path} has too many evidence paths.")
-    cleaned = list(dict.fromkeys(item.strip() for item in evidence_paths if item.strip()))
-    evidence_values: list[Any] = []
-    provenance_pairs: set[tuple[str, str]] = set()
-    for evidence_path in cleaned:
-        value, ancestors = _resolve_evidence_path(compact_draft, evidence_path)
-        evidence_values.append(value)
-        for ancestor in ancestors:
-            source_id = str(ancestor.get("source_report_id") or ancestor.get("source_id") or "").strip()
-            report_date = str(ancestor.get("date") or ancestor.get("source_date") or "").strip()
-            if source_id and report_date:
-                provenance_pairs.add((source_id, report_date))
-    if provenance_pairs and not any(
-        source_id in source_ids and report_date in dates
-        for source_id, report_date in provenance_pairs
-    ):
-        raise AIUnsupportedClaimsError(
-            f"{path} evidence paths do not match the cited source/date provenance."
-        )
-    evidence_numbers: set[str] = set()
-    for value in evidence_values:
-        evidence_numbers.update(_normalised_number_tokens(value))
-    prose_numbers = {token.replace(",", ".") for token in _NUMERIC_TOKEN_RE.findall(text)}
-    unsupported = sorted(token for token in prose_numbers if token not in evidence_numbers)
+    """Attach field-level evidence in Python without making Claude emit JSON paths.
+
+    The provider schema therefore stays close to the proven v8 shape while the
+    application still records exact compact-draft fields for audit/review.
+    """
+
+    claim_numbers = {token.replace(",", ".") for token in _NUMERIC_TOKEN_RE.findall(text)}
+    all_numbers = _normalised_number_tokens(compact_draft)
+    unsupported = sorted(claim_numbers - all_numbers)
     if unsupported:
         raise AIUnsupportedClaimsError(
-            f"{path} contains numeric facts not present in its evidence fields: {', '.join(unsupported)}."
+            f"{path} contains numeric facts absent from the supplied source data: {', '.join(unsupported)}."
         )
-    return cleaned
+
+    claim_words = _word_tokens(text)
+    source_set = set(source_ids)
+    date_set = set(dates)
+    ranked: list[tuple[float, set[str], int, str]] = []
+    for row in _collect_evidence_leaves(compact_draft):
+        score, matched_numbers = _evidence_candidate_score(
+            row,
+            claim_words=claim_words,
+            claim_numbers=claim_numbers,
+            source_ids=source_set,
+            dates=date_set,
+        )
+        overlap_count = len(claim_words & (_word_tokens(row.get("value")) | _word_tokens(str(row.get("path") or "").replace("_", " "))))
+        if score > 0:
+            ranked.append((score, matched_numbers, overlap_count, str(row["path"])))
+    ranked.sort(key=lambda item: (-item[0], item[3]))
+
+    selected: list[str] = []
+    covered_numbers: set[str] = set()
+    # First guarantee that every numeric token is backed by a concrete field.
+    for score, matched_numbers, _overlap_count, candidate_path in ranked:
+        if claim_numbers and matched_numbers - covered_numbers:
+            selected.append(candidate_path)
+            covered_numbers.update(matched_numbers)
+            if covered_numbers >= claim_numbers:
+                break
+    if claim_numbers - covered_numbers:
+        missing = sorted(claim_numbers - covered_numbers)
+        raise AIUnsupportedClaimsError(
+            f"{path} numeric facts could not be tied to cited source fields: {', '.join(missing)}."
+        )
+
+    # Add the strongest textual/provenance evidence, bounded for audit payload size.
+    for score, matched_numbers, overlap_count, candidate_path in ranked:
+        if score < 4 or (not matched_numbers and overlap_count <= 0):
+            continue
+        if candidate_path not in selected:
+            selected.append(candidate_path)
+        if len(selected) >= 8:
+            break
+
+    if not selected:
+        # A valid source/date citation must still resolve to at least one dated or
+        # source-tagged field.  This avoids returning a cosmetic evidence marker.
+        for score, _matched_numbers, _overlap_count, candidate_path in ranked:
+            if score >= 9:
+                selected.append(candidate_path)
+                break
+    if not selected:
+        raise AIUnsupportedClaimsError(
+            f"{path} could not be tied to a concrete field for its cited source/date evidence."
+        )
+    return selected[:MAX_REFERENCES_PER_CLAIM]
 
 
 def _validate_claim(
@@ -760,11 +873,10 @@ def _validate_claim(
 ) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise AIMalformedResponseError(f"{path} must be an object.")
-    _strict_keys(raw, {"text", "source_ids", "dates", "evidence_paths"}, path)
+    _strict_keys(raw, {"text", "source_ids", "dates"}, path)
     text = raw.get("text")
     source_ids = raw.get("source_ids")
     dates = raw.get("dates")
-    evidence_paths = raw.get("evidence_paths")
     if not isinstance(text, str) or not text.strip():
         raise AIMalformedResponseError(f"{path}.text must be a non-empty string.")
     text = " ".join(text.split())
@@ -774,15 +886,13 @@ def _validate_claim(
         raise AIMalformedResponseError(f"{path}.source_ids must be a string array.")
     if not isinstance(dates, list) or not all(isinstance(item, str) for item in dates):
         raise AIMalformedResponseError(f"{path}.dates must be a string array.")
-    if not isinstance(evidence_paths, list) or not all(isinstance(item, str) for item in evidence_paths):
-        raise AIMalformedResponseError(f"{path}.evidence_paths must be a string array.")
     if len(source_ids) > MAX_REFERENCES_PER_CLAIM or len(dates) > MAX_REFERENCES_PER_CLAIM:
         raise AIMalformedResponseError(f"{path} has too many source references.")
     source_ids = list(dict.fromkeys(item.strip() for item in source_ids if item.strip()))
     dates = list(dict.fromkeys(item.strip() for item in dates if item.strip()))
 
     if text == _NOT_SUPPLIED:
-        if source_ids or dates or evidence_paths:
+        if source_ids or dates:
             raise AIUnsupportedClaimsError(
                 f"{path} is Not supplied and must not cite source evidence."
             )
@@ -803,14 +913,15 @@ def _validate_claim(
                 f"{path} cites date {report_date} without a matching source ID."
             )
 
-    evidence_paths = _validate_evidence(
-        text, evidence_paths, compact_draft, source_ids, dates, path=path
+    evidence_paths = _infer_evidence_paths(
+        text, compact_draft, source_ids, dates, path=path
     )
     return {
-        "text": text, "source_ids": source_ids, "dates": dates,
+        "text": text,
+        "source_ids": source_ids,
+        "dates": dates,
         "evidence_paths": evidence_paths,
     }
-
 
 
 def _validate_activity_claim(
@@ -822,7 +933,7 @@ def _validate_activity_claim(
 ) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise AIMalformedResponseError(f"{path} must be an object.")
-    _strict_keys(raw, {"area", "text", "source_ids", "dates", "evidence_paths"}, path)
+    _strict_keys(raw, {"area", "text", "source_ids", "dates"}, path)
     area = " ".join(str(raw.get("area") or "").split())
     if not area:
         raise AIMalformedResponseError(f"{path}.area must be a non-empty string.")
@@ -833,7 +944,6 @@ def _validate_activity_claim(
             "text": raw.get("text"),
             "source_ids": raw.get("source_ids"),
             "dates": raw.get("dates"),
-            "evidence_paths": raw.get("evidence_paths"),
         },
         path=path,
         source_index=source_index,
@@ -858,7 +968,7 @@ def _validate_concern_action(
         raise AIMalformedResponseError(f"{path} must be an object.")
     _strict_keys(
         raw,
-        {"concern", "corrective_action", "source_ids", "dates", "evidence_paths"},
+        {"concern", "corrective_action", "source_ids", "dates"},
         path,
     )
     for field in ("concern", "corrective_action"):
@@ -871,7 +981,6 @@ def _validate_concern_action(
     common = {
         "source_ids": raw.get("source_ids"),
         "dates": raw.get("dates"),
-        "evidence_paths": raw.get("evidence_paths"),
     }
     concern = _validate_claim(
         {"text": raw.get("concern"), **common},
@@ -1167,6 +1276,34 @@ def _structured_output_unsupported(exc: TypeError) -> bool:
     return "output_config" in message and ("unexpected" in message or "keyword" in message)
 
 
+def _structured_output_rejected_by_server(exc: Exception) -> bool:
+    """Detect provider-side rejection of structured output and allow one safe fallback."""
+
+    status = getattr(exc, "status_code", None)
+    if status != 400:
+        return False
+    message = str(exc).casefold()
+    markers = (
+        "output_config", "json_schema", "json schema", "structured output",
+        "schema is too complex", "schema", "grammar",
+    )
+    return any(marker in message for marker in markers)
+
+
+def _prompt_only_json_fallback(kwargs: Mapping[str, Any], user_instruction: str) -> dict[str, Any]:
+    fallback = dict(kwargs)
+    fallback.pop("output_config", None)
+    fallback["messages"] = [{
+        "role": "user",
+        "content": (
+            user_instruction
+            + "\nReturn ONLY JSON matching this schema exactly: "
+            + _canonical_json(AI_NARRATIVE_SCHEMA)
+        ),
+    }]
+    return fallback
+
+
 def generate_ai_summary(
     draft: Mapping[str, Any],
     *,
@@ -1251,19 +1388,19 @@ def generate_ai_summary(
             except TypeError as exc:
                 if not _structured_output_unsupported(exc):
                     raise
-                # Older SDK fallback: still give the model the exact schema in
-                # the prompt instead of silently asking for unspecified JSON.
-                fallback = dict(kwargs)
-                fallback.pop("output_config", None)
-                fallback["messages"] = [{
-                    "role": "user",
-                    "content": (
-                        user_instruction
-                        + "\nReturn ONLY JSON matching this schema exactly: "
-                        + _canonical_json(AI_NARRATIVE_SCHEMA)
-                    ),
-                }]
-                response = client.messages.create(**fallback)
+                # Older SDK: retry without the unsupported output_config keyword.
+                response = client.messages.create(
+                    **_prompt_only_json_fallback(kwargs, user_instruction)
+                )
+            except Exception as exc:
+                if not _structured_output_rejected_by_server(exc):
+                    raise
+                # Some provider/API combinations reject structured-output grammar
+                # compilation with HTTP 400. Retry once using the proven prompt-only
+                # JSON path; deterministic validation below still enforces grounding.
+                response = client.messages.create(
+                    **_prompt_only_json_fallback(kwargs, user_instruction)
+                )
         except AISummaryError:
             raise
         except Exception as exc:
