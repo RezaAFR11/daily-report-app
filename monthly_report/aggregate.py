@@ -35,6 +35,32 @@ _PROGRESS_TOTAL_FIELDS = (
     "cumulative_to_date_actual",
 )
 
+# Daily-report PDF text occasionally leaks repeated page headers/footers into the
+# final activity line when a table continues across pages.  Keep the canonical
+# source untouched, but strip only unmistakable document boilerplate from the
+# period aggregate used for client-facing Weekly/Monthly reports.
+_DOCUMENT_BOILERPLATE_RE = re.compile(
+    r"\s+(?:PT\.?\s+GARUDA\s+PRIMA\s+AKSARA|T\.\s*Garuda\s+Prima\s+Aksara|"
+    r"Daily\s+Activity\s+Report|aily\s+Activity\s+Report)\b.*$",
+    re.IGNORECASE,
+)
+
+
+def _clean_period_text(value: Any) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    cleaned = _DOCUMENT_BOILERPLATE_RE.sub("", text).strip()
+    # A flattened footer can also begin directly after a truncated location/customer
+    # field.  Remove those fragments only when they follow real activity prose.
+    cleaned = re.sub(
+        r"\s+(?:LOCATION|CUSTOMER|DATE)\s*:\s*[^|]{0,160}(?:\||$).*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    return cleaned or text
+
 
 def _iso_date(value: Any, label: str = "date") -> str:
     text = str(value or "").strip()
@@ -352,12 +378,28 @@ def _daily_manpower(payload: Mapping[str, Any], report_date: str) -> tuple[dict[
 
     direct = _dedupe_people(direct_rows, "direct")
     indirect = _dedupe_people(indirect_rows, "indirect")
+
+    # The same employee can appear in the global Indirect table and again in an
+    # area Direct table on the same day.  Treat that as one physical person.
+    # Area/direct assignment takes precedence for category reporting, while the
+    # most authoritative/longest supplied shift is retained.  This guarantees:
+    #     Direct HC + Indirect HC == Total HC
+    # and the same reconciliation for person-days/man-hours.
+    overlap_keys = sorted(set(direct).intersection(indirect), key=str)
+    cross_category_duplicates: list[dict[str, str]] = []
+    for key in overlap_keys:
+        indirect_person = indirect[key]
+        _merge_person(direct[key], indirect_person)
+        person_name = _clean_text(direct[key].get("name")) or _clean_text(indirect_person.get("name"))
+        cross_category_duplicates.append({
+            "name": person_name or "Unnamed person",
+            "kept_as": "direct",
+        })
+        indirect.pop(key, None)
+
     combined = dict(direct)
     for key, person in indirect.items():
-        if key not in combined:
-            combined[key] = dict(person)
-            continue
-        _merge_person(combined[key], person)
+        combined[key] = dict(person)
 
     def hours_total(people: Mapping[Any, Mapping[str, Any]]) -> float:
         return round(sum(float(person["hours"]) for person in people.values() if person["hours"] is not None), 2)
@@ -384,6 +426,8 @@ def _daily_manpower(payload: Mapping[str, Any], report_date: str) -> tuple[dict[
             "indirect": indirect_completeness,
             "total": total_completeness,
         },
+        "cross_category_duplicate_count": len(cross_category_duplicates),
+        "cross_category_duplicates": cross_category_duplicates,
     }
 
     role_rows = []
@@ -633,6 +677,9 @@ def aggregate_monthly_records(
             area_name = _clean_text(area.get("id")) or "Unspecified"
             status_map = _activity_status_map(area)
             for activity_index, description in enumerate(_iter_text_values(area.get("activities_today"))):
+                description = _clean_period_text(description)
+                if not description:
+                    continue
                 item = {
                     "date": report_date,
                     "area": area_name,
@@ -645,12 +692,18 @@ def aggregate_monthly_records(
                     item["status"] = status
                 activities.append(item)
             for constraint_index, text in enumerate(_iter_text_values(area.get("constraints"))):
+                text = _clean_period_text(text)
+                if not text:
+                    continue
                 constraints.append({
                     "date": report_date, "area": area_name, "text": text,
                     "source_report_id": source_report_id,
                     "source_path": f"$.areas[{area_index}].constraints[{constraint_index}]",
                 })
             for remark_index, text in enumerate(_iter_text_values(area.get("remarks"))):
+                text = _clean_period_text(text)
+                if not text:
+                    continue
                 remarks.append({
                     "date": report_date, "area": area_name, "text": text,
                     "source_report_id": source_report_id,
@@ -773,6 +826,9 @@ def aggregate_monthly_records(
         "invalid_hours_count": sum(day["invalid_hours_count"] for day in daily_manpower),
         "unparsed_hours_count": sum(day["unparsed_hours_count"] for day in daily_manpower),
         "hours_complete": all(day["hours_complete"] for day in daily_manpower),
+        "cross_category_duplicate_count": sum(
+            int(day.get("cross_category_duplicate_count") or 0) for day in daily_manpower
+        ),
     }
 
     if selected:
@@ -833,7 +889,8 @@ def aggregate_monthly_records(
             "roles": roles,
             "hours_method": (
                 "explicit man_hours takes precedence; otherwise use elapsed shift range without "
-                "break deduction; duplicate assignments use the authoritative or longest shift"
+                "break deduction; same-day duplicate names are reconciled once, with direct/area assignment "
+                "taking category precedence and the authoritative or longest supplied shift retained"
             ),
         },
         "overall_progress": _aggregate_progress(selected),
