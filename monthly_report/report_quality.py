@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from typing import Any
+import math
+import re
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -101,6 +103,64 @@ def _pending_workforce(report: Mapping[str, Any]) -> bool:
     return False
 
 
+def _number(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _workforce_reconciliation_issues(report: Mapping[str, Any]) -> list[str]:
+    manpower = report.get("manpower") if isinstance(report.get("manpower"), Mapping) else {}
+    totals = manpower.get("totals") if isinstance(manpower.get("totals"), Mapping) else {}
+    issues: list[str] = []
+
+    def mismatch(left: Any, right: Any, total: Any, tolerance: float = 0.01) -> bool:
+        a, b, c = _number(left), _number(right), _number(total)
+        return a is not None and b is not None and c is not None and abs((a + b) - c) > tolerance
+
+    if mismatch(totals.get("direct_person_days"), totals.get("indirect_person_days"), totals.get("total_person_days"), 0.001):
+        issues.append("Manpower person-day totals do not reconcile: Direct + Indirect != Total.")
+    if mismatch(totals.get("direct_man_hours"), totals.get("indirect_man_hours"), totals.get("total_man_hours")):
+        issues.append("Man-hour totals do not reconcile: Direct + Indirect != Total.")
+
+    daily = manpower.get("daily") if isinstance(manpower.get("daily"), Sequence) else []
+    for row in daily:
+        if not isinstance(row, Mapping):
+            continue
+        date_text = str(row.get("date") or "unknown date")
+        if mismatch(row.get("direct_headcount"), row.get("indirect_headcount"), row.get("total_headcount"), 0.001):
+            issues.append(f"{date_text}: Direct HC + Indirect HC != Total HC.")
+        if mismatch(row.get("direct_man_hours"), row.get("indirect_man_hours"), row.get("total_man_hours")):
+            issues.append(f"{date_text}: Direct MH + Indirect MH != Total MH.")
+    return issues
+
+
+def _client_text_issues(report: Mapping[str, Any]) -> list[str]:
+    issues: list[str] = []
+    summary = str(report.get("executive_summary") or "")
+    if re.search(r"\bthis\s+(?:weekly|monthly|week-to-date|month-to-date)?\s*draft\b|\bthis\s+draft\b", summary, re.I):
+        issues.append("Executive Summary still contains draft-oriented wording.")
+    contamination = re.compile(
+        r"(?:Confidential\s+Daily\s+Activity\s+Report|Daily\s+Activity\s+Report\s*\||PT\.?\s+GARUDA\s+PRIMA\s+AKSARA\s*\|)",
+        re.I,
+    )
+    for row in _as_list(report.get("activities")):
+        if isinstance(row, Mapping):
+            text = str(row.get("description", row.get("text", "")) or "")
+            if contamination.search(text):
+                issues.append("Activity text contains repeated Daily Report header/footer boilerplate.")
+                break
+    for row in _as_list(report.get("photo_documentation")):
+        if isinstance(row, Mapping) and contamination.search(str(row.get("caption") or "")):
+            issues.append("Photo caption contains repeated Daily Report header/footer boilerplate.")
+            break
+    return issues
+
+
 def _manual_source_issues(report: Mapping[str, Any]) -> list[str]:
     issues: list[str] = []
     sections = ["engineering", "procurement", "equipment_delivery", "shipments", "safety"]
@@ -163,6 +223,14 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
             "code": "s_curve_omitted_final",
             "message": "Progress rows are available, but no approved S-Curve time series was supplied; the S-Curve appendix will be omitted from Final.",
         })
+
+    for message in _workforce_reconciliation_issues(report):
+        target = blockers if for_final else warnings
+        target.append({"code": "workforce_reconciliation", "message": message})
+
+    for message in _client_text_issues(report):
+        target = blockers if for_final else warnings
+        target.append({"code": "client_text_quality", "message": message})
 
     for message in _manual_source_issues(report):
         warnings.append({"code": "manual_source_audit", "message": message})
