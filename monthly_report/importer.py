@@ -935,6 +935,11 @@ def _activity_items_from_segment(segment: str) -> tuple[list[str], list[str]]:
                 re.IGNORECASE,
             ):
                 break
+            # Repeated page headers/footers can appear between wrapped activity
+            # lines in pypdf output.  They are document chrome, never activity
+            # continuation text, so skip them before column slicing.
+            if _is_document_boilerplate_note(_compact(item_line)):
+                continue
             left = item_line[today_pos:tomorrow_pos]
             right = item_line[tomorrow_pos:]
             left_match = _NUMBERED_ITEM.match(left)
@@ -953,6 +958,11 @@ def _activity_items_from_segment(segment: str) -> tuple[list[str], list[str]]:
     mode: str | None = None
     for line in lines:
         compact_line = _compact(line)
+        if _is_document_boilerplate_note(compact_line):
+            # Never concatenate a repeated PDF header/footer to the previous
+            # numbered activity.  Keep parsing because the same area can resume
+            # on the next page without a repeated area marker.
+            continue
         if re.fullmatch(r"Activity\s+Today", compact_line, re.IGNORECASE):
             mode = "today"
             continue
