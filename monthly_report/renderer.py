@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import math
 import os
+import re
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from html import escape
@@ -1424,7 +1425,12 @@ def _photo_grid_flowables(
     *,
     photo_base_dir: str | os.PathLike[str] | None,
 ) -> list[Flowable]:
-    """Render reviewed draft-local photo references in a three-column grid."""
+    """Render reviewed photos grouped by source date, up to nine cards per page.
+
+    Weekly/Monthly reports are easier to audit when each Daily Report date has a
+    visible photo block.  Exact duplicate assets are removed, while different
+    photographs of the same activity remain available as evidence.
+    """
 
     if photo_base_dir is None:
         return [Paragraph("Photo assets are unavailable.", styles["placeholder"])]
@@ -1434,99 +1440,149 @@ def _photo_grid_flowables(
         return [Paragraph("Photo rendering requires Pillow.", styles["placeholder"])]
 
     root = os.path.realpath(os.fspath(photo_base_dir))
-    columns = 3
-    cell_width = BODY_WIDTH / columns
-    image_width = cell_width - 8
-    image_height = 122.0
-    rows: list[list[Any]] = []
-    current: list[Any] = []
-
+    prepared: list[Mapping[str, Any]] = []
+    seen_assets: set[str] = set()
     for raw in photos:
         if not isinstance(raw, Mapping):
             continue
         asset_id = _plain(raw.get("asset_id"))
-        if not is_asset_id(asset_id):
+        if not is_asset_id(asset_id) or asset_id in seen_assets:
             continue
-        path = os.path.realpath(os.path.join(root, asset_filename(asset_id)))
-        if os.path.dirname(path) != root or not os.path.isfile(path):
-            continue
-        try:
-            with Image.open(path) as opened:
-                if str(opened.format or "").upper() != "JPEG":
-                    continue
-                image = ImageOps.exif_transpose(opened).convert("RGB")
-                fitted = ImageOps.fit(
-                    image,
-                    (max(1, int(image_width * 2)), max(1, int(image_height * 2))),
-                    method=Image.Resampling.LANCZOS,
-                )
-                image_buffer = io.BytesIO()
-                fitted.save(image_buffer, format="JPEG", quality=82, optimize=True)
-                image_buffer.seek(0)
-            rendered_image: Any = RLImage(
-                image_buffer,
-                width=image_width,
-                height=image_height,
-            )
-        except Exception:
-            continue
+        seen_assets.add(asset_id)
+        prepared.append(raw)
 
-        source = _plain(raw.get("source"))
-        page = _plain(raw.get("page"))
-        area = _plain(raw.get("source_area"))
-        fallback = f"{source} - p.{page}" if source and page else source
-        caption = _plain(raw.get("caption"), fallback)
+    prepared.sort(key=lambda row: (
+        _plain(row.get("source_date"), "9999-99-99"),
+        int(_number(row.get("order")) or 0),
+        _plain(row.get("source")),
+        int(_number(row.get("page")) or 0),
+    ))
 
-        card_rows: list[list[Any]] = []
-        if area:
-            card_rows.append([Paragraph(f"<b>{_xml(area)}</b>", styles["small"])])
-        if caption:
-            card_rows.append([Paragraph(f"<i>{_xml(caption)}</i>", styles["small"])])
-        card_rows.append([rendered_image])
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    group_order: list[str] = []
+    for row in prepared:
+        source_date = _plain(row.get("source_date"), "Undated source")
+        if source_date not in grouped:
+            grouped[source_date] = []
+            group_order.append(source_date)
+        grouped[source_date].append(row)
 
-        card = Table(
-            card_rows,
-            colWidths=[cell_width - 4],
-        )
-        card_style = [
-            ("BOX", (0, 0), (-1, -1), 0.55, CYAN),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 3),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ]
-        if area:
-            card_style.extend([
-                ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#DDEBF7")),
-                ("LINEBELOW", (0, 0), (0, 0), 0.35, CYAN),
-            ])
+    def clean_caption(value: Any, fallback: str = "") -> str:
+        text = _plain(value, fallback)
+        if not text:
+            return ""
+        # Last-resort protection for legacy drafts imported before the parser
+        # boilerplate fix.  Never show page headers/footers inside photo captions.
+        text = re.sub(
+            r"\s+(?:PT\.?\s+GARUDA\s+PRIMA\s+AKSARA|T\.\s*Garuda\s+Prima\s+Aksara|"
+            r"Daily\s+Activity\s+Report|aily\s+Activity\s+Report)\b.*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+        return text
+
+    def build_grid(items: list[Mapping[str, Any]]) -> Table | None:
+        columns = 3
+        cell_width = BODY_WIDTH / columns
+        image_width = cell_width - 8
+        image_height = 122.0
+        rows: list[list[Any]] = []
+        current: list[Any] = []
+
+        for raw in items:
+            asset_id = _plain(raw.get("asset_id"))
+            path = os.path.realpath(os.path.join(root, asset_filename(asset_id)))
+            if os.path.dirname(path) != root or not os.path.isfile(path):
+                continue
+            try:
+                with Image.open(path) as opened:
+                    if str(opened.format or "").upper() != "JPEG":
+                        continue
+                    image = ImageOps.exif_transpose(opened).convert("RGB")
+                    fitted = ImageOps.fit(
+                        image,
+                        (max(1, int(image_width * 2)), max(1, int(image_height * 2))),
+                        method=Image.Resampling.LANCZOS,
+                    )
+                    image_buffer = io.BytesIO()
+                    fitted.save(image_buffer, format="JPEG", quality=82, optimize=True)
+                    image_buffer.seek(0)
+                rendered_image: Any = RLImage(image_buffer, width=image_width, height=image_height)
+            except Exception:
+                continue
+
+            source = _plain(raw.get("source"))
+            page = _plain(raw.get("page"))
+            area = _plain(raw.get("source_area"))
+            fallback = f"{source} - p.{page}" if source and page else source
+            caption = clean_caption(raw.get("caption"), fallback)
+
+            card_rows: list[list[Any]] = []
+            if area:
+                card_rows.append([Paragraph(f"<b>{_xml(area)}</b>", styles["small"])])
             if caption:
-                card_style.append(("BACKGROUND", (0, 1), (0, 1), LIGHT_GREY))
-        elif caption:
-            card_style.append(("BACKGROUND", (0, 0), (0, 0), LIGHT_GREY))
-        card.setStyle(TableStyle(card_style))
-        current.append(card)
-        if len(current) == columns:
+                card_rows.append([Paragraph(f"<i>{_xml(caption)}</i>", styles["small"])])
+            card_rows.append([rendered_image])
+            card = Table(card_rows, colWidths=[cell_width - 4])
+            card_style = [
+                ("BOX", (0, 0), (-1, -1), 0.55, CYAN),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]
+            if area:
+                card_style.extend([
+                    ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#DDEBF7")),
+                    ("LINEBELOW", (0, 0), (0, 0), 0.35, CYAN),
+                ])
+                if caption:
+                    card_style.append(("BACKGROUND", (0, 1), (0, 1), LIGHT_GREY))
+            elif caption:
+                card_style.append(("BACKGROUND", (0, 0), (0, 0), LIGHT_GREY))
+            card.setStyle(TableStyle(card_style))
+            current.append(card)
+            if len(current) == columns:
+                rows.append(current)
+                current = []
+
+        if current:
+            current.extend([""] * (columns - len(current)))
             rows.append(current)
-            current = []
+        if not rows:
+            return None
+        grid = Table(rows, colWidths=[cell_width] * columns, hAlign="LEFT", splitByRow=1)
+        grid.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        return grid
 
-    if current:
-        current.extend([""] * (columns - len(current)))
-        rows.append(current)
-    if not rows:
+    result: list[Flowable] = []
+    for date_index, source_date in enumerate(group_order):
+        items = grouped[source_date]
+        for chunk_index in range(0, len(items), 9):
+            chunk = items[chunk_index:chunk_index + 9]
+            if result:
+                result.append(PageBreak())
+            continuation = " (continued)" if chunk_index else ""
+            result.append(_heading(
+                f"Photo Documentation: {source_date}{continuation}",
+                styles["h2"],
+                1,
+            ))
+            grid = build_grid(chunk)
+            if grid is not None:
+                result.append(grid)
+
+    if not result:
         return [Paragraph("No selected photo assets are available.", styles["placeholder"])]
-
-    grid = Table(rows, colWidths=[cell_width] * columns, hAlign="LEFT", splitByRow=1)
-    grid.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 2),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-    ]))
-    return [grid]
-
+    return result
 
 def _manpower_appendix_flowables(
     manpower: Any,
@@ -1572,12 +1628,25 @@ def _manpower_appendix_flowables(
         ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]))
     result: list[Flowable] = [summary, Spacer(1, 10)]
+    if int(_number(totals.get("cross_category_duplicate_count")) or 0) > 0:
+        result.extend([
+            _paragraph(
+                "Same-day cross-category duplicate names were reconciled once; direct/area assignment takes precedence for category totals.",
+                styles["placeholder"],
+            ),
+            Spacer(1, 6),
+        ])
     if daily:
         table_rows: list[list[Any]] = [[
             "Date", "Direct HC", "Indirect HC", "Total HC", "Regular MH", "OT MH", "Total MH",
         ]]
         for row in daily:
             regular = row.get("regular_man_hours")
+            if regular is None:
+                # Prefer the reconciled unique-person daily total. Older drafts
+                # may have direct/indirect category overlap, where adding both
+                # subtotals would double-count one employee.
+                regular = row.get("total_man_hours")
             if regular is None:
                 direct_value = _number(row.get("direct_man_hours")) or 0
                 indirect_value = _number(row.get("indirect_man_hours")) or 0
