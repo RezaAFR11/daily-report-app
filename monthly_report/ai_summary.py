@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/15"
-PROMPT_VERSION = "periodic-narrative-grounding/15"
+SUGGESTION_VERSION = "periodic-ai-suggestion/16"
+PROMPT_VERSION = "periodic-narrative-grounding/16"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -38,6 +38,7 @@ MAX_TEXT_CHARS = 8_000
 MAX_SUMMARY_CHARS = 4_000
 MAX_CLAIM_CHARS = 1_500
 MAX_CLAIMS_PER_SECTION = 24
+MAX_CURRENT_ACTIVITY_CLAIMS = 12
 MAX_REFERENCES_PER_CLAIM = 40
 DEFAULT_MAX_TOKENS = 8_192
 DEFAULT_TIMEOUT_SECONDS = 210.0
@@ -252,7 +253,7 @@ AI_NARRATIVE_SCHEMA: dict[str, Any] = {
         "engineering_summary": _claim_schema(),
         "procurement_summary": _claim_schema(),
         "site_summary": _claim_schema(),
-        "current_activities": {"type": "array", "maxItems": 24, "items": _activity_claim_schema()},
+        "current_activities": {"type": "array", "maxItems": 12, "items": _activity_claim_schema()},
         "concern_actions": {"type": "array", "maxItems": 12, "items": _concern_action_schema()},
         "lookahead": {"type": "array", "maxItems": 12, "items": _claim_schema()},
         "claims": {"type": "array", "maxItems": 8, "items": _claim_schema()},
@@ -302,7 +303,10 @@ Grounding rules:
 Reporting rules:
 6. executive_summary: synthesize the most important work performed, meaningful
    progress/status explicitly stated in the source, genuine project constraints,
-   and supported look-ahead. Explicit activity status values such as Finished,
+   and supported look-ahead. Write it as management-facing report content, never
+   as a description of how the report was compiled. Never call the report a
+   "draft" or say that it "compiles N Daily Reports" unless partial source
+   coverage itself is operationally important. Explicit activity status values such as Finished,
    Completed, Ongoing, or In progress are valid only when present in source data.
     When describing coverage, use the official report period from source_data.period.
     If Daily Report coverage is partial, state the available Daily Report dates
@@ -327,7 +331,10 @@ Reporting rules:
    total that is not explicitly supplied.
 8. current_activities: create concise client-facing bullets for the current report
    period. Group repeated/continuing work instead of copying every Daily Report
-   line. Use the exact area/equipment label from source data when available.
+   line. Organize primarily by area and workstream (for example instrumentation/
+   electrical, actuator/pneumatic, testing/commissioning, or valve mechanical)
+   only when the source wording supports that grouping. Use the exact area/
+   equipment label from source data when available.
    Preserve technical terms, quantities, durations, dates, unit/equipment
    identifiers, and explicit activity status when source-backed. If a source
    activity has status Finished/Completed, keep that status visible in the bullet.
@@ -336,7 +343,12 @@ Reporting rules:
    status bullet per affected area rather than repeating it by day.
 9. engineering_summary and procurement_summary: use only facts explicitly
    belonging to those subjects. Do not relabel site work as engineering or
-   procurement. Use Not supplied when evidence is absent. Never convert an
+   procurement. It is acceptable to state that no separate engineering/procurement
+   register was supplied and then distinguish source-backed field evidence (for
+   example testing support or materials/accessories observed in use) from formal
+   deliverable/PO/delivery status. Never infer PO status, outstanding quantity,
+   delivery status, or shipment status from field activity alone. Use Not supplied
+   when even that distinction is unsupported. Never convert an
    internal placeholder such as "Manual weekly input required" into report prose.
 10. safety language: missing, null, blank, or Not supplied incident metrics are
     NOT evidence of zero incidents. Do not use broad wording such as "no safety
@@ -365,7 +377,7 @@ Reporting rules:
     - engineering_summary/procurement_summary: preferably <= 500 characters each.
     - each current_activities, lookahead, claim, concern, or corrective_action
       text: preferably <= 350 characters.
-    Return no more than 24 current_activities bullets, 12 concern_actions, and
+    Return no more than 12 current_activities bullets, 12 concern_actions, and
     12 lookahead items. Prefer consolidation over exhaustive repetition. The
     application retains the complete Daily Report activity list separately, so
     this narrative is a summary and must not try to reproduce every source row.
@@ -1383,7 +1395,7 @@ def validate_narrative_suggestion(
     activity_rows = value[_ACTIVITY_LIST_KEY]
     if not isinstance(activity_rows, list):
         raise AIMalformedResponseError(f"$.{_ACTIVITY_LIST_KEY} must be an array.")
-    if len(activity_rows) > MAX_CLAIMS_PER_SECTION:
+    if len(activity_rows) > MAX_CURRENT_ACTIVITY_CLAIMS:
         raise AIMalformedResponseError(f"$.{_ACTIVITY_LIST_KEY} has too many entries.")
     result[_ACTIVITY_LIST_KEY] = [
         _validate_activity_claim(
@@ -1490,7 +1502,7 @@ def _safe_validated_suggestion(
 
     current_activities: list[dict[str, Any]] = []
     rows = raw.get(_ACTIVITY_LIST_KEY) if isinstance(raw.get(_ACTIVITY_LIST_KEY), list) else []
-    for index, row in enumerate(rows[:MAX_CLAIMS_PER_SECTION]):
+    for index, row in enumerate(rows[:MAX_CURRENT_ACTIVITY_CLAIMS]):
         try:
             validated = _validate_activity_claim(
                 row,
