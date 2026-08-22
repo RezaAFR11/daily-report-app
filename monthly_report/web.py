@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -948,15 +949,112 @@ def _record_date(record: dict[str, Any]) -> str:
 # Client-facing deterministic fallback summarisation.  AI may refine this after
 # Source Data Validation, but the baseline Weekly/Monthly PDF should already read
 # like a period report rather than seven/thirty Daily Reports concatenated together.
+_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/3"
+
 _PERIOD_ACTIVITY_TAG_RE = re.compile(
     r"\(\s*\d{1,3}\s*-\s*[A-Za-z]{2,}\s*-\s*[^)]*\)", re.IGNORECASE
 )
-_PERIOD_ACTIVITY_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Testing & commissioning", ("loop test", "function test", "leak test", "continuity", "commission")),
-    ("Valve mechanical", ("butterfly", "seat rubber", "lapping", "dismant", "reassembl", "assembly", "install valve", "valve control", "position valve", "bolts for valve", "cleaning all mechanical")),
-    ("Pneumatic / actuator", ("actuator", "solenoid", "pneumatic", "silinder", "cylinder", "regulator", "tubing", "hose", "air instrument", "5-way", "6-way", "setting shaft", "setting shaf")),
-    ("Instrumentation & electrical", ("proximity", "selector switch", "junction box", "cable", "conduit", "rewir")),
+
+# Weighted keyword rules keep the classification deterministic while allowing one
+# mixed Daily activity to land in the workstream that best describes its primary
+# work.  The rules are intentionally construction-domain terms already present in
+# GPA Daily Reports; they are not free-form AI categories.
+_PERIOD_ACTIVITY_FAMILY_RULES: tuple[
+    tuple[str, tuple[tuple[str, float], ...]], ...
+] = (
+    (
+        "Testing & Commissioning",
+        (
+            ("loop test", 5.0), ("calibrat", 5.0), ("commission", 5.0),
+            ("function test", 3.0), ("leak test", 3.0), ("continuity", 3.0),
+            ("dcs", 2.0),
+        ),
+    ),
+    (
+        "Actuator & Pneumatic",
+        (
+            ("actuator", 3.5), ("pneumatic", 3.5), ("silinder", 3.0),
+            ("cylinder", 3.0), ("solenoid", 3.0), ("regulator", 2.5),
+            ("tubing", 2.0), ("hose", 2.0), ("5-way", 2.5),
+            ("5 way", 2.5), ("6-way", 2.5), ("6 way", 2.5),
+            ("setting shaft", 2.0), ("setting shaf", 2.0),
+        ),
+    ),
+    (
+        "Instrumentation & Electrical",
+        (
+            ("selector switch", 4.0), ("proximity", 3.5),
+            ("junction box", 3.5), ("flexible conduit", 3.5),
+            ("connect cable", 3.0), ("termination", 3.0),
+            ("cable", 2.0), ("rewir", 3.0),
+        ),
+    ),
+    (
+        "Valve Mechanical",
+        (
+            ("butterfly", 4.5), ("seat rubber", 4.5),
+            ("install valve", 4.0), ("valve control", 3.5), ("position valve", 3.5),
+            ("reassembl", 3.5), ("tighten", 1.5), ("bolt", 1.5),
+            ("gasket", 2.5), ("mechanical actuator damper", 2.5),
+        ),
+    ),
 )
+
+_PERIOD_ACTIVITY_THEME_RULES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
+    "Testing & Commissioning": (
+        ("DCS loop testing", ("loop test", "dcs")),
+        ("local functional testing", ("function test", "local")),
+        ("continuity checking", ("continuity",)),
+        ("leak testing", ("leak test",)),
+        ("calibration", ("calibrat",)),
+    ),
+    "Actuator & Pneumatic": (
+        ("actuator and cylinder work", ("actuator", "cylinder", "silinder")),
+        ("solenoid and multi-way valve work", ("solenoid", "5-way", "5 way", "6-way", "6 way")),
+        ("regulator, tubing and hose work", ("regulator", "tubing", "hose", "air instrument")),
+        ("pneumatic shaft setting", ("setting shaft", "setting shaf")),
+    ),
+    "Instrumentation & Electrical": (
+        ("proximity installation", ("installation proximity", "install proximity")),
+        ("proximity position adjustment", ("adjust proximity",)),
+        ("selector-switch inspection and repair", ("check and repair selector", "check and repait selector")),
+        ("selector-switch rewiring and replacement", ("rewiring selector", "replace new selector")),
+        ("flexible conduit and cable connection", ("flexible conduit", "connect cable")),
+        ("junction-box work", ("junction box",)),
+        ("proximity bracket fabrication", ("bracket proximity",)),
+        ("termination work", ("termination",)),
+    ),
+    "Valve Mechanical": (
+        ("valve assembly and installation", ("reassembl", "install valve", "seat rubber")),
+        ("valve troubleshooting", ("trouble shoot", "troubleshoot")),
+        ("valve position work", ("position valve",)),
+        ("bolt-related mechanical maintenance", ("bolt", "tighten", "gasket", "cleaning all mechanical")),
+    ),
+}
+
+_WORKSTREAM_DISPLAY_ORDER = (
+    "Instrumentation & Electrical",
+    "Actuator & Pneumatic",
+    "Valve Mechanical",
+    "Testing & Commissioning",
+    "Other Site Work",
+)
+
+
+def _workstream_rank(value: Any) -> int:
+    text = _clean_text(value, 255)
+    try:
+        return _WORKSTREAM_DISPLAY_ORDER.index(text)
+    except ValueError:
+        return len(_WORKSTREAM_DISPLAY_ORDER)
+
+
+def _area_sort_key(value: Any) -> tuple[str, int, str]:
+    text = _clean_text(value, 255)
+    match = re.match(r"^([A-Za-z]+)[- ]?(\d+)(.*)$", text)
+    if match:
+        return (match.group(1).casefold(), int(match.group(2)), match.group(3).casefold())
+    return (text.casefold(), 10**9, "")
 
 
 def _period_activity_base(value: Any) -> str:
@@ -971,18 +1069,103 @@ def _period_activity_base(value: Any) -> str:
     # Technical prose and quantities outside those tag blocks are preserved.
     text = _PERIOD_ACTIVITY_TAG_RE.sub("", text)
     text = re.sub(r"\s+([,;:.])", r"\1", text)
+    text = re.sub(r"\s*&\s*", " and ", text)
     return " ".join(text.split()).strip(" ,;:.-")
 
 
 def _period_activity_family(value: Any) -> str:
     text = _clean_text(value, 2_000).casefold()
-    for label, needles in _PERIOD_ACTIVITY_FAMILIES:
+    if not text:
+        return "Other Site Work"
+    ranked: list[tuple[float, int, str]] = []
+    for index, (label, rules) in enumerate(_PERIOD_ACTIVITY_FAMILY_RULES):
+        score = sum(weight for needle, weight in rules if needle in text)
+        if score > 0:
+            ranked.append((score, -index, label))
+    if not ranked:
+        return "Other Site Work"
+    ranked.sort(reverse=True)
+    return ranked[0][2]
+
+
+def _period_activity_themes(family: str, value: Any) -> list[str]:
+    text = _clean_text(value, 2_000).casefold()
+    result: list[str] = []
+    for label, needles in _PERIOD_ACTIVITY_THEME_RULES.get(family, ()):
+        # Theme labels are deterministic paraphrases of explicit source terms.
+        # Requiring at least one family-specific keyword prevents unrelated work
+        # from being pulled into a more attractive management label.
         if any(needle in text for needle in needles):
-            return label
-    return "Other site work"
+            if label not in result:
+                result.append(label)
+    return result
+
+
+def _theme_rank(family: str, label: str) -> int:
+    ordered = [item[0] for item in _PERIOD_ACTIVITY_THEME_RULES.get(family, ())]
+    try:
+        return ordered.index(label)
+    except ValueError:
+        return len(ordered)
+
+
+def _english_join(values: list[str]) -> str:
+    items = [str(value).strip() for value in values if str(value).strip()]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+
+def _short_period_label(start: str, end: str) -> str:
+    try:
+        start_date = datetime.strptime(start, "%Y-%m-%d")
+        end_date = datetime.strptime(end, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return f"{start} to {end}" if start and end else (start or end)
+    if start_date.date() == end_date.date():
+        return start_date.strftime("%d %B %Y")
+    if start_date.year == end_date.year and start_date.month == end_date.month:
+        return f"{start_date.day:02d}-{end_date.day:02d} {end_date.strftime('%B %Y')}"
+    if start_date.year == end_date.year:
+        return f"{start_date.strftime('%d %B')}-{end_date.strftime('%d %B %Y')}"
+    return f"{start_date.strftime('%d %B %Y')}-{end_date.strftime('%d %B %Y')}"
+
+
+def _format_number(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not math.isfinite(number):
+        return ""
+    if abs(number - round(number)) < 1e-9:
+        return f"{int(round(number)):,}"
+    return f"{number:,.2f}".rstrip("0").rstrip(".")
+
+
+def _format_positive_number(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not math.isfinite(number) or number <= 0:
+        return ""
+    return _format_number(number)
 
 
 def _summarise_period_activities(value: Any, *, max_phrases_per_group: int = 3) -> list[dict[str, Any]]:
+    """Build a deterministic management summary by Area + Workstream.
+
+    The full Daily activity rows always remain in ``draft['activities']``.  This
+    function creates a compact client-facing layer with source/date provenance,
+    theme-level de-duplication and equipment tags retained as metadata for audit
+    and optional AI polishing.
+    """
+
     rows = value if isinstance(value, list) else []
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     group_order: list[tuple[str, str]] = []
@@ -999,16 +1182,27 @@ def _summarise_period_activities(value: Any, *, max_phrases_per_group: int = 3) 
             groups[key] = {
                 "area": area,
                 "family": family,
+                "themes": [],
                 "phrases": [],
                 "dates": [],
                 "source_report_ids": [],
                 "statuses": [],
+                "equipment_tags": [],
+                "occurrence_count": 0,
             }
             group_order.append(key)
         group = groups[key]
+        group["occurrence_count"] += 1
         base = _period_activity_base(description) or description
-        if base.casefold() not in {item.casefold() for item in group["phrases"]}:
+        base_key = _activity_match_text(base)
+        if base_key and base_key not in {_activity_match_text(item) for item in group["phrases"]}:
             group["phrases"].append(base)
+        for theme in _period_activity_themes(family, description):
+            if theme not in group["themes"]:
+                group["themes"].append(theme)
+        for tag in sorted(_activity_equipment_ids(description)):
+            if tag not in group["equipment_tags"]:
+                group["equipment_tags"].append(tag)
         report_date = _clean_text(raw.get("date", raw.get("source_date")), 10)
         source_id = _clean_text(raw.get("source_report_id"), 200)
         status = _clean_text(raw.get("status"), 80)
@@ -1022,27 +1216,39 @@ def _summarise_period_activities(value: Any, *, max_phrases_per_group: int = 3) 
     result: list[dict[str, Any]] = []
     for key in group_order:
         group = groups[key]
-        phrases = group["phrases"]
-        if not phrases:
+        themes = sorted(group["themes"], key=lambda item: _theme_rank(group["family"], item))
+        phrases = list(group["phrases"])
+        if themes:
+            detail = _english_join(themes[:5])
+        else:
+            selected = phrases[:max_phrases_per_group]
+            detail = "; ".join(selected)
+        if not detail:
             continue
-        selected = phrases[:max_phrases_per_group]
-        detail = "; ".join(selected)
-        # The full source rows remain in draft['activities']; the client-facing
-        # section deliberately shows representative work only and avoids filler
-        # such as "additional related activities were recorded".
+
         text = f"{group['family']}: {detail}."
+        tags = group["equipment_tags"]
+        # A short equipment list improves traceability for one-off work fronts;
+        # broad MA-81 groups keep the tag list in metadata to avoid a wall of IDs.
+        if 1 <= len(tags) <= 4 and len(group["themes"]) <= 2:
+            text += f" Equipment: {', '.join(tags)}."
         statuses = group["statuses"]
         if len(statuses) == 1 and len(phrases) == 1:
-            text = f"{text[:-1]} — {statuses[0]}."
+            text += f" Status: {statuses[0]}."
         result.append({
             "area": group["area"],
+            "workstream": group["family"],
             "text": text,
             "source_dates": group["dates"],
             "source_report_ids": group["source_report_ids"],
-            "summary_type": "deterministic_period_group",
+            "equipment_tags": tags,
+            "representative_activities": phrases[:4],
+            "themes": themes,
+            "occurrence_count": int(group.get("occurrence_count") or len(phrases)),
+            "summary_type": "deterministic_period_group_v3",
         })
+    result.sort(key=lambda row: (_area_sort_key(row.get("area")), _workstream_rank(row.get("workstream"))))
     return result
-
 
 def _field_evidence_terms(activities: Any) -> list[str]:
     text = " ".join(
@@ -1117,197 +1323,466 @@ def _progress_summary_sentence(draft: Mapping[str, Any]) -> str:
     return f"Overall progress is {actual:.2f}% actual versus {plan:.2f}% plan, a variance of {variance_value:+.2f}%."
 
 
-def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: str) -> str:
-    """Build a detailed v3.1-compatible Executive Summary without Claude.
+def _period_source_provenance(draft: Mapping[str, Any]) -> tuple[list[str], list[str]]:
+    manifest = draft.get("source_manifest") if isinstance(draft.get("source_manifest"), list) else []
+    source_ids: list[str] = []
+    dates: list[str] = []
+    for row in manifest:
+        if not isinstance(row, Mapping):
+            continue
+        source_id = _clean_text(row.get("report_id"), 200)
+        report_date = _clean_text(row.get("report_date", row.get("date")), 10)
+        if source_id and source_id not in source_ids:
+            source_ids.append(source_id)
+        if _valid_iso_date_text(report_date) and report_date not in dates:
+            dates.append(report_date)
+    return source_ids, dates
 
-    Revision 3.1.1 intentionally keeps the Revision 3.1 aggregation, workstream
-    grouping, warning handling and photo logic unchanged.  This function only
-    enriches the Executive Summary with deterministic, source-backed highlights.
-    It does not introduce the Revision 3.2 deterministic-summary engine.
+
+def _is_no_constraint_text(value: Any) -> bool:
+    text = _activity_match_text(value)
+    return text in {
+        "", "tidak ada", "none", "nil", "n a", "na", "no issue", "no issues",
+        "no constraint", "no constraints", "no constraint reported",
+        "no constraints reported", "not applicable",
+    }
+
+
+def _real_constraint_rows(rows: Any) -> list[Mapping[str, Any]]:
+    result: list[Mapping[str, Any]] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, Mapping):
+            continue
+        text = _clean_text(row.get("text", row.get("concern", row.get("description"))), 2_000)
+        if not text or _is_no_constraint_text(text):
+            continue
+        result.append(row)
+    return result
+
+
+def _constraint_tags(rows: Any) -> list[str]:
+    tags: list[str] = []
+    for row in _real_constraint_rows(rows):
+        for tag in sorted(_activity_equipment_ids(row.get("text", row.get("concern", "")))):
+            if tag not in tags:
+                tags.append(tag)
+    return tags
+
+
+def _constraint_areas(rows: Any) -> list[str]:
+    result: list[str] = []
+    for row in _real_constraint_rows(rows):
+        area = _clean_text(row.get("area"), 255)
+        if area and area not in result:
+            result.append(area)
+    return result
+
+
+def _constraint_followup_score(constraint: Mapping[str, Any], activity: Mapping[str, Any]) -> float:
+    constraint_tags = _activity_equipment_ids(constraint.get("text", constraint.get("concern", "")))
+    activity_tags = _activity_equipment_ids(activity.get("description", activity.get("text", "")))
+    if not constraint_tags or not activity_tags or not constraint_tags.intersection(activity_tags):
+        return -1.0
+
+    constraint_body = _ACTIVITY_EQUIPMENT_ID_RE.sub(" ", _clean_text(constraint.get("text", ""), 2_000))
+    activity_body = _ACTIVITY_EQUIPMENT_ID_RE.sub(
+        " ", _clean_text(activity.get("description", activity.get("text", "")), 2_000)
+    )
+    constraint_words = set(_activity_match_text(constraint_body).split())
+    activity_words = set(_activity_match_text(activity_body).split())
+    generic = {
+        "there", "this", "that", "with", "from", "after", "before", "area",
+        "not", "no", "is", "are", "and", "the", "for", "to", "of",
+    }
+    overlap = (constraint_words - generic) & (activity_words - generic)
+    action_text = _activity_match_text(activity.get("description", activity.get("text", "")))
+    action_bonus = 0.0
+    for needle in ("repair", "replace", "install", "reinstall", "function test", "leak test", "fix"):
+        if needle in action_text:
+            action_bonus += 1.0
+
+    constraint_date = _valid_iso_date_text(constraint.get("date"))
+    activity_date = _valid_iso_date_text(activity.get("date", activity.get("source_date")))
+    if constraint_date and activity_date and activity_date < constraint_date:
+        return -1.0
+    same_day_bonus = 2.0 if constraint_date and activity_date == constraint_date else 0.0
+    return 10.0 + (3.0 * len(overlap)) + min(action_bonus, 3.0) + same_day_bonus
+
+
+def _deterministic_concerns(draft: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return formal constraints with only source-backed related follow-up.
+
+    A Daily activity is attached only when it shares an explicit equipment tag
+    with the constraint and contains enough lexical/action evidence to be useful.
+    This avoids AI-style causal inference while still making Section 5.4 more
+    informative before Claude is used.
     """
 
-    def english_join(values: list[str]) -> str:
-        items = [str(value).strip() for value in values if str(value).strip()]
-        if not items:
-            return ""
-        if len(items) == 1:
-            return items[0]
-        if len(items) == 2:
-            return f"{items[0]} and {items[1]}"
-        return ", ".join(items[:-1]) + f", and {items[-1]}"
+    constraints = _real_constraint_rows(draft.get("constraints"))
+    activities = draft.get("activities") if isinstance(draft.get("activities"), list) else []
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in constraints:
+        if not isinstance(raw, Mapping):
+            continue
+        concern_text = _clean_text(raw.get("text", raw.get("concern")), 2_000)
+        if not concern_text:
+            continue
+        area = _clean_text(raw.get("area"), 255)
+        identity = (area.casefold(), _activity_match_text(concern_text))
+        if identity in seen:
+            continue
+        seen.add(identity)
 
-    def area_sort_key(value: str) -> tuple[str, int, str]:
-        match = re.match(r"^([A-Za-z]+)[- ]?(\d+)(.*)$", value.strip())
-        if match:
-            return (match.group(1).casefold(), int(match.group(2)), match.group(3).casefold())
-        return (value.casefold(), 10**9, "")
+        ranked: list[tuple[float, str, Mapping[str, Any]]] = []
+        for activity in activities:
+            if not isinstance(activity, Mapping):
+                continue
+            activity_area = _clean_text(activity.get("area"), 255)
+            if area and activity_area and area.casefold() != activity_area.casefold():
+                continue
+            score = _constraint_followup_score(raw, activity)
+            if score < 12.0:
+                continue
+            ranked.append((
+                score,
+                _valid_iso_date_text(activity.get("date", activity.get("source_date"))) or "9999-99-99",
+                activity,
+            ))
+        ranked.sort(key=lambda item: (-item[0], item[1], _activity_match_text(item[2].get("description", ""))))
 
-    def display_period(start: str, end: str) -> str:
+        followups: list[str] = []
+        followup_sources: list[str] = []
+        followup_dates: list[str] = []
+        for _score, _date_key, activity in ranked:
+            description = _clean_text(activity.get("description", activity.get("text")), 2_000)
+            if not description:
+                continue
+            description_key = _activity_match_text(description)
+            if description_key in {_activity_match_text(item) for item in followups}:
+                continue
+            followups.append(description)
+            source_id = _clean_text(activity.get("source_report_id"), 200)
+            source_date = _valid_iso_date_text(activity.get("date", activity.get("source_date")))
+            if source_id and source_id not in followup_sources:
+                followup_sources.append(source_id)
+            if source_date and source_date not in followup_dates:
+                followup_dates.append(source_date)
+            if len(followups) >= 2:
+                break
+
+        corrective_action = ""
+        if followups:
+            corrective_action = "Related source-recorded follow-up: " + "; ".join(followups) + "."
+
+        source_ids = []
+        source_id = _clean_text(raw.get("source_report_id"), 200)
+        if source_id:
+            source_ids.append(source_id)
+        for item in followup_sources:
+            if item not in source_ids:
+                source_ids.append(item)
+        source_dates = []
+        constraint_date = _valid_iso_date_text(raw.get("date", raw.get("source_date")))
+        if constraint_date:
+            source_dates.append(constraint_date)
+        for item in followup_dates:
+            if item not in source_dates:
+                source_dates.append(item)
+
+        display_concern = concern_text
+        if area and not concern_text.casefold().startswith(area.casefold()):
+            display_concern = f"{area} - {concern_text}"
+        result.append({
+            "area": area,
+            "concern": display_concern,
+            "corrective_action": corrective_action,
+            "source_dates": source_dates,
+            "source_report_ids": source_ids,
+            "equipment_tags": sorted(_activity_equipment_ids(concern_text)),
+            "summary_type": "deterministic_constraint_v2",
+        })
+    return result
+
+
+def _deterministic_site_summary(draft: Mapping[str, Any], grouped_activities: list[dict[str, Any]]) -> str:
+    areas: list[str] = []
+    workstreams: list[str] = []
+    for row in grouped_activities:
+        if not isinstance(row, Mapping):
+            continue
+        area = _clean_text(row.get("area"), 255)
+        workstream = _clean_text(row.get("workstream"), 255)
+        if area and area not in areas:
+            areas.append(area)
+        if workstream and workstream != "Other Site Work" and workstream not in workstreams:
+            workstreams.append(workstream)
+
+    areas.sort(key=_area_sort_key)
+    workstreams.sort(key=_workstream_rank)
+
+    sentences: list[str] = []
+    if areas:
+        sentences.append(f"Site execution covered {_english_join(areas)} during the reporting period.")
+    if workstreams:
+        sentences.append(f"Principal workstreams were {_english_join(workstreams)}.")
+
+    manpower = draft.get("manpower") if isinstance(draft.get("manpower"), Mapping) else {}
+    totals = manpower.get("totals") if isinstance(manpower.get("totals"), Mapping) else {}
+    peak = _format_positive_number(totals.get("peak_headcount"))
+    man_hours = _format_positive_number(totals.get("total_man_hours"))
+    if peak and man_hours:
+        sentences.append(f"Peak daily headcount was {peak} personnel and {man_hours} man-hours were recorded during the period.")
+    elif peak:
+        sentences.append(f"Peak daily headcount was {peak} personnel.")
+    elif man_hours:
+        sentences.append(f"Recorded man-hours for the period totaled {man_hours}.")
+
+    constraints = _real_constraint_rows(draft.get("constraints"))
+    if constraints:
+        areas_with_constraints = _constraint_areas(constraints)
+        tags = _constraint_tags(constraints)
+        if tags:
+            sentences.append(
+                f"Formal constraints were recorded"
+                + (f" in {_english_join(areas_with_constraints)}" if areas_with_constraints else "")
+                + f" for {_english_join(tags)}."
+            )
+        else:
+            sentences.append(
+                "Formal constraints were recorded"
+                + (f" in {_english_join(areas_with_constraints)}." if areas_with_constraints else ".")
+            )
+    return " ".join(sentences)
+
+
+def _executive_area_highlights(grouped: Any) -> list[dict[str, Any]]:
+    """Return compact, source-backed area highlights for management narrative.
+
+    The deterministic compiler never invents an activity. It reuses the workstream
+    themes already classified from Daily Report wording, and falls back to the
+    workstream label only when no specific theme was detected.
+    """
+
+    rows = grouped if isinstance(grouped, list) else []
+    by_area: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        area = _clean_text(row.get("area"), 255) or "General"
+        item = by_area.setdefault(area, {
+            "area": area,
+            "themes": [],
+            "workstreams": [],
+            "themes_by_workstream": {},
+            "occurrence_count": 0,
+            "source_dates": [],
+            "source_report_ids": [],
+        })
+        workstream = _clean_text(row.get("workstream"), 255)
+        if workstream and workstream != "Other Site Work" and workstream not in item["workstreams"]:
+            item["workstreams"].append(workstream)
+        themes = row.get("themes") if isinstance(row.get("themes"), list) else []
+        bucket = item["themes_by_workstream"].setdefault(workstream or "Other Site Work", [])
+        for theme in themes:
+            text = _clean_text(theme, 255)
+            if text and text not in item["themes"]:
+                item["themes"].append(text)
+            if text and text not in bucket:
+                bucket.append(text)
         try:
-            start_dt = datetime.strptime(start, "%Y-%m-%d")
-            end_dt = datetime.strptime(end, "%Y-%m-%d")
+            item["occurrence_count"] += max(1, int(row.get("occurrence_count") or 1))
         except (TypeError, ValueError):
-            return f"{start} to {end}" if start and end else (start or end)
-        if start_dt.date() == end_dt.date():
-            return f"{start_dt.day} {start_dt.strftime('%B %Y')}"
-        if start_dt.year == end_dt.year and start_dt.month == end_dt.month:
-            return f"{start_dt.day}\u2013{end_dt.day} {end_dt.strftime('%B %Y')}"
-        if start_dt.year == end_dt.year:
-            return f"{start_dt.day} {start_dt.strftime('%B')}\u2013{end_dt.day} {end_dt.strftime('%B %Y')}"
-        return f"{start_dt.day} {start_dt.strftime('%B %Y')}\u2013{end_dt.day} {end_dt.strftime('%B %Y')}"
+            item["occurrence_count"] += 1
+        for key, target in (("source_dates", "source_dates"), ("source_report_ids", "source_report_ids")):
+            values = row.get(key) if isinstance(row.get(key), list) else []
+            for value in values:
+                text = _clean_text(value, 255)
+                if text and text not in item[target]:
+                    item[target].append(text)
 
-    # These labels are used only for the Executive Summary.  They are triggered
-    # by explicit Daily Report wording and never reclassify or mutate source rows.
-    topic_rules: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("actuator/pneumatic-cylinder repair and testing", ("actuator", "pneumatic", "silinder", "cylinder", "piston", "o-ring", "oring")),
-        ("selector-switch checking/repair/rewiring", ("selector switch", "selector", "rewiring")),
-        ("proximity installation and adjustment", ("proximity",)),
-        ("solenoid/multi-way valve work", ("solenoid", "5-way", "5 way", "6-way", "6 way")),
-        ("regulator, tubing and hose work", ("regulator", "tubing", "hose", "air instrument")),
-        ("DCS loop testing", ("loop test", "dcs")),
-        ("local function/continuity testing", ("function test", "continuity")),
-        ("junction-box installation/waterproofing", ("junction box", "waterproof")),
-        ("valve assembly/installation", ("reassembl", "seat rubber", "install valve", "valve on-off", "valve on off")),
-        ("valve troubleshooting/position work", ("trouble shoot", "troubleshoot", "position valve", "reversed regulator")),
-        ("bolt/mechanical maintenance", ("bolt", "gasket", "cleaning all mechanical")),
-        ("flexible conduit/cable work", ("flexible conduit", "connect cable", "cable")),
+    result = list(by_area.values())
+    for item in result:
+        item["workstreams"].sort(key=_workstream_rank)
+    result.sort(key=lambda item: _area_sort_key(item.get("area")))
+    return result
+
+
+def _area_highlight_detail(item: Mapping[str, Any], *, max_details: int) -> str:
+    workstreams = [
+        _clean_text(value, 255)
+        for value in (item.get("workstreams") if isinstance(item.get("workstreams"), list) else [])
+        if _clean_text(value, 255)
+    ]
+    raw_buckets = item.get("themes_by_workstream") if isinstance(item.get("themes_by_workstream"), Mapping) else {}
+    buckets: list[list[str]] = []
+    for workstream in workstreams:
+        bucket = [
+            _clean_text(value, 255)
+            for value in (raw_buckets.get(workstream) if isinstance(raw_buckets.get(workstream), list) else [])
+            if _clean_text(value, 255)
+        ]
+        if bucket:
+            buckets.append(bucket)
+
+    # Round-robin across workstreams so a detail-rich instrumentation group cannot
+    # crowd actuator/testing work out of the Executive Summary.
+    details: list[str] = []
+    depth = 0
+    while buckets and len(details) < max_details:
+        added = False
+        for bucket in buckets:
+            if depth < len(bucket):
+                value = bucket[depth]
+                if value not in details:
+                    details.append(value)
+                    added = True
+                if len(details) >= max_details:
+                    break
+        if not added:
+            break
+        depth += 1
+
+    if not details:
+        themes = [
+            _clean_text(value, 255)
+            for value in (item.get("themes") if isinstance(item.get("themes"), list) else [])
+            if _clean_text(value, 255)
+        ]
+        details = themes[:max_details] or workstreams[:max_details]
+    return _english_join(details)
+
+
+def _missing_management_status_sentence(draft: Mapping[str, Any]) -> str:
+    missing: list[str] = []
+    if not _progress_summary_sentence(draft):
+        missing.append("overall progress percentages")
+
+    safety = draft.get("safety") if isinstance(draft.get("safety"), Mapping) else {}
+    incident_keys = (
+        "recordable_cases",
+        "lost_workdays",
+        "lost_time_injuries",
     )
+    if safety and all(safety.get(key) in (None, "") for key in incident_keys):
+        missing.append("safety incident metrics")
+    if not missing:
+        return ""
+    if len(missing) == 1:
+        return missing[0].capitalize() + " were not supplied."
+    return f"{missing[0].capitalize()} and {missing[1]} were not supplied."
+
+
+def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: str) -> str:
+    """Build a detailed management-facing baseline without requiring Claude.
+
+    V3 keeps the stronger completeness/warning behaviour from Revision 3.1/3.2,
+    while restoring the useful area-level detail that made the earlier executive
+    summary easier for a project manager to understand.
+    """
 
     period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
     start = _clean_text(period.get("start", period.get("date_from")), 10)
     end = _clean_text(period.get("end", period.get("date_to")), 10)
-    activities = draft.get("activities") if isinstance(draft.get("activities"), list) else []
-    report_word = "week" if report_type == "weekly" else "month"
+    grouped = draft.get("activity_summary") if isinstance(draft.get("activity_summary"), list) else []
+    if not grouped:
+        activities = draft.get("activities") if isinstance(draft.get("activities"), list) else []
+        grouped = _summarise_period_activities(activities)
 
-    activity_by_area: dict[str, list[str]] = {}
-    for row in activities:
+    highlights = _executive_area_highlights(grouped)
+    areas = [item["area"] for item in highlights if _clean_text(item.get("area"), 255)]
+    workstreams: list[str] = []
+    for row in grouped:
         if not isinstance(row, Mapping):
             continue
-        area = _clean_text(row.get("area"), 255) or "General"
-        description = _clean_text(row.get("description", row.get("text")), 2_000)
-        if description:
-            activity_by_area.setdefault(area, []).append(description)
+        workstream = _clean_text(row.get("workstream"), 255)
+        if workstream and workstream != "Other Site Work" and workstream not in workstreams:
+            workstreams.append(workstream)
+    workstreams.sort(key=_workstream_rank)
 
-    all_areas = sorted(activity_by_area, key=area_sort_key)
+    report_word = "week" if report_type == "weekly" else "month"
     sentences: list[str] = []
-    if activities:
-        period_label = display_period(start, end)
-        project_title = _clean_text(draft.get("project_title", draft.get("project_name")), 500)
-        location = _clean_text(draft.get("location"), 255)
-        customer = _clean_text(draft.get("customer"), 255)
-        subject = f" for {project_title}" if project_title else ""
-        area_text = english_join(all_areas)
-        place = f" at {location}" if location else ""
-        client = f" for {customer}" if customer else ""
-        when = f" of {period_label}" if period_label else ""
-        sentences.append(
-            f"During the reporting {report_word}{when}, field activities{subject} were carried out"
-            + (f" across {area_text}" if area_text else "")
-            + f"{place}{client}."
-        )
+    if grouped:
+        period_label = _short_period_label(start, end)
+        opening = f"During the reporting {report_word}"
+        if period_label:
+            opening += f" ({period_label})"
+        opening += ", field activities were carried out"
+        if areas:
+            opening += f" across {_english_join(areas)}"
+        sentences.append(opening + ".")
 
-        area_topics: dict[str, list[str]] = {}
-        for area, descriptions in activity_by_area.items():
-            ranked_topics: list[tuple[int, int, str]] = []
-            for rule_index, (label, needles) in enumerate(topic_rules):
-                matches = sum(
-                    1
-                    for description in descriptions
-                    if any(needle in description.casefold() for needle in needles)
-                )
-                if matches:
-                    ranked_topics.append((-matches, rule_index, label))
-            ranked_topics.sort()
-            area_topics[area] = [label for _neg_count, _rule_index, label in ranked_topics]
-
-        # Give the busiest work area the richest sentence.  Remaining active
-        # areas are summarized compactly so the Executive Summary stays readable.
+        # Give the busiest recorded area enough detail to be useful, without
+        # describing it as the project's most important area. Activity-line volume
+        # is used only to choose presentation order, never as a progress metric.
         ranked = sorted(
-            all_areas,
-            key=lambda area: (-len(activity_by_area.get(area, [])), area_sort_key(area)),
+            highlights,
+            key=lambda item: (-int(item.get("occurrence_count") or 0), _area_sort_key(item.get("area"))),
         )
         if ranked:
-            main_area = ranked[0]
-            main_topics = area_topics.get(main_area, [])[:5]
-            if main_topics:
-                sentences.append(
-                    f"The primary focus in {main_area} included {english_join(main_topics)}."
-                )
+            focus = ranked[0]
+            focus_area = _clean_text(focus.get("area"), 255) or "General"
+            focus_detail = _area_highlight_detail(focus, max_details=7)
+            if focus_detail:
+                sentences.append(f"In {focus_area}, recorded work included {focus_detail}.")
 
-            other_highlights: list[str] = []
-            for area in ranked[1:5]:
-                topics = area_topics.get(area, [])[:2]
-                if topics:
-                    other_highlights.append(f"{english_join(topics)} in {area}")
-            if other_highlights:
-                sentences.append(f"Other recorded work included {english_join(other_highlights)}.")
+            # Remaining area highlights stay compact. Weekly reports normally have
+            # few enough active areas to name all of them; monthly reports may have
+            # many, so cap the detailed clauses while the opening still lists the
+            # full supported area set.
+            remainder = [item for item in ranked[1:] if item.get("area") != focus.get("area")]
+            detailed_limit = 4 if report_type == "weekly" else 5
+            clauses = []
+            for item in remainder[:detailed_limit]:
+                area = _clean_text(item.get("area"), 255) or "General"
+                detail = _area_highlight_detail(item, max_details=3)
+                if detail:
+                    clauses.append(f"{area}: {detail}")
+            if clauses:
+                sentences.append("Other recorded work fronts included " + "; ".join(clauses) + ".")
+        elif workstreams:
+            sentences.append(f"Major work fronts included {_english_join(workstreams)}.")
     else:
         sentences.append(f"No current-period site activities were supplied for this reporting {report_word}.")
 
+    # Workforce is a deterministic period fact and should remain visible even when
+    # progress values are supplied. This avoids the earlier behaviour where adding
+    # progress silently removed the useful headcount/man-hour sentence.
     manpower = draft.get("manpower") if isinstance(draft.get("manpower"), Mapping) else {}
     totals = manpower.get("totals") if isinstance(manpower.get("totals"), Mapping) else {}
-    try:
-        peak = float(totals.get("peak_headcount") or 0)
-    except (TypeError, ValueError):
-        peak = 0.0
-    try:
-        man_hours = float(totals.get("total_man_hours") or 0)
-    except (TypeError, ValueError):
-        man_hours = 0.0
-    if peak > 0 or man_hours > 0:
-        metrics: list[str] = []
-        if peak > 0:
-            peak_text = str(int(peak)) if peak.is_integer() else f"{peak:.2f}".rstrip("0").rstrip(".")
-            metrics.append(f"peak daily headcount was {peak_text} personnel")
-        if man_hours > 0:
-            mh_text = f"{man_hours:,.1f}" if not man_hours.is_integer() else f"{int(man_hours):,}"
-            metrics.append(f"{mh_text} man-hours were recorded during the period")
-        sentences.append(metrics[0].capitalize() + (f" and {metrics[1]}" if len(metrics) > 1 else "") + ".")
-
-    constraints = draft.get("constraints") if isinstance(draft.get("constraints"), list) else []
-    concern_areas: list[str] = []
-    tags: list[str] = []
-    seen_constraints: set[tuple[str, str]] = set()
-    for row in constraints:
-        if not isinstance(row, Mapping):
-            continue
-        area = _clean_text(row.get("area"), 255)
-        concern = _clean_text(row.get("text", row.get("concern")), 1_500)
-        if not concern:
-            continue
-        identity = (area.casefold(), concern.casefold())
-        if identity in seen_constraints:
-            continue
-        seen_constraints.add(identity)
-        if area and area not in concern_areas:
-            concern_areas.append(area)
-        for tag in sorted(_activity_equipment_ids(concern)):
-            if tag not in tags:
-                tags.append(tag)
-    if seen_constraints:
-        area_suffix = f" in {english_join(sorted(concern_areas, key=area_sort_key))}" if concern_areas else ""
-        tag_suffix = f" for {english_join(tags[:4])}" if tags else ""
-        sentences.append(
-            f"Formal constraints were recorded{area_suffix}{tag_suffix}; details and supplied corrective-action status are listed in Section 5.4."
-        )
+    peak = _format_positive_number(totals.get("peak_headcount"))
+    man_hours = _format_positive_number(totals.get("total_man_hours"))
+    if peak and man_hours:
+        sentences.append(f"Peak daily headcount was {peak} personnel with {man_hours} man-hours recorded during the period.")
+    elif peak:
+        sentences.append(f"Peak daily headcount was {peak} personnel.")
+    elif man_hours:
+        sentences.append(f"Recorded man-hours for the period totaled {man_hours}.")
 
     progress_sentence = _progress_summary_sentence(draft)
     if progress_sentence:
         sentences.append(progress_sentence)
-    else:
-        sentences.append("Overall progress percentages were not supplied.")
 
-    safety = draft.get("safety") if isinstance(draft.get("safety"), Mapping) else {}
-    incident_keys = ("recordable_cases", "lost_workdays", "lost_time_injuries", "severity_rate", "average_day_away")
-    if safety and all(safety.get(key) in (None, "", "Not supplied") for key in incident_keys):
-        sentences.append("Safety incident metrics were not supplied.")
+    constraints = _real_constraint_rows(draft.get("constraints"))
+    if constraints:
+        tags = _constraint_tags(constraints)
+        areas_with_constraints = _constraint_areas(constraints)
+        detail = "Formal constraints were reported"
+        if areas_with_constraints:
+            detail += f" in {_english_join(areas_with_constraints)}"
+        if tags:
+            detail += f" for {_english_join(tags)}"
+        sentences.append(detail + "; details and source-recorded follow-up are shown in Section 5.4.")
+
+    missing_sentence = _missing_management_status_sentence(draft)
+    if missing_sentence:
+        sentences.append(missing_sentence)
 
     coverage = draft.get("coverage") if isinstance(draft.get("coverage"), dict) else {}
     missing = [str(item) for item in coverage.get("missing_dates", [])] if isinstance(coverage.get("missing_dates"), list) else []
     if missing:
-        sentences.append("Daily Report coverage is partial; the available and missing dates are shown in Source Coverage.")
+        sentences.append("Daily Report coverage is partial; available and missing dates are listed in Source Coverage.")
     return " ".join(sentences)
-
 
 def _prepare_draft(
     aggregated: dict[str, Any],
@@ -1415,24 +1890,26 @@ def _prepare_draft(
         "severity_rate": None,
         "average_day_away": None,
     })
-    # Missing engineering/procurement data is source absence, not a project fact
-    # and not an instruction for the client-facing report.  Keep the draft
-    # neutral so AI cannot turn an internal workflow placeholder such as
-    # "Manual weekly input required" into narrative prose.
+    # Build a complete management-facing baseline before any AI call. Claude is
+    # optional: the deterministic compiler owns classification, grouping, source
+    # provenance, workforce numbers and constraint follow-up selection.
     activities_for_summary = draft.get("activities") if isinstance(draft.get("activities"), list) else []
+    grouped_activities = _summarise_period_activities(activities_for_summary)
+    draft["activity_summary"] = copy.deepcopy(grouped_activities)
+
+    engineering_summary = _deterministic_engineering_summary(activities_for_summary)
+    procurement_summary = _deterministic_procurement_summary(activities_for_summary)
     draft.setdefault("engineering", {
-        "summary": _deterministic_engineering_summary(activities_for_summary),
+        "summary": engineering_summary,
         "source_meta": {"source_type": "derived_from_daily_reports", "scope": "field_evidence_only"},
     })
     draft.setdefault("procurement", {
-        "summary": _deterministic_procurement_summary(activities_for_summary),
+        "summary": procurement_summary,
         "source_meta": {"source_type": "derived_from_daily_reports", "scope": "field_evidence_only"},
     })
 
     site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
     if not site.get("this_month_activities"):
-        grouped_activities = _summarise_period_activities(activities_for_summary)
-        draft["activity_summary"] = copy.deepcopy(grouped_activities)
         site["this_month_activities"] = grouped_activities or copy.deepcopy(activities_for_summary)
 
     # Activity Tomorrow is deliberately NOT promoted to next-week/next-month.
@@ -1454,17 +1931,24 @@ def _prepare_draft(
                     "source_path": _clean_text(row.get("source_path"), 500),
                 })
         else:
-            text = _clean_text(row, 2_000)
-            if text:
-                cleaned_lookahead.append(text)
+            text_value = _clean_text(row, 2_000)
+            if text_value:
+                cleaned_lookahead.append(text_value)
     site["next_month_activities"] = cleaned_lookahead
     site["tomorrow_activities"] = copy.deepcopy(draft.get("tomorrow_activities", []))
+
+    deterministic_concerns = _deterministic_concerns(draft)
     if not site.get("concerns"):
-        site["concerns"] = draft.get("concerns", draft.get("constraints", []))
+        site["concerns"] = deterministic_concerns or draft.get("concerns", draft.get("constraints", []))
     if isinstance(draft.get("constraint_reporting"), dict):
         site["constraint_reporting"] = copy.deepcopy(draft["constraint_reporting"])
     if isinstance(draft.get("weather"), list):
         site["weather"] = copy.deepcopy(draft["weather"])
+
+    baseline_site_summary = _deterministic_site_summary(draft, grouped_activities)
+    if not _clean_text(site.get("summary"), 4_000):
+        site["summary"] = baseline_site_summary
+
     # Generic aliases let the renderer and review UI use period-neutral labels
     # while legacy monthly keys continue to support archived drafts.
     site["current_period_activities"] = site.get("this_month_activities", [])
@@ -1474,10 +1958,199 @@ def _prepare_draft(
         site["this_week_activities"] = site["current_period_activities"]
         site["next_week_activities"] = site["next_period_activities"]
     draft["site"] = site
+
+    baseline_executive = _deterministic_executive_summary(draft, report_type=kind)
     if not draft.get("executive_summary"):
-        draft["executive_summary"] = _deterministic_executive_summary(
-            draft, report_type=kind
+        draft["executive_summary"] = baseline_executive
+
+    # Persist the deterministic narrative layer separately from raw source rows.
+    # ai_summary.py can send this compact baseline to Claude instead of asking the
+    # model to rediscover structure from hundreds of Daily activities.
+    source_ids, source_dates = _period_source_provenance(draft)
+    draft["deterministic_summary"] = {
+        "version": _DETERMINISTIC_SUMMARY_VERSION,
+        "source_type": "deterministic_compiler",
+        "executive_summary": {
+            "text": baseline_executive,
+            "source_report_ids": source_ids,
+            "source_dates": source_dates,
+        },
+        "site_summary": {
+            "text": baseline_site_summary,
+            "source_report_ids": source_ids,
+            "source_dates": source_dates,
+        },
+        "engineering_summary": {
+            "text": engineering_summary,
+            "source_report_ids": source_ids,
+            "source_dates": source_dates,
+        },
+        "procurement_summary": {
+            "text": procurement_summary,
+            "source_report_ids": source_ids,
+            "source_dates": source_dates,
+        },
+        "current_activities": copy.deepcopy(grouped_activities),
+        "concerns": copy.deepcopy(deterministic_concerns),
+        "lookahead": copy.deepcopy(cleaned_lookahead),
+    }
+    draft["narrative_mode"] = "deterministic"
+    draft["narrative_engine_version"] = _DETERMINISTIC_SUMMARY_VERSION
+    return draft
+
+
+def _activity_summary_signature(value: Any) -> list[tuple[str, str, str]]:
+    rows = _clean_activity_rows(value, maximum_items=500)
+    return [
+        (
+            _activity_match_text(row.get("area")),
+            _activity_match_text(row.get("text")),
+            _activity_match_text(row.get("status")),
         )
+        for row in rows
+    ]
+
+
+def _concern_summary_signature(value: Any) -> list[tuple[str, str]]:
+    result: list[tuple[str, str]] = []
+    for raw in value if isinstance(value, list) else []:
+        if isinstance(raw, Mapping):
+            concern = _clean_text(raw.get("concern", raw.get("text", raw.get("description"))), 2_000)
+            action = _clean_text(raw.get("corrective_action", raw.get("action", "")), 2_000)
+        else:
+            concern = _clean_text(raw, 2_000)
+            action = ""
+        if concern or action:
+            result.append((_activity_match_text(concern), _activity_match_text(action)))
+    return result
+
+
+def _refresh_deterministic_summary(draft: dict[str, Any]) -> dict[str, Any]:
+    """Refresh deterministic narrative after reviewed data changes.
+
+    Timesheet decisions, progress edits and structured sources can legitimately
+    change factual totals after the initial compile.  Rebuild the deterministic
+    baseline, but update client-facing fields only while they still match the
+    previous baseline.  Manual edits and accepted AI wording therefore survive.
+    """
+
+    if not isinstance(draft, dict):
+        return draft
+    kind = _draft_report_type(draft)
+    previous = draft.get("deterministic_summary") if isinstance(draft.get("deterministic_summary"), Mapping) else {}
+
+    old_exec = _clean_text(
+        previous.get("executive_summary", {}).get("text")
+        if isinstance(previous.get("executive_summary"), Mapping) else "",
+        4_000,
+    )
+    old_site_summary = _clean_text(
+        previous.get("site_summary", {}).get("text")
+        if isinstance(previous.get("site_summary"), Mapping) else "",
+        4_000,
+    )
+    old_engineering = _clean_text(
+        previous.get("engineering_summary", {}).get("text")
+        if isinstance(previous.get("engineering_summary"), Mapping) else "",
+        4_000,
+    )
+    old_procurement = _clean_text(
+        previous.get("procurement_summary", {}).get("text")
+        if isinstance(previous.get("procurement_summary"), Mapping) else "",
+        4_000,
+    )
+    old_activities = previous.get("current_activities") if isinstance(previous.get("current_activities"), list) else []
+    old_concerns = previous.get("concerns") if isinstance(previous.get("concerns"), list) else []
+
+    activities = draft.get("activities") if isinstance(draft.get("activities"), list) else []
+    grouped = _summarise_period_activities(activities)
+    draft["activity_summary"] = copy.deepcopy(grouped)
+    engineering_summary = _deterministic_engineering_summary(activities)
+    procurement_summary = _deterministic_procurement_summary(activities)
+    concerns = _deterministic_concerns(draft)
+
+    site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
+    new_site_summary = _deterministic_site_summary(draft, grouped)
+    new_exec = _deterministic_executive_summary(draft, report_type=kind)
+
+    current_exec = _clean_text(draft.get("executive_summary"), 4_000)
+    if not current_exec or (old_exec and current_exec == old_exec):
+        draft["executive_summary"] = new_exec
+
+    current_site_summary = _clean_text(site.get("summary"), 4_000)
+    if not current_site_summary or (old_site_summary and current_site_summary == old_site_summary):
+        site["summary"] = new_site_summary
+
+    current_activities = site.get(
+        "current_period_activities",
+        site.get("this_week_activities", site.get("this_month_activities", [])),
+    )
+    if (
+        not _activity_summary_signature(current_activities)
+        or _activity_summary_signature(current_activities) == _activity_summary_signature(old_activities)
+    ):
+        site["this_month_activities"] = copy.deepcopy(grouped)
+        site["current_period_activities"] = copy.deepcopy(grouped)
+        site["this_period_activities"] = copy.deepcopy(grouped)
+        if kind == "weekly":
+            site["this_week_activities"] = copy.deepcopy(grouped)
+
+    current_concerns = site.get("concerns") if isinstance(site.get("concerns"), list) else []
+    if (
+        not _concern_summary_signature(current_concerns)
+        or _concern_summary_signature(current_concerns) == _concern_summary_signature(old_concerns)
+    ):
+        site["concerns"] = copy.deepcopy(concerns)
+
+    for section_key, old_text, new_text in (
+        ("engineering", old_engineering, engineering_summary),
+        ("procurement", old_procurement, procurement_summary),
+    ):
+        section = draft.get(section_key) if isinstance(draft.get(section_key), dict) else {}
+        current_text = _clean_text(section.get("summary"), 4_000)
+        source_meta = section.get("source_meta") if isinstance(section.get("source_meta"), Mapping) else {}
+        manually_sourced = str(source_meta.get("source_type") or "") == "manual"
+        if not manually_sourced and (not current_text or (old_text and current_text == old_text)):
+            section["summary"] = new_text
+            section.setdefault("source_meta", {
+                "source_type": "derived_from_daily_reports",
+                "scope": "field_evidence_only",
+            })
+        draft[section_key] = section
+
+    draft["site"] = site
+    source_ids, source_dates = _period_source_provenance(draft)
+    lookahead = site.get("next_period_activities", site.get("next_month_activities", []))
+    draft["deterministic_summary"] = {
+        "version": _DETERMINISTIC_SUMMARY_VERSION,
+        "source_type": "deterministic_compiler",
+        "executive_summary": {
+            "text": new_exec,
+            "source_report_ids": source_ids,
+            "source_dates": source_dates,
+        },
+        "site_summary": {
+            "text": new_site_summary,
+            "source_report_ids": source_ids,
+            "source_dates": source_dates,
+        },
+        "engineering_summary": {
+            "text": engineering_summary,
+            "source_report_ids": source_ids,
+            "source_dates": source_dates,
+        },
+        "procurement_summary": {
+            "text": procurement_summary,
+            "source_report_ids": source_ids,
+            "source_dates": source_dates,
+        },
+        "current_activities": copy.deepcopy(grouped),
+        "concerns": copy.deepcopy(concerns),
+        "lookahead": copy.deepcopy(lookahead if isinstance(lookahead, list) else []),
+    }
+    draft["narrative_engine_version"] = _DETERMINISTIC_SUMMARY_VERSION
+    if str(draft.get("narrative_mode") or "").strip() not in {"ai_enhanced"}:
+        draft["narrative_mode"] = "deterministic"
     return draft
 
 
@@ -2195,6 +2868,8 @@ def _apply_review(draft: dict[str, Any], review: dict[str, Any], *, actor: str =
 
     current_site = value.get("site") if isinstance(value.get("site"), dict) else {}
     incoming_site = review.get("site") if isinstance(review.get("site"), dict) else {}
+    if "summary" in incoming_site:
+        current_site["summary"] = _clean_text(incoming_site.get("summary"), 4_000)
     current_activities = incoming_site.get(
         "current_period_activities",
         incoming_site.get(
@@ -2218,8 +2893,11 @@ def _apply_review(draft: dict[str, Any], review: dict[str, Any], *, actor: str =
             )),
         ),
     )
-    current_site["this_month_activities"] = _list_text(current_activities)
-    current_site["next_month_activities"] = _list_text(next_activities)
+    # Preserve Area labels for deterministic/AI activity groups through the
+    # Preview/Generate review round-trip. Older plain-string rows remain valid
+    # and are assigned to the generic Site area.
+    current_site["this_month_activities"] = _clean_activity_rows(current_activities)
+    current_site["next_month_activities"] = _clean_activity_rows(next_activities)
     current_site["current_period_activities"] = current_site["this_month_activities"]
     current_site["this_period_activities"] = current_site["this_month_activities"]
     current_site["next_period_activities"] = current_site["next_month_activities"]
@@ -2311,6 +2989,57 @@ def _usable_ai_text(value: Any) -> str:
     text = _claim_text(value)
     return "" if text.casefold() == "not supplied" else text
 
+
+def _executive_ai_candidate(draft: Mapping[str, Any], value: Any) -> str:
+    """Keep Claude from downgrading a richer deterministic executive baseline.
+
+    Claude remains optional polish. If it drops supported areas, constraint tags,
+    or deterministic workforce/missing-status facts, the review UI falls back to
+    the Python baseline instead of presenting a shorter but less useful summary.
+    """
+
+    candidate = _usable_ai_text(value)
+    baseline = _clean_text(draft.get("executive_summary"), 4_000)
+    if not candidate:
+        return baseline
+    if not baseline:
+        return candidate
+
+    # A very short rewrite is usually a regression when the baseline deliberately
+    # carries several area highlights. This is a presentation guard, not a content
+    # score and does not block a reviewer from manually editing the final field.
+    if len(baseline) >= 600 and len(candidate) < min(420, int(len(baseline) * 0.45)):
+        return baseline
+
+    baseline_folded = candidate.casefold()
+    grouped = draft.get("activity_summary") if isinstance(draft.get("activity_summary"), list) else []
+    supported_areas = []
+    for row in grouped:
+        if not isinstance(row, Mapping):
+            continue
+        area = _clean_text(row.get("area"), 80)
+        if area and area not in supported_areas:
+            supported_areas.append(area)
+    # Weekly reports usually have a manageable area set; preserve all of it. For
+    # a large monthly set, require broad coverage without forcing a wall of labels.
+    required_areas = supported_areas if len(supported_areas) <= 8 else supported_areas[:6]
+    if any(area.casefold() not in baseline_folded for area in required_areas):
+        return baseline
+
+    constraint_tags = _constraint_tags(draft.get("constraints"))
+    if len(constraint_tags) <= 6 and any(tag.casefold() not in baseline_folded for tag in constraint_tags):
+        return baseline
+
+    deterministic = draft.get("deterministic_summary") if isinstance(draft.get("deterministic_summary"), Mapping) else {}
+    deterministic_exec = _clean_text(
+        deterministic.get("executive_summary", {}).get("text")
+        if isinstance(deterministic.get("executive_summary"), Mapping) else baseline,
+        4_000,
+    ).casefold()
+    for phrase in ("peak daily headcount", "man-hours", "overall progress percentages", "safety incident metrics"):
+        if phrase in deterministic_exec and phrase not in baseline_folded:
+            return baseline
+    return candidate
 
 
 
@@ -2842,6 +3571,7 @@ def register_monthly_routes(
                 actor=username,
                 reference=_clean_text(body.get("reference"), 1_000),
             )
+            _refresh_deterministic_summary(draft)
             draft.pop("ai_summary", None)
             _update_draft(data_dir, username, draft)
             return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
@@ -3901,6 +4631,7 @@ def register_monthly_routes(
                 confirm_exceptions=bool(body.get("confirm_exceptions")),
                 actor=username,
             )
+            _refresh_deterministic_summary(draft)
             draft.pop("ai_summary", None)
             _update_draft(data_dir, username, draft)
             return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
@@ -3958,6 +4689,7 @@ def register_monthly_routes(
                 confirm_exceptions=bool(body.get("confirm_exceptions")),
                 actor=username,
             )
+            _refresh_deterministic_summary(draft)
             draft.pop("ai_summary", None)
             _update_draft(data_dir, username, draft)
             return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
@@ -3974,6 +4706,7 @@ def register_monthly_routes(
         if draft is None:
             return jsonify({"error": "Report draft not found."}), 404
         reset_workforce(draft)
+        _refresh_deterministic_summary(draft)
         draft.pop("ai_summary", None)
         _update_draft(data_dir, username, draft)
         return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
@@ -4012,6 +4745,7 @@ def register_monthly_routes(
             _require_applied_source_validation(draft)
             if has_pending_workforce_review(draft):
                 raise ValueError("Apply or keep every timesheet/overtime preview before generating AI suggestions.")
+            _refresh_deterministic_summary(draft)
 
             remaining = _ai_cooldown_remaining(draft)
             if remaining:
@@ -4106,8 +4840,7 @@ def register_monthly_routes(
             display = {
                 # A missing AI section must never make the review look worse
                 # than the deterministic draft that existed before AI.
-                "executive_summary": _usable_ai_text(raw.get("executive_summary"))
-                or _clean_text(draft.get("executive_summary"), 4_000),
+                "executive_summary": _executive_ai_candidate(draft, raw.get("executive_summary")),
                 "engineering_summary": _usable_ai_text(raw.get("engineering_summary"))
                 or _clean_text(current_engineering.get("summary"), 4_000),
                 "procurement_summary": _usable_ai_text(raw.get("procurement_summary"))
@@ -4249,7 +4982,10 @@ def register_monthly_routes(
             draft["engineering"] = engineering
             draft["procurement"] = procurement
             draft["site"] = site
+            draft["narrative_mode"] = "ai_enhanced"
             state["accepted_values"] = accepted
+        elif decision == "reject":
+            draft["narrative_mode"] = "deterministic"
         state["status"] = "accepted" if decision == "accept" else "rejected"
         state["decided_by"] = username
         state["decided_at"] = datetime.now().isoformat(timespec="seconds")
@@ -4352,6 +5088,7 @@ def register_monthly_routes(
             return jsonify({"error": "Invalid review data."}), 400
         try:
             reviewed = _apply_review(draft, body, actor=session.get("username", ""))
+            _refresh_deterministic_summary(reviewed)
             _update_draft(data_dir, session["username"], reviewed)
             buffer = _render(
                 reviewed,
@@ -4391,6 +5128,7 @@ def register_monthly_routes(
             return jsonify({"error": "Invalid review data."}), 400
         try:
             reviewed = _apply_review(draft, body, actor=session.get("username", ""))
+            _refresh_deterministic_summary(reviewed)
             is_final = reviewed.get("status") == "final"
             preflight = build_report_preflight(reviewed, for_final=is_final)
             preflight = _append_runtime_preflight_blockers(
