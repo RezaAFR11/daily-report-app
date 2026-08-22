@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/16"
-PROMPT_VERSION = "periodic-narrative-grounding/16"
+SUGGESTION_VERSION = "periodic-ai-suggestion/17"
+PROMPT_VERSION = "periodic-narrative-grounding/17"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -333,8 +333,13 @@ Reporting rules:
    period. Group repeated/continuing work instead of copying every Daily Report
    line. Organize primarily by area and workstream (for example instrumentation/
    electrical, actuator/pneumatic, testing/commissioning, or valve mechanical)
-   only when the source wording supports that grouping. Use the exact area/
-   equipment label from source data when available.
+   only when the source wording supports that grouping. Return at most ONE bullet
+   for each area + workstream combination; merge same-family activities within the
+   same area instead of returning several Testing & commissioning bullets. Use the
+   exact area/equipment label from source data when available and keep ``area``
+   populated whenever a source area exists. Never use filler such as "additional
+   related activities were recorded during the period"; write only the useful
+   representative work summary.
    Preserve technical terms, quantities, durations, dates, unit/equipment
    identifiers, and explicit activity status when source-backed. If a source
    activity has status Finished/Completed, keep that status visible in the bullet.
