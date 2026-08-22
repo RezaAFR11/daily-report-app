@@ -458,10 +458,10 @@ def _draw_revision_table(canvas: pdf_canvas.Canvas, report: Mapping[str, Any]) -
         style = ParagraphStyle(
             "RevisionHeader" if header else "RevisionCell",
             parent=styles["table_center"],
-            fontName="Helvetica-Bold" if header else "Helvetica",
+            fontName="Helvetica-Bold",
             fontSize=7.4 if header else 6.8,
             leading=8.2 if header else 7.7,
-            textColor=ROYAL_BLUE if header else BLACK,
+            textColor=ROYAL_BLUE,
         )
         return _paragraph(value, style, default="")
 
@@ -807,8 +807,15 @@ def _executive_summary(report: Mapping[str, Any], progress: list[dict[str, Any]]
 
 def _safety_table(value: Any, styles: Mapping[str, ParagraphStyle]) -> Table:
     safety = value if isinstance(value, Mapping) else {}
+    peak_headcount = _value(safety, "peak_daily_headcount")
+    if _plain(peak_headcount):
+        manpower_label = "Peak Daily Headcount"
+        manpower_value = peak_headcount
+    else:
+        manpower_label = "Total Manpower"
+        manpower_value = _value(safety, "total_manpower", "manpower")
     rows = [
-        ("Total Manpower", _value(safety, "total_manpower", "manpower")),
+        (manpower_label, manpower_value),
         ("Total Man hours", _value(safety, "total_man_hours", "man_hours")),
         ("Total Recordable Cases", _value(
             safety, "total_recordable_cases", "recordable_cases"
