@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/17"
-PROMPT_VERSION = "periodic-narrative-grounding/17"
+SUGGESTION_VERSION = "periodic-ai-suggestion/17.1"
+PROMPT_VERSION = "periodic-narrative-grounding/17.1"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -317,6 +317,13 @@ Reporting rules:
    entry/input requirements, or instructions to review the report. If engineering
    or procurement evidence is absent, omit it from the executive summary rather
    than describing an internal workflow requirement.
+   Revision 3.1.1 detail rule: when explicit area-level activities are available,
+   do not collapse the executive summary into only generic workstream names. Mention
+   representative work from the principal active areas, keep material equipment/
+   constraint tags when source-backed, and include explicitly supplied peak daily
+   headcount and period man-hours when useful. If overall progress or safety incident
+   metrics are explicitly unavailable in source_data, retain that limitation rather
+   than implying zero or silently omitting a material reporting gap.
 7. site_summary: consolidate repeated daily activities into a short coherent
    summary. Preserve project terminology, area/equipment labels, abbreviations,
    and explicit completion/status. When weather observations are supplied, include
