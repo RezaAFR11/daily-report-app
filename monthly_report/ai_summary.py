@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/18"
-PROMPT_VERSION = "periodic-narrative-grounding/19"
+SUGGESTION_VERSION = "periodic-ai-suggestion/19"
+PROMPT_VERSION = "periodic-narrative-grounding/20"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -356,7 +356,9 @@ Reporting rules:
    for each area + workstream combination; merge same-family activities within the
    same area instead of returning several Testing & commissioning bullets. Use the
    exact area/equipment label from source data when available and keep ``area``
-   populated whenever a source area exists. Never use filler such as "additional
+   populated whenever a source area exists. When deterministic_summary.current_activities
+   is supplied, preserve its exact MA-xx area and row order; never replace a known
+   area with generic values such as "Site" or "General". Never use filler such as "additional
    related activities were recorded during the period"; write only the useful
    representative work summary.
    Preserve technical terms, quantities, durations, dates, unit/equipment
