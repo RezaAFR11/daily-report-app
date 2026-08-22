@@ -70,7 +70,7 @@ DEFAULT_APPENDICES = (
     ("6.3", "Overall Schedule"),
     ("6.4", "Document Deliverable List / Drawing Status"),
     ("6.5", "Manning Manpower / Equipment Loading"),
-    ("6.6", "Photographs Activity"),
+    ("6.6", "Photo Documentation"),
     ("6.7", "Safety Report"),
     ("6.8", "QC Document"),
 )
@@ -265,6 +265,18 @@ def _heading(text: str, style: ParagraphStyle, level: int) -> Paragraph:
     paragraph._monthly_toc_level = level  # type: ignore[attr-defined]
     paragraph._monthly_toc_text = text  # type: ignore[attr-defined]
     return paragraph
+
+
+def _display_heading(text: str, style: ParagraphStyle) -> Paragraph:
+    """Render a visible heading without registering a TOC/outline entry.
+
+    Photo-documentation pages can span many dates and continuation pages.  Those
+    page-level labels stay visible in the appendix, while the Table of Contents
+    carries only the single appendix entry (for example, ``6.2 Photo
+    Documentation [Attached]``).
+    """
+
+    return Paragraph(escape(text, quote=False), style)
 
 
 def _draw_outer_border(canvas: pdf_canvas.Canvas) -> None:
@@ -1401,7 +1413,10 @@ def _appendix_label(item: Mapping[str, Any]) -> str:
     title = _plain(item.get("title"), "Appendix")
     status = _plain(item.get("status"))
     label = f"{number}    {title}".strip()
-    if status:
+    # Photo Documentation is a single navigational appendix entry.  Its
+    # attachment state is self-evident from the rendered photo pages, so keep
+    # the TOC/list label concise instead of showing ``[Attached]``.
+    if status and _appendix_source_number(item) != "6.6":
         label += f"  [{status}]"
     return label
 
@@ -1578,10 +1593,9 @@ def _photo_grid_flowables(
             if result:
                 result.append(PageBreak())
             continuation = " (continued)" if chunk_index else ""
-            result.append(_heading(
+            result.append(_display_heading(
                 f"Photo Documentation: {source_date}{continuation}",
                 styles["h2"],
-                1,
             ))
             grid = build_grid(chunk)
             if grid is not None:
