@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/17.1"
-PROMPT_VERSION = "periodic-narrative-grounding/17.1"
+SUGGESTION_VERSION = "periodic-ai-suggestion/18"
+PROMPT_VERSION = "periodic-narrative-grounding/19"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -102,6 +102,8 @@ _BASE_COMPACT_KEYS = (
     "engineering",
     "procurement",
     "constraint_reporting",
+    "narrative_mode",
+    "narrative_engine_version",
 )
 
 # V12 intentionally does not copy the full draft shape. ``web.py`` keeps several
@@ -109,7 +111,7 @@ _BASE_COMPACT_KEYS = (
 # current_period_activities, etc.) that can all contain the same activities.
 # Those aliases remain untouched in the real draft/PDF but are omitted from the
 # Claude payload so a dense Weekly report does not multiply the same source data.
-_AI_COMPACTION_VERSION = "periodic-ai-compact/2"
+_AI_COMPACTION_VERSION = "periodic-ai-compact/3"
 
 # Conservative equipment/instrument identifier matcher.  It targets codes such
 # as 81-EV-3833, 81 - APC - 14, 85-HSV-4101-B and leaves ordinary quantities
@@ -300,10 +302,25 @@ Grounding rules:
 5. If a section has no supported content, use exactly "Not supplied" with empty
    source_ids and dates, and add "<field>: Not supplied" to missing_data.
 
+Deterministic-baseline rule:
+- When source_data.deterministic_summary exists, it is the authoritative narrative
+  baseline already compiled from validated Daily Report facts. Your role is to
+  polish and improve readability -- not to rediscover or expand the scope from raw
+  Daily lines. Do NOT make the executive summary materially less informative than
+  the deterministic baseline. Preserve its supported area-level work highlights,
+  workforce facts, constraints, progress status, missing safety/progress status,
+  numbers and look-ahead facts. Exact raw activities may intentionally be
+  omitted from source_data. Use each baseline item's source_report_ids and
+  source_dates as the source_ids and dates in your response. Do not add a new
+  workstream, equipment tag, corrective action, quantity or status that is absent
+  from that baseline or another explicit source_data field.
+
 Reporting rules:
 6. executive_summary: synthesize the most important work performed, meaningful
    progress/status explicitly stated in the source, genuine project constraints,
-   and supported look-ahead. Write it as management-facing report content, never
+   workforce facts, and supported look-ahead. When the deterministic baseline
+   contains area-level highlights, retain those useful specifics rather than
+   collapsing them into only a list of generic workstream names. Write it as management-facing report content, never
    as a description of how the report was compiled. Never call the report a
    "draft" or say that it "compiles N Daily Reports" unless partial source
    coverage itself is operationally important. Explicit activity status values such as Finished,
@@ -317,13 +334,6 @@ Reporting rules:
    entry/input requirements, or instructions to review the report. If engineering
    or procurement evidence is absent, omit it from the executive summary rather
    than describing an internal workflow requirement.
-   Revision 3.1.1 detail rule: when explicit area-level activities are available,
-   do not collapse the executive summary into only generic workstream names. Mention
-   representative work from the principal active areas, keep material equipment/
-   constraint tags when source-backed, and include explicitly supplied peak daily
-   headcount and period man-hours when useful. If overall progress or safety incident
-   metrics are explicitly unavailable in source_data, retain that limitation rather
-   than implying zero or silently omitting a material reporting gap.
 7. site_summary: consolidate repeated daily activities into a short coherent
    summary. Preserve project terminology, area/equipment labels, abbreviations,
    and explicit completion/status. When weather observations are supplied, include
@@ -337,7 +347,9 @@ Reporting rules:
    Never write "accumulating X man-hours per day across ..." and never calculate a
    total that is not explicitly supplied.
 8. current_activities: create concise client-facing bullets for the current report
-   period. Group repeated/continuing work instead of copying every Daily Report
+   period. When deterministic_summary.current_activities exists, polish those
+   Area + Workstream groups directly and preserve their grouping. Otherwise, group
+   repeated/continuing work instead of copying every Daily Report
    line. Organize primarily by area and workstream (for example instrumentation/
    electrical, actuator/pneumatic, testing/commissioning, or valve mechanical)
    only when the source wording supports that grouping. Return at most ONE bullet
@@ -384,7 +396,7 @@ Reporting rules:
 14. Avoid repetitive bullet-by-bullet copying. Merge duplicates and write concise
     professional English suitable for a client-facing construction report.
     The response must fit comfortably inside the output budget:
-    - executive_summary: normally 2-4 sentences and preferably <= 900 characters.
+    - executive_summary: normally 4-6 sentences and preferably <= 1,400 characters when the deterministic baseline contains multiple area highlights.
     - site_summary: normally 2-4 sentences and preferably <= 900 characters.
     - engineering_summary/procurement_summary: preferably <= 500 characters each.
     - each current_activities, lookahead, claim, concern, or corrective_action
@@ -838,10 +850,10 @@ def _compact_progress_sections(draft: Mapping[str, Any], compact: dict[str, Any]
 def compact_periodic_draft(draft: Mapping[str, Any]) -> dict[str, Any]:
     """Return a bounded, de-duplicated model-only view of the periodic draft.
 
-    V12 never mutates or truncates the Daily/Weekly source draft.  Only the copy
-    sent to Claude is normalised: compatibility aliases are omitted, repetitive
-    activity wording is grouped, identical weather rows are collapsed, and
-    employee/role-level workforce detail stays outside the narrative payload.
+    V18 never mutates or truncates the Daily/Weekly source draft. Only the copy
+    sent to Claude is normalised. When a deterministic narrative baseline exists,
+    Claude receives that compact Area/Workstream summary instead of the exhaustive
+    Daily activity list; older drafts retain the previous grouped-activity fallback.
     """
 
     if not isinstance(draft, Mapping):
@@ -856,13 +868,26 @@ def compact_periodic_draft(draft: Mapping[str, Any]) -> dict[str, Any]:
     report_type = str(draft.get("report_type") or "monthly").strip().lower()
     _compact_progress_sections(draft, compact)
 
-    activities = _compact_activities(draft.get("activities"))
-    if activities:
-        compact["activities"] = activities
+    deterministic = draft.get("deterministic_summary")
+    has_deterministic_baseline = (
+        isinstance(deterministic, Mapping)
+        and str(deterministic.get("source_type") or "").strip() == "deterministic_compiler"
+    )
+    if has_deterministic_baseline:
+        # V18: Claude edits the deterministic period summary instead of
+        # re-summarising hundreds of raw Daily activity rows. The full draft
+        # remains untouched and still holds every source activity for audit/PDF.
+        compact["deterministic_summary"] = _bounded_json_copy(
+            deterministic, path="$.deterministic_summary"
+        )
+    else:
+        activities = _compact_activities(draft.get("activities"))
+        if activities:
+            compact["activities"] = activities
 
-    for key in ("constraints", "concerns", "remarks"):
-        if key in draft and draft.get(key) not in (None, "", []):
-            compact[key] = _dedupe_compact_rows(draft.get(key), path=f"$.{key}")
+        for key in ("constraints", "concerns", "remarks"):
+            if key in draft and draft.get(key) not in (None, "", []):
+                compact[key] = _dedupe_compact_rows(draft.get(key), path=f"$.{key}")
 
     weather = _compact_weather(draft.get("weather"))
     if weather:
