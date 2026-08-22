@@ -742,7 +742,10 @@ def _clean_activity_rows(value: Any, maximum_items: int = 250) -> list[dict[str,
         if key in seen:
             continue
         seen.add(key)
-        row = {"area": area or "Site", "text": text}
+        row = {"area": area, "text": text}
+        workstream = _clean_text(item.get("workstream"), 200) if isinstance(item, dict) else ""
+        if workstream:
+            row["workstream"] = workstream
         if status and status.casefold() not in text.casefold():
             row["status"] = status
         result.append(row)
@@ -769,6 +772,75 @@ def _activity_equipment_ids(value: Any) -> set[str]:
             f"{match.group('prefix')}-{match.group('tag').upper()}-{match.group('number')}"
         )
     return result
+
+
+_GENERIC_ACTIVITY_AREAS = {"", "site", "general", "all areas", "all area"}
+
+
+def _is_generic_activity_area(value: Any) -> bool:
+    return _clean_text(value, 200).casefold() in _GENERIC_ACTIVITY_AREAS
+
+
+def _align_ai_activity_rows(value: Any, draft: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Keep Claude wording while restoring deterministic Area + Workstream metadata.
+
+    Claude is allowed to polish the bullet text, but the deterministic compiler remains
+    authoritative for grouping.  This prevents a missing model ``area`` value from
+    becoming an orphan ``Site`` heading and keeps 5.2 traceable to MA-xx work fronts.
+    """
+
+    rows = _clean_activity_rows(value, maximum_items=250)
+    deterministic = (
+        draft.get("deterministic_summary")
+        if isinstance(draft.get("deterministic_summary"), Mapping)
+        else {}
+    )
+    baseline_raw = (
+        deterministic.get("current_activities")
+        if isinstance(deterministic.get("current_activities"), list)
+        else draft.get("activity_summary")
+        if isinstance(draft.get("activity_summary"), list)
+        else []
+    )
+    baseline = _clean_activity_rows(baseline_raw, maximum_items=250)
+    if not rows or not baseline:
+        return rows
+
+    baseline_areas = {
+        _clean_text(item.get("area"), 200)
+        for item in baseline
+        if not _is_generic_activity_area(item.get("area"))
+    }
+
+    for index, row in enumerate(rows):
+        area = _clean_text(row.get("area"), 200)
+        workstream = _clean_text(row.get("workstream"), 200)
+        text_value = _clean_text(row.get("text"), 2_000)
+
+        # First recover MA-xx directly from equipment tags when the AI omitted area.
+        if _is_generic_activity_area(area):
+            prefixes = {tag.split("-", 1)[0] for tag in _activity_equipment_ids(text_value)}
+            if len(prefixes) == 1:
+                candidate = f"MA-{next(iter(prefixes))}"
+                if candidate in baseline_areas:
+                    area = candidate
+
+        # v3.3 asks Claude to preserve deterministic order.  If it still omits area
+        # or workstream, restore those fields from the corresponding deterministic
+        # Area + Workstream row rather than inventing a generic group.
+        base = baseline[index] if index < len(baseline) else {}
+        if _is_generic_activity_area(area):
+            base_area = _clean_text(base.get("area"), 200)
+            if not _is_generic_activity_area(base_area):
+                area = base_area
+        if not workstream:
+            workstream = _clean_text(base.get("workstream"), 200)
+
+        row["area"] = area
+        if workstream:
+            row["workstream"] = workstream
+
+    return rows
 
 
 def _source_activity_status_rows(draft: dict[str, Any]) -> list[dict[str, str]]:
@@ -4806,12 +4878,15 @@ def register_monthly_routes(
                 if text:
                     references = _clean_ai_references(row)
                     current_activities.append({
-                        "area": area or "Site",
+                        "area": area,
                         "text": text,
                         **references,
                     })
                     current_activity_evidence.append(references)
 
+            # Claude may polish wording, but deterministic Area + Workstream
+            # grouping remains authoritative and is restored before review.
+            current_activities = _align_ai_activity_rows(current_activities, draft)
             # Preserve deterministic source status even when Claude omits it.
             current_activities = _enrich_activity_statuses(current_activities, draft)
 
@@ -4952,10 +5027,11 @@ def register_monthly_routes(
             # Once explicitly accepted, the site section may use Claude's
             # source-grounded, de-duplicated bullets for the client-facing 5.2 section.
             if accepted["current_activities"]:
-                ai_activities = _enrich_activity_statuses(
+                ai_activities = _align_ai_activity_rows(
                     copy.deepcopy(accepted["current_activities"]),
                     draft,
                 )
+                ai_activities = _enrich_activity_statuses(ai_activities, draft)
                 site["this_month_activities"] = ai_activities
                 site["current_period_activities"] = ai_activities
                 site["this_period_activities"] = ai_activities
