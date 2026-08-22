@@ -986,46 +986,61 @@ def _activity_flowables(
     *,
     empty_message: str,
 ) -> list[Flowable]:
-    """Render AI-condensed activities grouped by area when structured rows exist."""
+    """Render period activities as concise ``MA-xx – Workstream`` bullets.
+
+    Area/workstream metadata comes from the deterministic compiler.  Claude may
+    polish only the narrative body.  Generic placeholders such as ``Site`` are
+    never rendered as stand-alone headings.
+    """
 
     rows = _as_list(value)
     structured = [
         row for row in rows
-        if isinstance(row, Mapping) and _plain(_value(row, "area", "location"))
-        and _activity_display_text(row)
+        if isinstance(row, Mapping) and _activity_display_text(row)
     ]
     if not structured:
         return _content_flowables(value, styles, empty_message=empty_message, bullets=True)
 
-    groups: dict[str, list[str]] = {}
-    order: list[str] = []
-    loose: list[str] = []
+    rendered: list[Flowable] = []
+    seen: set[str] = set()
+    generic_areas = {"", "site", "general", "all areas", "all area"}
     for row in rows:
         if not isinstance(row, Mapping):
             text = _plain(row)
-            if text:
-                loose.append(text)
+            if text and text.casefold() not in seen:
+                rendered.append(Paragraph(f"&#8226;&nbsp;&nbsp;{_xml(text)}", styles["body"]))
+                seen.add(text.casefold())
             continue
-        area = _plain(_value(row, "area", "location"))
+
         text = _activity_display_text(row)
         if not text:
             continue
-        if not area:
-            loose.append(text)
-            continue
-        if area not in groups:
-            groups[area] = []
-            order.append(area)
-        if text not in groups[area]:
-            groups[area].append(text)
+        area = _plain(_value(row, "area", "location")).strip()
+        workstream = _plain(row.get("workstream")).strip()
+        if area.casefold() in generic_areas:
+            area = ""
 
-    rendered: list[Flowable] = []
-    for area in order:
-        rendered.append(_paragraph(area, styles["activity_area"], default=""))
-        for text in groups[area]:
-            rendered.append(Paragraph(f"&#8226;&nbsp;&nbsp;{_xml(text)}", styles["body"]))
-    for text in loose:
-        rendered.append(Paragraph(f"&#8226;&nbsp;&nbsp;{_xml(text)}", styles["body"]))
+        detail = text
+        # Deterministic rows already begin with "Workstream:".  Avoid rendering
+        # "MA-78 – Valve Mechanical: Valve Mechanical: ...".
+        if workstream and detail.casefold().startswith((workstream + ":").casefold()):
+            detail = detail[len(workstream) + 1:].strip()
+
+        if area and workstream:
+            display = f"{area} – {workstream}: {detail}"
+        elif area:
+            display = f"{area} – {detail}"
+        elif workstream:
+            display = f"{workstream}: {detail}" if not detail.casefold().startswith((workstream + ":").casefold()) else detail
+        else:
+            display = detail
+
+        key = display.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        rendered.append(Paragraph(f"&#8226;&nbsp;&nbsp;{_xml(display)}", styles["body"]))
+
     if not rendered:
         rendered.append(_paragraph(empty_message, styles["placeholder"]))
     return rendered
@@ -1935,7 +1950,7 @@ def _build_story(
     story.append(_heading("5.1 Project Schedule Status", styles["h2"], 1))
     story.extend(_content_flowables(
         _value(site, "schedule_status", "project_schedule_status"), styles,
-        empty_message="See the overall schedule appendix when supplied.",
+        empty_message="Overall schedule/progress data was not supplied for this reporting period.",
     ))
     story.append(_heading(current_heading, styles["h2"], 1))
     story.extend(_activity_flowables(
