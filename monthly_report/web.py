@@ -1118,52 +1118,189 @@ def _progress_summary_sentence(draft: Mapping[str, Any]) -> str:
 
 
 def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: str) -> str:
+    """Build a detailed v3.1-compatible Executive Summary without Claude.
+
+    Revision 3.1.1 intentionally keeps the Revision 3.1 aggregation, workstream
+    grouping, warning handling and photo logic unchanged.  This function only
+    enriches the Executive Summary with deterministic, source-backed highlights.
+    It does not introduce the Revision 3.2 deterministic-summary engine.
+    """
+
+    def english_join(values: list[str]) -> str:
+        items = [str(value).strip() for value in values if str(value).strip()]
+        if not items:
+            return ""
+        if len(items) == 1:
+            return items[0]
+        if len(items) == 2:
+            return f"{items[0]} and {items[1]}"
+        return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+    def area_sort_key(value: str) -> tuple[str, int, str]:
+        match = re.match(r"^([A-Za-z]+)[- ]?(\d+)(.*)$", value.strip())
+        if match:
+            return (match.group(1).casefold(), int(match.group(2)), match.group(3).casefold())
+        return (value.casefold(), 10**9, "")
+
+    def display_period(start: str, end: str) -> str:
+        try:
+            start_dt = datetime.strptime(start, "%Y-%m-%d")
+            end_dt = datetime.strptime(end, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            return f"{start} to {end}" if start and end else (start or end)
+        if start_dt.date() == end_dt.date():
+            return f"{start_dt.day} {start_dt.strftime('%B %Y')}"
+        if start_dt.year == end_dt.year and start_dt.month == end_dt.month:
+            return f"{start_dt.day}\u2013{end_dt.day} {end_dt.strftime('%B %Y')}"
+        if start_dt.year == end_dt.year:
+            return f"{start_dt.day} {start_dt.strftime('%B')}\u2013{end_dt.day} {end_dt.strftime('%B %Y')}"
+        return f"{start_dt.day} {start_dt.strftime('%B %Y')}\u2013{end_dt.day} {end_dt.strftime('%B %Y')}"
+
+    # These labels are used only for the Executive Summary.  They are triggered
+    # by explicit Daily Report wording and never reclassify or mutate source rows.
+    topic_rules: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("actuator/pneumatic-cylinder repair and testing", ("actuator", "pneumatic", "silinder", "cylinder", "piston", "o-ring", "oring")),
+        ("selector-switch checking/repair/rewiring", ("selector switch", "selector", "rewiring")),
+        ("proximity installation and adjustment", ("proximity",)),
+        ("solenoid/multi-way valve work", ("solenoid", "5-way", "5 way", "6-way", "6 way")),
+        ("regulator, tubing and hose work", ("regulator", "tubing", "hose", "air instrument")),
+        ("DCS loop testing", ("loop test", "dcs")),
+        ("local function/continuity testing", ("function test", "continuity")),
+        ("junction-box installation/waterproofing", ("junction box", "waterproof")),
+        ("valve assembly/installation", ("reassembl", "seat rubber", "install valve", "valve on-off", "valve on off")),
+        ("valve troubleshooting/position work", ("trouble shoot", "troubleshoot", "position valve", "reversed regulator")),
+        ("bolt/mechanical maintenance", ("bolt", "gasket", "cleaning all mechanical")),
+        ("flexible conduit/cable work", ("flexible conduit", "connect cable", "cable")),
+    )
+
     period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
     start = _clean_text(period.get("start", period.get("date_from")), 10)
     end = _clean_text(period.get("end", period.get("date_to")), 10)
     activities = draft.get("activities") if isinstance(draft.get("activities"), list) else []
-    areas: list[str] = []
-    families: list[str] = []
-    for row in activities:
-        if not isinstance(row, dict):
-            continue
-        area = _clean_text(row.get("area"), 255)
-        family = _period_activity_family(row.get("description", row.get("text")))
-        if area and area not in areas:
-            areas.append(area)
-        if family != "Other site work" and family not in families:
-            families.append(family)
-
     report_word = "week" if report_type == "weekly" else "month"
+
+    activity_by_area: dict[str, list[str]] = {}
+    for row in activities:
+        if not isinstance(row, Mapping):
+            continue
+        area = _clean_text(row.get("area"), 255) or "General"
+        description = _clean_text(row.get("description", row.get("text")), 2_000)
+        if description:
+            activity_by_area.setdefault(area, []).append(description)
+
+    all_areas = sorted(activity_by_area, key=area_sort_key)
     sentences: list[str] = []
     if activities:
-        period_text = f" from {start} to {end}" if start and end else ""
-        area_text = ", ".join(areas)
+        period_label = display_period(start, end)
+        project_title = _clean_text(draft.get("project_title", draft.get("project_name")), 500)
+        location = _clean_text(draft.get("location"), 255)
+        customer = _clean_text(draft.get("customer"), 255)
+        subject = f" for {project_title}" if project_title else ""
+        area_text = english_join(all_areas)
+        place = f" at {location}" if location else ""
+        client = f" for {customer}" if customer else ""
+        when = f" of {period_label}" if period_label else ""
         sentences.append(
-            f"During the reporting {report_word}{period_text}, field activities were recorded"
-            + (f" across {area_text}." if area_text else ".")
+            f"During the reporting {report_word}{when}, field activities{subject} were carried out"
+            + (f" across {area_text}" if area_text else "")
+            + f"{place}{client}."
         )
-        if families:
-            sentences.append(f"Main work fronts covered {', '.join(families)}.")
+
+        area_topics: dict[str, list[str]] = {}
+        for area, descriptions in activity_by_area.items():
+            ranked_topics: list[tuple[int, int, str]] = []
+            for rule_index, (label, needles) in enumerate(topic_rules):
+                matches = sum(
+                    1
+                    for description in descriptions
+                    if any(needle in description.casefold() for needle in needles)
+                )
+                if matches:
+                    ranked_topics.append((-matches, rule_index, label))
+            ranked_topics.sort()
+            area_topics[area] = [label for _neg_count, _rule_index, label in ranked_topics]
+
+        # Give the busiest work area the richest sentence.  Remaining active
+        # areas are summarized compactly so the Executive Summary stays readable.
+        ranked = sorted(
+            all_areas,
+            key=lambda area: (-len(activity_by_area.get(area, [])), area_sort_key(area)),
+        )
+        if ranked:
+            main_area = ranked[0]
+            main_topics = area_topics.get(main_area, [])[:5]
+            if main_topics:
+                sentences.append(
+                    f"The primary focus in {main_area} included {english_join(main_topics)}."
+                )
+
+            other_highlights: list[str] = []
+            for area in ranked[1:5]:
+                topics = area_topics.get(area, [])[:2]
+                if topics:
+                    other_highlights.append(f"{english_join(topics)} in {area}")
+            if other_highlights:
+                sentences.append(f"Other recorded work included {english_join(other_highlights)}.")
     else:
         sentences.append(f"No current-period site activities were supplied for this reporting {report_word}.")
+
+    manpower = draft.get("manpower") if isinstance(draft.get("manpower"), Mapping) else {}
+    totals = manpower.get("totals") if isinstance(manpower.get("totals"), Mapping) else {}
+    try:
+        peak = float(totals.get("peak_headcount") or 0)
+    except (TypeError, ValueError):
+        peak = 0.0
+    try:
+        man_hours = float(totals.get("total_man_hours") or 0)
+    except (TypeError, ValueError):
+        man_hours = 0.0
+    if peak > 0 or man_hours > 0:
+        metrics: list[str] = []
+        if peak > 0:
+            peak_text = str(int(peak)) if peak.is_integer() else f"{peak:.2f}".rstrip("0").rstrip(".")
+            metrics.append(f"peak daily headcount was {peak_text} personnel")
+        if man_hours > 0:
+            mh_text = f"{man_hours:,.1f}" if not man_hours.is_integer() else f"{int(man_hours):,}"
+            metrics.append(f"{mh_text} man-hours were recorded during the period")
+        sentences.append(metrics[0].capitalize() + (f" and {metrics[1]}" if len(metrics) > 1 else "") + ".")
+
+    constraints = draft.get("constraints") if isinstance(draft.get("constraints"), list) else []
+    concern_areas: list[str] = []
+    tags: list[str] = []
+    seen_constraints: set[tuple[str, str]] = set()
+    for row in constraints:
+        if not isinstance(row, Mapping):
+            continue
+        area = _clean_text(row.get("area"), 255)
+        concern = _clean_text(row.get("text", row.get("concern")), 1_500)
+        if not concern:
+            continue
+        identity = (area.casefold(), concern.casefold())
+        if identity in seen_constraints:
+            continue
+        seen_constraints.add(identity)
+        if area and area not in concern_areas:
+            concern_areas.append(area)
+        for tag in sorted(_activity_equipment_ids(concern)):
+            if tag not in tags:
+                tags.append(tag)
+    if seen_constraints:
+        area_suffix = f" in {english_join(sorted(concern_areas, key=area_sort_key))}" if concern_areas else ""
+        tag_suffix = f" for {english_join(tags[:4])}" if tags else ""
+        sentences.append(
+            f"Formal constraints were recorded{area_suffix}{tag_suffix}; details and supplied corrective-action status are listed in Section 5.4."
+        )
 
     progress_sentence = _progress_summary_sentence(draft)
     if progress_sentence:
         sentences.append(progress_sentence)
+    else:
+        sentences.append("Overall progress percentages were not supplied.")
 
-    constraints = draft.get("constraints") if isinstance(draft.get("constraints"), list) else []
-    if constraints:
-        concern_areas = []
-        for row in constraints:
-            if isinstance(row, dict):
-                area = _clean_text(row.get("area"), 255)
-                if area and area not in concern_areas:
-                    concern_areas.append(area)
-        suffix = f" in {', '.join(concern_areas)}" if concern_areas else ""
-        sentences.append(
-            f"Source-reported constraints were recorded{suffix}; details and supplied corrective-action status are listed in Section 5.4."
-        )
+    safety = draft.get("safety") if isinstance(draft.get("safety"), Mapping) else {}
+    incident_keys = ("recordable_cases", "lost_workdays", "lost_time_injuries", "severity_rate", "average_day_away")
+    if safety and all(safety.get(key) in (None, "", "Not supplied") for key in incident_keys):
+        sentences.append("Safety incident metrics were not supplied.")
 
     coverage = draft.get("coverage") if isinstance(draft.get("coverage"), dict) else {}
     missing = [str(item) for item in coverage.get("missing_dates", [])] if isinstance(coverage.get("missing_dates"), list) else []
