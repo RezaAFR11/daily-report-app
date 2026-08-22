@@ -12,6 +12,7 @@ import copy
 import hashlib
 import re
 import unicodedata
+from difflib import SequenceMatcher
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -100,8 +101,64 @@ def _title_similarity(left: str, right: str) -> float:
     try:
         from rapidfuzz import fuzz
     except ImportError:  # pragma: no cover - dependency is optional at import time
-        return 0.0
+        return round(100.0 * SequenceMatcher(None, _normalise(left), _normalise(right)).ratio(), 2)
     return round(float(fuzz.WRatio(left, right)), 2)
+
+
+_DAILY_REPORT_DOCUMENT_NO_RE = re.compile(r"(?:^|[-_/])DAR(?:$|[-_/])", re.IGNORECASE)
+
+
+def _project_title_alias_key(value: Any) -> str:
+    """Conservative key for common report-title spelling variants.
+
+    Only normalises punctuation/case plus the service/services inflection seen
+    between the Daily template and the project master.
+    """
+
+    tokens = _normalise(value).split()
+    return " ".join("service" if token == "services" else token for token in tokens)
+
+
+def _looks_like_daily_report_document_no(value: Any) -> bool:
+    """Recognise document-control Daily Report numbers such as ``...-DAR``.
+
+    Historical GPA Daily PDFs place a Daily Report document number in the visual
+    ``Project No.`` field.  It is not the same identifier as the periodic report's
+    Vendor Project No. and must not create seven false project-mismatch groups.
+    """
+
+    return bool(_DAILY_REPORT_DOCUMENT_NO_RE.search(_clean(value)))
+
+
+def _validation_identity(
+    *,
+    source_project_no: str,
+    source_project_title: str,
+    selected_project_no: str,
+    selected_project_title: str,
+) -> tuple[str, str, str]:
+    """Return (project_no, project_title, document_no) for validation grouping.
+
+    A ``*-DAR`` number is treated as a source document number only when the
+    source title strongly matches the selected project title.  The raw document
+    number remains available for traceability.
+    """
+
+    document_no = source_project_no if _looks_like_daily_report_document_no(source_project_no) else ""
+    title_alias_match = bool(
+        source_project_title
+        and selected_project_title
+        and _project_title_alias_key(source_project_title) == _project_title_alias_key(selected_project_title)
+    )
+    similarity = _title_similarity(source_project_title, selected_project_title)
+    if (
+        document_no
+        and selected_project_no
+        and selected_project_title
+        and (title_alias_match or similarity >= 92.0)
+    ):
+        return _clean(selected_project_no), _clean(selected_project_title), document_no
+    return _clean(source_project_no), _clean(source_project_title), document_no
 
 
 def build_source_validation(
@@ -121,8 +178,17 @@ def build_source_validation(
     for index, record in enumerate(records):
         if not isinstance(record, Mapping):
             continue
-        project_no = _metadata(record, "project_no")
-        project_title = _metadata(record, "project_title")
+        source_project_no = _metadata(record, "project_no")
+        source_project_title = _metadata(record, "project_title")
+        source_identity = record.get("source_identity") if isinstance(record.get("source_identity"), Mapping) else {}
+        explicit_document_no = _clean(source_identity.get("document_no"))
+        project_no, project_title, document_no = _validation_identity(
+            source_project_no=source_project_no,
+            source_project_title=source_project_title,
+            selected_project_no=selected_project_no,
+            selected_project_title=selected_project_title,
+        )
+        document_no = explicit_document_no or document_no
         record_id = _record_id(record, index)
         key = _record_group_key(record, index, project_title, project_no)
         group = grouped.setdefault(
@@ -134,9 +200,12 @@ def build_source_validation(
                 "record_ids": [],
                 "filenames": [],
                 "dates": [],
+                "source_document_nos": [],
                 "file_count": 0,
             },
         )
+        if document_no and document_no not in group["source_document_nos"]:
+            group["source_document_nos"].append(document_no)
         group["record_ids"].append(record_id)
         source = record.get("source") if isinstance(record.get("source"), Mapping) else {}
         filename = _clean(source.get("filename"))
@@ -281,7 +350,16 @@ def resolve_project_records(
         record = copy.deepcopy(dict(source_record))
         source_title = _metadata(record, "project_title")
         source_no = _metadata(record, "project_no")
-        key = _record_group_key(record, index, source_title, source_no)
+        prior_identity = record.get("source_identity") if isinstance(record.get("source_identity"), Mapping) else {}
+        explicit_document_no = _clean(prior_identity.get("document_no"))
+        effective_no, effective_title, document_no = _validation_identity(
+            source_project_no=source_no,
+            source_project_title=source_title,
+            selected_project_no=project_no,
+            selected_project_title=project_title,
+        )
+        document_no = explicit_document_no or document_no
+        key = _record_group_key(record, index, effective_title, effective_no)
         if key not in decisions:
             raise ValueError("A source project identity changed after validation. Compile again.")
         if decisions[key] == "separate":
@@ -289,8 +367,11 @@ def resolve_project_records(
             continue
 
         record["source_identity"] = {
-            "project_no": source_no,
-            "project_title": source_title,
+            "project_no": effective_no,
+            "project_title": effective_title,
+            "reported_project_no": source_no,
+            "reported_project_title": source_title,
+            "document_no": document_no,
             "validation_group_key": key,
             "record_id": _record_id(record, index),
         }
