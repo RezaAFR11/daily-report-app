@@ -56,6 +56,36 @@ class PhotoLimits:
 
 DEFAULT_PHOTO_LIMITS = PhotoLimits()
 
+# Periodic reports need a larger, but still bounded, photo budget than the old
+# 15-per-Daily / 60-per-draft review limit.  The old limit caused a complete
+# 7-day Weekly source set to render photographs only through the first five days.
+# Keep all decoder/asset safety bounds, but give Weekly/Monthly compilation a
+# period-appropriate count and aggregate-byte budget.
+WEEKLY_PHOTO_LIMITS = PhotoLimits(
+    max_images_per_pdf=80,
+    max_images_per_draft=300,
+    max_total_asset_bytes_per_pdf=48 * 1024 * 1024,
+    max_total_asset_bytes_per_draft=128 * 1024 * 1024,
+)
+MONTHLY_PHOTO_LIMITS = PhotoLimits(
+    max_images_per_pdf=80,
+    max_images_per_draft=1200,
+    max_total_asset_bytes_per_pdf=48 * 1024 * 1024,
+    max_total_asset_bytes_per_draft=256 * 1024 * 1024,
+)
+
+
+def periodic_photo_limits(report_type: Any) -> PhotoLimits:
+    """Return bounded photo limits appropriate for Weekly/Monthly reports.
+
+    This intentionally does not remove safety limits.  If even these expanded
+    budgets are reached, the warning is retained and Final preflight can block
+    issue rather than silently publishing incomplete photo coverage.
+    """
+
+    kind = str(report_type or "monthly").strip().lower()
+    return WEEKLY_PHOTO_LIMITS if kind == "weekly" else MONTHLY_PHOTO_LIMITS
+
 
 def is_asset_id(value: Any) -> bool:
     return bool(_ASSET_ID_RE.fullmatch(str(value or "")))
@@ -661,6 +691,118 @@ def _context_for_photo_box(
     return dict(ranked[0][1]["entry"])
 
 
+
+def _area_heading_photo_context(
+    page: Any,
+    bbox: Any,
+    areas: Iterable[Mapping[str, Any]] | None,
+) -> dict[str, str] | None:
+    """Map a current split-layout photo card from its visible area heading.
+
+    New Daily Report PDFs can use a generic photo-documentation title while the
+    construction area is rendered as a heading immediately above each photo row.
+    In that layout there may be no activity caption that matches the parsed
+    ``activities_today`` text.  This geometry fallback therefore uses only text
+    that is visibly present in the same photo card: the nearest known area
+    heading above the image and, when available, the nearest card caption between
+    that heading and the image.  It never invents an activity description.
+    """
+
+    if not isinstance(bbox, (tuple, list)) or len(bbox) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = (float(value) for value in bbox)
+    except (TypeError, ValueError):
+        return None
+
+    area_names: list[str] = []
+    for area in areas or ():
+        if not isinstance(area, Mapping):
+            continue
+        name = str(area.get("id") or area.get("area") or area.get("name") or "").strip()
+        if not name or name.casefold() == "imported pdf":
+            continue
+        if name not in area_names:
+            area_names.append(name)
+    if not area_names:
+        return None
+
+    fragments = _page_text_fragments(page)
+    if not fragments:
+        return None
+
+    area_by_key = {_normalise_photo_text(name): name for name in area_names}
+    image_x = min(x0, x1)
+    image_top = max(y0, y1)
+    image_width = max(1.0, abs(x1 - x0))
+
+    ranked: list[tuple[float, dict[str, Any], str]] = []
+    for fragment in fragments:
+        key = str(fragment.get("key") or "")
+        area_name = area_by_key.get(key)
+        if not area_name:
+            continue
+        fx = float(fragment.get("x") or 0.0)
+        fy = float(fragment.get("y") or 0.0)
+        vertical = fy - image_top
+        horizontal = abs(fx - image_x)
+        # Current GPA photo cards put the area heading directly above the card.
+        # Keep the bounds generous enough for wrapped layouts, but not so broad
+        # that an area from another row/column is borrowed.
+        if vertical < -8.0 or vertical > 180.0:
+            continue
+        if horizontal > max(120.0, image_width * 0.85):
+            continue
+        ranked.append((vertical + horizontal * 1.8, fragment, area_name))
+
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: item[0])
+    _score, area_fragment, area_name = ranked[0]
+    area_y = float(area_fragment.get("y") or 0.0)
+
+    caption_candidates: list[tuple[float, str]] = []
+    for fragment in fragments:
+        text = str(fragment.get("text") or "").strip()
+        key = str(fragment.get("key") or "")
+        if not text or key in area_by_key:
+            continue
+        if _PHOTO_HEADING_RE.search(text):
+            continue
+        folded = key.casefold()
+        if (
+            folded.startswith("pt garuda prima aksara")
+            or folded.startswith("daily activity report")
+            or folded.startswith("location ")
+            or folded.startswith("customer ")
+            or folded.startswith("date ")
+            or folded.startswith("day ")
+            or folded.startswith("page ")
+        ):
+            continue
+        fx = float(fragment.get("x") or 0.0)
+        fy = float(fragment.get("y") or 0.0)
+        if fy < image_top - 4.0 or fy >= area_y:
+            continue
+        if abs(fx - image_x) > max(65.0, image_width * 0.45):
+            continue
+        # Prefer the text immediately above the image. For the current Daily
+        # template this is the per-card caption/description; when description is
+        # blank it is the configured photo-documentation title.
+        caption_candidates.append((fy - image_top, text))
+
+    caption = ""
+    if caption_candidates:
+        caption_candidates.sort(key=lambda item: item[0])
+        caption = caption_candidates[0][1]
+
+    return {
+        "area": area_name[:255],
+        "caption": caption[:500],
+        "context_type": "photo_card",
+    }
+
+
 def _attach_photo_contexts(
     candidates: list[dict[str, Any]],
     pages: list[Any],
@@ -675,9 +817,7 @@ def _attach_photo_contexts(
     """
 
     entries = _photo_context_entries(areas)
-    if not entries or not candidates:
-        for candidate in candidates:
-            candidate.pop("_bbox", None)
+    if not candidates:
         return
 
     by_page: dict[int, list[dict[str, Any]]] = {}
@@ -715,6 +855,10 @@ def _attach_photo_contexts(
             match_method = "layout_geometry" if context is not None else "text_order_fallback"
             if context is None:
                 context = fallback_pairs.get(id(candidate))
+            if context is None:
+                context = _area_heading_photo_context(page, candidate.get("_bbox"), areas)
+                if context is not None:
+                    match_method = "area_heading_geometry"
             if context is None:
                 candidate.pop("_bbox", None)
                 continue
@@ -1360,7 +1504,10 @@ def copy_photo_assets(
 
 __all__ = [
     "DEFAULT_PHOTO_LIMITS",
+    "WEEKLY_PHOTO_LIMITS",
+    "MONTHLY_PHOTO_LIMITS",
     "PhotoLimits",
+    "periodic_photo_limits",
     "attach_canonical_photo_candidates",
     "asset_filename",
     "copy_photo_assets",
