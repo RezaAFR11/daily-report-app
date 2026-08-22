@@ -200,6 +200,44 @@ def _photo_mapping_issues(report: Mapping[str, Any]) -> list[str]:
     ]
 
 
+
+def _deterministic_summary_issues(report: Mapping[str, Any]) -> tuple[list[str], list[str]]:
+    """Check the non-AI narrative baseline without making AI mandatory."""
+
+    warnings: list[str] = []
+    info: list[str] = []
+    summary = report.get("deterministic_summary")
+    if not isinstance(summary, Mapping):
+        return warnings, info
+
+    version = str(summary.get("version") or report.get("narrative_engine_version") or "").strip()
+    current = _as_list(summary.get("current_activities"))
+    raw_activities = _as_list(report.get("activities"))
+    if raw_activities and not current:
+        warnings.append("Deterministic summary contains no current-period activity groups although source activities are available.")
+
+    seen: set[tuple[str, str]] = set()
+    for row in current:
+        if not isinstance(row, Mapping):
+            continue
+        area = str(row.get("area") or "").strip().casefold()
+        workstream = str(row.get("workstream") or "").strip().casefold()
+        if not area or not workstream:
+            continue
+        key = (area, workstream)
+        if key in seen:
+            warnings.append("Deterministic activity summary contains duplicate Area + Workstream groups.")
+            break
+        seen.add(key)
+
+    if version:
+        info.append(
+            f"Deterministic narrative baseline is available ({version}); AI enhancement is optional."
+        )
+    else:
+        info.append("Deterministic narrative baseline is available; AI enhancement is optional.")
+    return warnings, info
+
 def _manual_source_issues(report: Mapping[str, Any]) -> list[str]:
     issues: list[str] = []
     sections = ["engineering", "procurement", "equipment_delivery", "shipments", "safety"]
@@ -283,6 +321,12 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
             "code": "photo_area_mapping_review",
             "message": message,
         })
+
+    deterministic_warnings, deterministic_info = _deterministic_summary_issues(report)
+    for message in deterministic_warnings:
+        warnings.append({"code": "deterministic_summary_quality", "message": message})
+    for message in deterministic_info:
+        info.append({"code": "deterministic_summary_ready", "message": message})
 
     for message in _manual_source_issues(report):
         warnings.append({"code": "manual_source_audit", "message": message})
