@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ from .photos import (
     copy_photo_assets,
     extract_pdf_photo_candidates,
     is_asset_id,
+    periodic_photo_limits,
     store_photo_candidates,
 )
 from .renderer import render_monthly_report
@@ -980,7 +982,7 @@ def _period_activity_family(value: Any) -> str:
     return "Other site work"
 
 
-def _summarise_period_activities(value: Any, *, max_phrases_per_group: int = 4) -> list[dict[str, Any]]:
+def _summarise_period_activities(value: Any, *, max_phrases_per_group: int = 3) -> list[dict[str, Any]]:
     rows = value if isinstance(value, list) else []
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     group_order: list[tuple[str, str]] = []
@@ -1025,10 +1027,9 @@ def _summarise_period_activities(value: Any, *, max_phrases_per_group: int = 4) 
             continue
         selected = phrases[:max_phrases_per_group]
         detail = "; ".join(selected)
-        if len(phrases) > len(selected):
-            # The full source rows remain in draft['activities']; this sentence is
-            # intentionally a management-level summary, not an exhaustive register.
-            detail += "; additional related activities were recorded during the period"
+        # The full source rows remain in draft['activities']; the client-facing
+        # section deliberately shows representative work only and avoids filler
+        # such as "additional related activities were recorded".
         text = f"{group['family']}: {detail}."
         statuses = group["statuses"]
         if len(statuses) == 1 and len(phrases) == 1:
@@ -1216,6 +1217,7 @@ def _prepare_draft(
     draft["prepared_by"] = context.get("prepared_by", "")
     draft["checked_by"] = context.get("checked_by", "")
     draft["approved_by"] = context.get("approved_by", "")
+    draft["revision_description"] = _periodic_revision_description(draft)
 
     coverage = draft.get("coverage") if isinstance(draft.get("coverage"), dict) else {}
     expected = _expected_dates(start, end)
@@ -1237,7 +1239,7 @@ def _prepare_draft(
         warning = _warning_text(warning)
         if warning and warning not in warnings:
             warnings.append(warning)
-    draft["warnings"] = warnings
+    draft["warnings"] = _compact_review_warnings(warnings)
 
     if not draft.get("progress") and isinstance(draft.get("overall_progress"), dict):
         monthly_rows = []
@@ -1264,6 +1266,8 @@ def _prepare_draft(
     )
     draft.setdefault("safety", {
         "total_manpower": manpower_totals.get("peak_headcount", 0),
+        "peak_daily_headcount": manpower_totals.get("peak_headcount", 0),
+        "headcount_metric": "peak_daily",
         "total_man_hours": manpower_totals.get("total_man_hours", 0),
         # Absence of an incident field in a Daily Report is not evidence of
         # zero incidents. Keep these values explicitly unsupplied until a
@@ -1362,6 +1366,7 @@ def _source_manifest(records: list[dict[str, Any]], method: str) -> list[dict[st
             "review_required": bool(record.get("review_required", False)),
             "source_project_no": source_identity.get("project_no", ""),
             "source_project_title": source_identity.get("project_title", ""),
+            "source_document_no": source_identity.get("document_no", ""),
         }
         identity = str(row["report_id"] or row["sha256"] or f"{row['report_date']}:{row['filename']}")
         if identity in seen:
@@ -1369,6 +1374,197 @@ def _source_manifest(records: list[dict[str, Any]], method: str) -> list[dict[st
         seen.add(identity)
         manifest.append(row)
     return manifest
+
+
+
+_DAILY_REPORT_DOCUMENT_NO_RE = re.compile(r"(?:^|[-_/])DAR(?:$|[-_/])", re.IGNORECASE)
+
+
+def _looks_like_daily_report_document_no(value: Any) -> bool:
+    return bool(_DAILY_REPORT_DOCUMENT_NO_RE.search(_clean_text(value, 250)))
+
+
+def _project_title_alias_key(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", _clean_text(value, 500)).casefold().replace("&", " and ")
+    tokens = " ".join(re.sub(r"[^a-z0-9]+", " ", text).split()).split()
+    return " ".join("service" if token == "services" else token for token in tokens)
+
+
+def _high_confidence_selected_title_match(
+    imported: Mapping[str, Any],
+    project_no: str,
+    parsed_project_title: str,
+    selected_project_title: str,
+) -> bool:
+    if (
+        parsed_project_title
+        and selected_project_title
+        and _project_title_alias_key(parsed_project_title) == _project_title_alias_key(selected_project_title)
+    ):
+        return True
+    extraction = imported.get("extraction") if isinstance(imported.get("extraction"), Mapping) else {}
+    match = extraction.get("project_match") if isinstance(extraction.get("project_match"), Mapping) else {}
+    candidate = match.get("candidate") if isinstance(match.get("candidate"), Mapping) else {}
+    return bool(
+        match.get("high_confidence_suggestion")
+        and _clean_text(candidate.get("project_no"), 250).casefold() == _clean_text(project_no, 250).casefold()
+    )
+
+
+def _compact_review_warnings(values: Any) -> list[str]:
+    """Collapse repetitive low-risk photo/import notices without hiding blockers."""
+
+    rows = values if isinstance(values, list) else []
+    result: list[str] = []
+    seen: set[str] = set()
+    counters = {
+        "ignored_images": 0,
+        "duplicate_photos": 0,
+        "template_artwork": 0,
+        "signature_artwork": 0,
+    }
+    patterns = (
+        ("ignored_images", re.compile(r":\s*(\d+)\s+small, oversized, or unsupported image occurrence\(s\) were ignored\.$", re.I)),
+        ("duplicate_photos", re.compile(r":\s*(\d+)\s+duplicate photo occurrence\(s\) were removed\.$", re.I)),
+        ("template_artwork", re.compile(r":\s*(\d+)\s+recurring header/logo image occurrence\(s\) were excluded\.$", re.I)),
+        ("signature_artwork", re.compile(r":\s*(\d+)\s+signature/line-art image occurrence\(s\) were excluded from Photo Documentation\.$", re.I)),
+    )
+    for raw in rows:
+        text = _warning_text(raw)
+        if not text:
+            continue
+        matched = False
+        for key, pattern in patterns:
+            match = pattern.search(text)
+            if match:
+                counters[key] += int(match.group(1))
+                matched = True
+                break
+        if matched:
+            continue
+        if text not in seen:
+            seen.add(text)
+            result.append(text)
+
+    summaries = (
+        ("ignored_images", "Photo processing: {n} small/oversized/unsupported non-report image occurrence(s) were ignored."),
+        ("duplicate_photos", "Photo processing: {n} exact duplicate photo occurrence(s) were removed."),
+        ("template_artwork", "Photo processing: {n} recurring header/logo image occurrence(s) were excluded."),
+        ("signature_artwork", "Photo processing: {n} signature/line-art image occurrence(s) were excluded."),
+    )
+    for key, template in summaries:
+        if counters[key]:
+            result.append(template.format(n=counters[key]))
+    return result
+
+
+def _periodic_revision_description(report: Mapping[str, Any]) -> str:
+    """Create the client-facing DESCRIPTION text used in the blue revision table."""
+
+    kind = str(report.get("report_type") or "monthly").strip().lower()
+    period = report.get("period") if isinstance(report.get("period"), Mapping) else {}
+    start_text = _clean_text(period.get("start"), 10)
+    end_text = _clean_text(period.get("end"), 10)
+    try:
+        start = datetime.strptime(start_text, "%Y-%m-%d").date()
+        end = datetime.strptime(end_text, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return f"{_report_name(kind)} Progress Report"
+
+    if kind == "monthly":
+        if start.year == end.year and start.month == end.month:
+            return f"{start.strftime('%B %Y')} Monthly Progress Report"
+        return f"{start.strftime('%B %Y')} - {end.strftime('%B %Y')} Monthly Progress Report"
+
+    if start.year == end.year and start.month == end.month:
+        return f"{start.day:02d}-{end.day:02d} {start.strftime('%B %Y')} Weekly Progress Report"
+    return f"{start.strftime('%d %B %Y')} - {end.strftime('%d %B %Y')} Weekly Progress Report"
+
+
+
+def _normalised_daily_table_text(value: Any) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", _clean_text(value, 4_000).casefold()).split())
+
+
+def _sanitize_current_split_uploaded_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Remove deterministic table-header artifacts from current Daily PDFs.
+
+    ``importer.py`` intentionally remains backward-compatible with older Daily
+    templates.  Some current split-layout PDFs flatten the Remarks table into
+    text such as ``Area Remarks; MA-42 ...`` and may expose the table header as a
+    synthetic ``Imported PDF`` area.  Weekly/Monthly compilation can safely
+    remove only those exact structural artifacts here, without altering genuine
+    free-text remarks or any legacy-layout payload.
+    """
+
+    if not isinstance(data, dict):
+        return data
+    if str(data.get("layout_profile") or "").strip().lower() != "current_split":
+        return data
+
+    raw_areas = data.get("areas")
+    if not isinstance(raw_areas, list):
+        return data
+
+    cleaned_areas: list[dict[str, Any]] = []
+    for area in raw_areas:
+        if not isinstance(area, dict):
+            continue
+        area_id = _clean_text(area.get("id"), 255)
+        remark_key = _normalised_daily_table_text(area.get("remarks"))
+        structural_empty = not any(
+            area.get(key)
+            for key in (
+                "activities_today",
+                "activities_tomorrow",
+                "manpower",
+                "indirect_manpower",
+                "constraints",
+                "photos",
+            )
+        )
+        if (
+            area_id.casefold() == "imported pdf"
+            and structural_empty
+            and remark_key in {"area remarks", "area remark", "remarks", "remark"}
+        ):
+            continue
+        cleaned_areas.append(area)
+    data["areas"] = cleaned_areas
+
+    raw_global = _clean_text(data.get("global_remarks"), 20_000)
+    if raw_global:
+        expected_area_rows: set[str] = set()
+        known_area_prefixes: set[str] = set()
+        for area in cleaned_areas:
+            area_id = _clean_text(area.get("id"), 255)
+            if not area_id:
+                continue
+            area_key = _normalised_daily_table_text(area_id)
+            if area_key:
+                known_area_prefixes.add(area_key)
+            remark = _clean_text(area.get("remarks"), 4_000)
+            expected_area_rows.add(
+                _normalised_daily_table_text(f"{area_id} {remark if remark else '-'}")
+            )
+
+        keep: list[str] = []
+        for part in (item.strip() for item in raw_global.split(";")):
+            if not part:
+                continue
+            key = _normalised_daily_table_text(part)
+            if key in {"area remarks", "area remark", "remarks", "remark"}:
+                continue
+            if key in expected_area_rows:
+                continue
+            # A flattened empty table row can lose the trailing dash. Remove it
+            # only when the corresponding area already exists in structured data.
+            if key in known_area_prefixes:
+                continue
+            keep.append(part)
+        data["global_remarks"] = "; ".join(dict.fromkeys(keep))
+
+    return data
 
 
 def _record_from_uploaded_pdf(
@@ -1384,9 +1580,18 @@ def _record_from_uploaded_pdf(
 ) -> tuple[dict[str, Any] | None, list[str]]:
     warnings: list[str] = []
     data = copy.deepcopy(imported.get("data")) if isinstance(imported.get("data"), dict) else {}
+    data = _sanitize_current_split_uploaded_payload(data)
     parsed_project = _clean_text(data.get("project_no"), 250)
     parsed_project_title = _clean_text(data.get("project_title"), 500)
-    if parsed_project and parsed_project.casefold() != project_no.casefold():
+    daily_document_no = parsed_project if _looks_like_daily_report_document_no(parsed_project) else ""
+    title_matches_selected = _high_confidence_selected_title_match(
+        imported, project_no, parsed_project_title, project_title
+    )
+    if (
+        parsed_project
+        and not daily_document_no
+        and parsed_project.casefold() != project_no.casefold()
+    ):
         warnings.append(
             f"{filename}: project number {parsed_project} differs from selected project {project_no}; "
             "file included for project confirmation."
@@ -1431,20 +1636,39 @@ def _record_from_uploaded_pdf(
         "import_status": imported.get("status", "needs_review"),
         "review_required": True,
         "source_identity": {
-            "project_no": parsed_project,
-            "project_title": parsed_project_title,
+            # ``*-DAR`` values are document-control numbers, not the Vendor
+            # Project No. used by the periodic report. Preserve both identities.
+            "project_no": project_no if daily_document_no and title_matches_selected else parsed_project,
+            "project_title": project_title if daily_document_no and title_matches_selected else parsed_project_title,
+            "reported_project_no": parsed_project,
+            "reported_project_title": parsed_project_title,
+            "document_no": daily_document_no,
         },
     }
     if imported.get("status") != "ready":
         warnings.append(f"{filename}: parser result needs manual review.")
     for warning in imported.get("warnings", []):
+        if (
+            isinstance(warning, Mapping)
+            and str(warning.get("code") or "") == "project_title_fuzzy_suggestion"
+            and daily_document_no
+            and title_matches_selected
+        ):
+            # A high-confidence title match plus an explicit Daily Report
+            # document number is expected and need not be repeated for every day.
+            continue
         warnings.append(f"{filename}: {_warning_text(warning)}")
     return record, warnings
 
 
-def _bound_record_photo_candidates(records: list[dict[str, Any]]) -> list[str]:
-    """Apply whole-draft count/byte bounds and exact hash deduplication."""
+def _bound_record_photo_candidates(
+    records: list[dict[str, Any]],
+    *,
+    limits=None,
+) -> list[str]:
+    """Apply report-specific count/byte bounds and exact hash deduplication."""
 
+    limits = limits or DEFAULT_PHOTO_LIMITS
     seen: set[str] = set()
     total_bytes = 0
     retained = 0
@@ -1461,7 +1685,7 @@ def _bound_record_photo_candidates(records: list[dict[str, Any]]) -> list[str]:
                 size_bytes = max(0, int(item.get("size_bytes") or 0))
             except (TypeError, ValueError):
                 size_bytes = 0
-            if not is_asset_id(asset_id) or size_bytes > DEFAULT_PHOTO_LIMITS.max_asset_bytes:
+            if not is_asset_id(asset_id) or size_bytes > limits.max_asset_bytes:
                 continue
             if asset_id in seen:
                 removed_duplicates += 1
@@ -1471,8 +1695,8 @@ def _bound_record_photo_candidates(records: list[dict[str, Any]]) -> list[str]:
                 bounded.append(copy.deepcopy(item))
                 continue
             if (
-                retained >= DEFAULT_PHOTO_LIMITS.max_images_per_draft
-                or total_bytes + size_bytes > DEFAULT_PHOTO_LIMITS.max_total_asset_bytes_per_draft
+                retained >= limits.max_images_per_draft
+                or total_bytes + size_bytes > limits.max_total_asset_bytes_per_draft
             ):
                 removed_for_limit += 1
                 continue
@@ -1489,7 +1713,7 @@ def _bound_record_photo_candidates(records: list[dict[str, Any]]) -> list[str]:
         )
     if removed_for_limit:
         warnings.append(
-            f"{removed_for_limit} photo(s) exceeded the {DEFAULT_PHOTO_LIMITS.max_images_per_draft}-photo "
+            f"{removed_for_limit} photo(s) exceeded the {limits.max_images_per_draft}-photo "
             "or draft asset byte limit and were excluded."
         )
     return warnings
@@ -1499,9 +1723,11 @@ def _photo_references_for_records(
     records: list[dict[str, Any]],
     *,
     previous: Any = None,
+    limits=None,
 ) -> list[dict[str, Any]]:
     """Return references belonging only to the selected source records."""
 
+    limits = limits or DEFAULT_PHOTO_LIMITS
     selected_ids = {str(record.get("report_id") or "") for record in records}
     prior_by_id: dict[str, dict[str, Any]] = {}
     prior_order: list[str] = []
@@ -1569,7 +1795,7 @@ def _photo_references_for_records(
     result = [available[asset_id] for asset_id in ordered_ids]
     for index, item in enumerate(result):
         item["order"] = index
-    return result[: DEFAULT_PHOTO_LIMITS.max_images_per_draft]
+    return result[: limits.max_images_per_draft]
 
 
 def _all_photo_references(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1806,6 +2032,10 @@ def _apply_review(draft: dict[str, Any], review: dict[str, Any], *, actor: str =
         if lost_days is not None and injuries not in (None, 0)
         else None
     )
+    # ``total_manpower`` is retained for review-API compatibility, but the
+    # value derived from Daily/Timesheet data is specifically the peak daily HC.
+    safety["peak_daily_headcount"] = safety.get("total_manpower")
+    safety["headcount_metric"] = "peak_daily"
     safety_changed = any(
         key in safety_review and safety.get(key) != current_safety.get(key)
         for key in ("total_manpower", "total_man_hours", "recordable_cases", "lost_workdays", "lost_time_injuries")
@@ -1991,6 +2221,63 @@ def _clean_ai_citation_evidence(value: Any) -> dict[str, Any]:
     for key in ("current_activities", "concern_actions", "lookahead", "claims"):
         rows = evidence.get(key) if isinstance(evidence.get(key), list) else []
         result[key] = [_clean_ai_references(row) for row in rows[:75]]
+    return result
+
+
+
+def _is_missing_action_text(value: Any) -> bool:
+    text = _clean_text(value, 2_000).casefold().strip(" .;:-—")
+    return text in {"", "not supplied"}
+
+
+def _merge_concern_rows(existing: Any, accepted: Any) -> list[dict[str, str]]:
+    """Merge AI-enriched concerns into deterministic source constraints by tag.
+
+    This prevents the same 81-EV-xxxx issue from appearing once as a formal
+    constraint and again as a polished AI row.  The source constraint remains the
+    baseline; accepted AI wording/action may enrich the same tagged issue.
+    """
+
+    result: list[dict[str, str]] = []
+    for raw in existing if isinstance(existing, list) else []:
+        if isinstance(raw, Mapping):
+            concern = _clean_text(raw.get("concern", raw.get("text", raw.get("description"))), 2_000)
+            action = _clean_text(raw.get("corrective_action", raw.get("action")), 2_000)
+        else:
+            concern = _clean_text(raw, 2_000)
+            action = ""
+        if concern or action:
+            result.append({"concern": concern, "corrective_action": action})
+
+    for raw in accepted if isinstance(accepted, list) else []:
+        if not isinstance(raw, Mapping):
+            continue
+        concern = _clean_text(raw.get("concern"), 2_000)
+        action = _clean_text(raw.get("corrective_action"), 2_000)
+        if not concern and not action:
+            continue
+        tags = _activity_equipment_ids(concern)
+        match_index = None
+        if tags:
+            for index, current in enumerate(result):
+                current_tags = _activity_equipment_ids(current.get("concern", ""))
+                if current_tags.intersection(tags):
+                    match_index = index
+                    break
+        if match_index is None:
+            exact_key = (concern.casefold(), action.casefold())
+            if any((row["concern"].casefold(), row["corrective_action"].casefold()) == exact_key for row in result):
+                continue
+            result.append({"concern": concern, "corrective_action": "" if _is_missing_action_text(action) else action})
+            continue
+
+        current = result[match_index]
+        # Prefer the accepted client-facing concern when it is a richer wording
+        # of the same equipment-tagged issue; never merge rows with different tags.
+        if concern and len(concern) > len(current.get("concern", "")):
+            current["concern"] = concern
+        if not _is_missing_action_text(action):
+            current["corrective_action"] = action
     return result
 
 
@@ -2220,8 +2507,8 @@ def _revision_history_rows(
         rows.append({
             "rev": f"R{int(entry.get('revision', 0) or 0)}",
             "description": _clean_text(
-                detail.get("revision_reason") or entry.get("revision_reason")
-                or detail.get("revision_description") or entry.get("status"), 500
+                detail.get("revision_description")
+                or _periodic_revision_description(detail or current), 500
             ),
             "date": _clean_text(detail.get("issued_date") or entry.get("generated_at"), 20)[:10],
             "prepared": _clean_text(detail.get("prepared_by"), 200),
@@ -2232,8 +2519,8 @@ def _revision_history_rows(
     rows.append({
         "rev": f"R{revision}",
         "description": _clean_text(
-            current.get("revision_reason") or current.get("revision_description")
-            or current.get("status"), 500
+            current.get("revision_description")
+            or _periodic_revision_description(current), 500
         ),
         "date": _clean_text(current.get("issued_date"), 20)[:10],
         "prepared": _clean_text(current.get("prepared_by"), 200),
@@ -2492,7 +2779,7 @@ def register_monthly_routes(
 
             # Hydrate only the records that aggregation actually selected.
             # Unrelated projects and superseded revisions must not consume the
-            # draft's 60-photo/byte budget.
+            # draft's report-specific photo/byte budget.
             pending_draft_id = uuid.uuid4().hex
             draft_photo_dir = _draft_photo_dir(
                 data_dir,
@@ -2501,12 +2788,15 @@ def register_monthly_routes(
             )
             if draft_photo_dir is None:
                 raise ValueError("Invalid report draft photo directory")
+            photo_limits = periodic_photo_limits(kind)
             photo_warnings = attach_canonical_photo_candidates(
                 selected_records,
                 data_dir,
                 draft_photo_dir,
+                limits=photo_limits,
             )
-            photo_warnings.extend(_bound_record_photo_candidates(selected_records))
+            photo_warnings.extend(_bound_record_photo_candidates(selected_records, limits=photo_limits))
+            photo_warnings = _compact_review_warnings(photo_warnings)
             # Rebuild the same source groups with photo warnings included in
             # the confirmation form. Selection itself remains unchanged.
             source_validation = build_source_validation(
@@ -2531,7 +2821,9 @@ def register_monthly_routes(
             )
             draft["source_validation"] = source_validation
             draft["_source_records"] = copy.deepcopy(records)
-            draft["photo_documentation"] = _photo_references_for_records(selected_records)
+            draft["photo_documentation"] = _photo_references_for_records(
+                selected_records, limits=photo_limits
+            )
             draft_id = _save_draft(
                 data_dir,
                 session["username"],
@@ -2761,10 +3053,12 @@ def register_monthly_routes(
                         report_type=str(manifest.get("report_type") or "monthly"),
                     )
                     if record is not None:
+                        photo_limits = periodic_photo_limits(manifest.get("report_type"))
                         candidates, photo_warnings = extract_pdf_photo_candidates(
                             upload.stream,
                             filename=filename,
                             areas=_record_photo_areas(record),
+                            limits=photo_limits,
                         )
                         report_date = _record_date(record)
                         for candidate in candidates:
@@ -2774,7 +3068,8 @@ def register_monthly_routes(
                             candidates,
                             directory / "assets",
                             source_report_id=str(record.get("report_id") or ""),
-                            max_total_bytes=DEFAULT_PHOTO_LIMITS.max_total_asset_bytes_per_draft,
+                            maximum=photo_limits.max_images_per_pdf,
+                            max_total_bytes=photo_limits.max_total_asset_bytes_per_draft,
                         )
                         record["_photo_candidates"] = photo_references
                         if len(photo_references) < len(candidates):
@@ -2927,7 +3222,9 @@ def register_monthly_routes(
                         )
                 records = in_window
 
-            warnings.extend(_bound_record_photo_candidates(records))
+            photo_limits = periodic_photo_limits(kind)
+            warnings.extend(_bound_record_photo_candidates(records, limits=photo_limits))
+            warnings = _compact_review_warnings(warnings)
 
             source_validation = build_source_validation(
                 records,
@@ -2973,7 +3270,9 @@ def register_monthly_routes(
             )
             draft["source_validation"] = source_validation
             draft["_source_records"] = copy.deepcopy(records)
-            draft["photo_documentation"] = _photo_references_for_records(selected_records)
+            draft["photo_documentation"] = _photo_references_for_records(
+                selected_records, limits=photo_limits
+            )
             # Reusing the random upload-session ID closes the crash window
             # between saving the draft and writing the small result tombstone.
             draft_photo_dir = _draft_photo_dir(
@@ -3098,10 +3397,12 @@ def register_monthly_routes(
                 )
                 warnings.extend(imported_warnings)
                 if record is not None:
+                    photo_limits = periodic_photo_limits(kind)
                     candidates, photo_warnings = extract_pdf_photo_candidates(
                         upload.stream,
                         filename=filename,
                         areas=_record_photo_areas(record),
+                        limits=photo_limits,
                     )
                     report_date = _record_date(record)
                     for candidate in candidates:
@@ -3118,7 +3419,8 @@ def register_monthly_routes(
                         candidates,
                         pending_assets,
                         source_report_id=str(record.get("report_id") or ""),
-                        max_total_bytes=DEFAULT_PHOTO_LIMITS.max_total_asset_bytes_per_draft,
+                        maximum=photo_limits.max_images_per_pdf,
+                        max_total_bytes=photo_limits.max_total_asset_bytes_per_draft,
                     )
                     record["_photo_candidates"] = photo_references
                     if len(photo_references) < len(candidates):
@@ -3155,7 +3457,9 @@ def register_monthly_routes(
                             f"rolling 7-day period ending {end_text}; file excluded."
                         )
                 records = in_window
-            warnings.extend(_bound_record_photo_candidates(records))
+            photo_limits = periodic_photo_limits(kind)
+            warnings.extend(_bound_record_photo_candidates(records, limits=photo_limits))
+            warnings = _compact_review_warnings(warnings)
             source_validation = build_source_validation(
                 records,
                 selected_project_no=project_no,
@@ -3200,7 +3504,9 @@ def register_monthly_routes(
             )
             draft["source_validation"] = source_validation
             draft["_source_records"] = copy.deepcopy(records)
-            draft["photo_documentation"] = _photo_references_for_records(selected_records)
+            draft["photo_documentation"] = _photo_references_for_records(
+                selected_records, limits=photo_limits
+            )
             draft_id = _save_draft(
                 data_dir,
                 session["username"],
@@ -3280,6 +3586,7 @@ def register_monthly_routes(
                 if not selected_ids or str(record.get("report_id") or "") in selected_ids
             ]
             source_method = str(draft.get("source_method") or "stored_json")
+            photo_limits = periodic_photo_limits(kind)
             photo_warnings: list[str] = []
             if source_method == "stored_json":
                 draft_photo_dir = _draft_photo_dir(data_dir, username, draft_id)
@@ -3287,12 +3594,15 @@ def register_monthly_routes(
                     raise ValueError("Invalid report draft photo directory")
                 # A changed project/revision choice gets a fresh, bounded
                 # hydration pass. Canonical files remain read-only.
+                photo_limits = periodic_photo_limits(kind)
                 photo_warnings = attach_canonical_photo_candidates(
                     selected_records,
                     data_dir,
                     draft_photo_dir,
+                    limits=photo_limits,
                 )
-                photo_warnings.extend(_bound_record_photo_candidates(selected_records))
+                photo_warnings.extend(_bound_record_photo_candidates(selected_records, limits=photo_limits))
+                photo_warnings = _compact_review_warnings(photo_warnings)
             warnings = [
                 str(value).strip()
                 for value in draft.get("warnings", [])
@@ -3382,6 +3692,7 @@ def register_monthly_routes(
             refreshed["photo_documentation"] = _photo_references_for_records(
                 selected_records,
                 previous=draft.get("photo_documentation"),
+                limits=photo_limits,
             )
             refreshed["draft_id"] = draft_id
             refreshed["owner"] = username
@@ -3785,17 +4096,7 @@ def register_monthly_routes(
             # erase deterministic constraints or look-ahead items already
             # extracted from the Daily Reports.
             existing_concerns = site.get("concerns") if isinstance(site.get("concerns"), list) else []
-            merged_concerns = copy.deepcopy(existing_concerns)
-            seen_concerns = {
-                (_clean_text(row.get("concern") if isinstance(row, dict) else row, 2_000).casefold(),
-                 _clean_text(row.get("corrective_action") if isinstance(row, dict) else "", 2_000).casefold())
-                for row in merged_concerns
-            }
-            for row in accepted["concerns"]:
-                key = (row["concern"].casefold(), row["corrective_action"].casefold())
-                if key not in seen_concerns:
-                    merged_concerns.append(row)
-                    seen_concerns.add(key)
+            merged_concerns = _merge_concern_rows(existing_concerns, accepted["concerns"])
             existing_lookahead = site.get("next_period_activities", site.get("next_month_activities", []))
             merged_lookahead = _list_text(existing_lookahead)
             seen_lookahead = {item.casefold() for item in merged_lookahead}
@@ -3861,9 +4162,10 @@ def register_monthly_routes(
         photos = body.get("photos") if isinstance(body, dict) else None
         if not isinstance(photos, list):
             return jsonify({"error": "photos must be a list."}), 400
-        if len(photos) > DEFAULT_PHOTO_LIMITS.max_images_per_draft:
+        photo_limits = periodic_photo_limits(_draft_report_type(draft))
+        if len(photos) > photo_limits.max_images_per_draft:
             return jsonify({
-                "error": f"A report may contain at most {DEFAULT_PHOTO_LIMITS.max_images_per_draft} photos."
+                "error": f"A {_report_name(_draft_report_type(draft))} report may contain at most {photo_limits.max_images_per_draft} photos."
             }), 400
 
         current = draft.get("photo_documentation")
