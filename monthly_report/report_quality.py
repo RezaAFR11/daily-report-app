@@ -161,6 +161,45 @@ def _client_text_issues(report: Mapping[str, Any]) -> list[str]:
     return issues
 
 
+
+def _photo_completeness_issues(report: Mapping[str, Any]) -> list[str]:
+    """Detect any explicit evidence that photo documentation was truncated."""
+
+    issues: list[str] = []
+    patterns = (
+        re.compile(r"only the first\s+\d+\s+(?:reviewable\s+)?photo(?:\(s\)|s)? were retained", re.I),
+        re.compile(r"photo(?:\(s\)|s)? exceeded the\s+\d+-photo or draft asset byte limit", re.I),
+        re.compile(r"some photos were excluded by the report draft asset limit", re.I),
+        re.compile(r"draft photo count or byte limit was reached", re.I),
+        re.compile(r"photo exceeded the overall .* photo count or byte limit", re.I),
+    )
+    for raw in _as_list(report.get("warnings")):
+        text = str(raw or "").strip()
+        if text and any(pattern.search(text) for pattern in patterns) and text not in issues:
+            issues.append(text)
+    return issues
+
+
+
+def _photo_mapping_issues(report: Mapping[str, Any]) -> list[str]:
+    """Flag uploaded-PDF photos that could not be tied back to a source area."""
+
+    unmapped = 0
+    for row in _as_list(report.get("photo_documentation")):
+        if not isinstance(row, Mapping):
+            continue
+        source_type = str(row.get("source_type") or "").strip().lower()
+        if source_type != "legacy_pdf_extraction":
+            continue
+        if not str(row.get("source_area") or "").strip():
+            unmapped += 1
+    if not unmapped:
+        return []
+    return [
+        f"{unmapped} uploaded-PDF photo(s) could not be mapped to a Daily Report area; review Photo Documentation."
+    ]
+
+
 def _manual_source_issues(report: Mapping[str, Any]) -> list[str]:
     issues: list[str] = []
     sections = ["engineering", "procurement", "equipment_delivery", "shipments", "safety"]
@@ -231,6 +270,19 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
     for message in _client_text_issues(report):
         target = blockers if for_final else warnings
         target.append({"code": "client_text_quality", "message": message})
+
+    for message in _photo_completeness_issues(report):
+        target = blockers if for_final else warnings
+        target.append({
+            "code": "photo_documentation_incomplete",
+            "message": "Photo Documentation may be incomplete: " + message,
+        })
+
+    for message in _photo_mapping_issues(report):
+        warnings.append({
+            "code": "photo_area_mapping_review",
+            "message": message,
+        })
 
     for message in _manual_source_issues(report):
         warnings.append({"code": "manual_source_audit", "message": message})
