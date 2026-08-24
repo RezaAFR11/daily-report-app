@@ -151,6 +151,40 @@ def _workforce_reconciliation_issues(report: Mapping[str, Any]) -> list[str]:
     return issues
 
 
+_LEADING_ACTIVITY_MA_RE = re.compile(
+    r"^\s*MA\s*[- ]?(?P<body>\d{1,3}(?:\s*(?:/|&|,|\band\b)\s*(?:MA\s*)?[- ]?\d{1,3}){0,5})\b",
+    re.I,
+)
+_LEADING_ACTIVITY_MA_PAIR_RE = re.compile(
+    r"^\s*MA\s+(?P<left>\d{1,2})\s*-\s*(?P<right>\d{1,2})(?=\s+[A-Za-z])",
+    re.I,
+)
+
+
+def _ma_tokens(value: Any) -> set[str]:
+    text = str(value or "").strip()
+    if not text.lower().startswith("ma"):
+        return set()
+    return {str(int(token)) for token in re.findall(r"\d{1,3}", text)}
+
+
+def _leading_ma_tokens(value: Any) -> set[str]:
+    text = str(value or "").strip()
+    pair = _LEADING_ACTIVITY_MA_PAIR_RE.match(text)
+    if pair:
+        return {str(int(pair.group("left"))), str(int(pair.group("right")))}
+    match = _LEADING_ACTIVITY_MA_RE.match(text)
+    if not match:
+        return set()
+    return {str(int(token)) for token in re.findall(r"\d{1,3}", match.group("body"))}
+
+
+def _activity_area_ownership_issue(row: Mapping[str, Any]) -> bool:
+    expected = _ma_tokens(row.get("area"))
+    explicit = _leading_ma_tokens(row.get("text", row.get("description", "")))
+    return bool(expected and explicit and not explicit.issubset(expected))
+
+
 def _client_text_issues(report: Mapping[str, Any]) -> list[str]:
     issues: list[str] = []
     summary = str(report.get("executive_summary") or "")
@@ -182,6 +216,9 @@ def _client_text_issues(report: Mapping[str, Any]) -> list[str]:
         if not isinstance(row, Mapping):
             continue
         text = str(row.get("text", row.get("description", "")) or "").strip()
+        if _activity_area_ownership_issue(row):
+            issues.append("Activity narrative contains an explicit MA area that conflicts with its assigned reporting area.")
+            return issues
         for label in _ACTIVITY_WORKSTREAM_PREFIXES:
             if text.casefold().startswith((label + ":").casefold()):
                 issues.append("Activity narrative contains a duplicated/nested workstream label.")
@@ -276,6 +313,9 @@ def _deterministic_summary_issues(report: Mapping[str, Any]) -> tuple[list[str],
             warnings.append("Deterministic activity summary contains duplicate Area + Workstream groups.")
             break
         seen.add(key)
+        if _activity_area_ownership_issue(row):
+            warnings.append("Deterministic activity summary contains an explicit MA area that conflicts with its assigned reporting area.")
+            break
 
     if version:
         info.append(
