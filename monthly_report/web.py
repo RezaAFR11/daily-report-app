@@ -1146,7 +1146,7 @@ def _record_date(record: dict[str, Any]) -> str:
 # Client-facing deterministic fallback summarisation.  AI may refine this after
 # Source Data Validation, but the baseline Weekly/Monthly PDF should already read
 # like a period report rather than seven/thirty Daily Reports concatenated together.
-_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/7"
+_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/8"
 
 _PERIOD_ACTIVITY_TAG_RE = re.compile(
     r"\(\s*\d{1,3}\s*-\s*[A-Za-z]{2,}\s*-\s*[^)]*\)", re.IGNORECASE
@@ -1179,6 +1179,8 @@ _PERIOD_ACTIVITY_FAMILY_RULES: tuple[
             ("packing", 4.0), ("o ring", 2.0), ("o-ring", 2.0),
             ("pressure gauge", 3.0), ("seal tape", 3.0),
             ("bearing", 2.0), ("alignment", 3.0), ("fabrication", 2.5),
+            ("oil pipeline", 3.5), ("oil return pipe", 3.5), ("lube oil pipe", 3.5),
+            ("flange welding", 3.0), ("blind flange", 3.0), ("ring joint", 3.0),
             ("trafo", 3.5), ("travo", 3.5), ("transformer", 3.5),
             ("base frame", 3.0), ("baseframe", 3.0), ("welding support", 2.5),
             ("stopper", 2.5), ("klem", 2.5), ("filter replacement", 3.0),
@@ -1195,7 +1197,6 @@ _PERIOD_ACTIVITY_FAMILY_RULES: tuple[
             ("function test", 3.0), ("leak test", 3.0), ("continuity", 3.0),
             ("ground resistance", 4.0), ("earth test", 4.0), ("earth tes", 4.0),
             ("megger", 4.0), ("merger test", 4.0), ("running test", 3.5),
-            ("dcs", 2.0),
         ),
     ),
     (
@@ -1221,13 +1222,15 @@ _PERIOD_ACTIVITY_FAMILY_RULES: tuple[
             ("speed sensor", 3.5), ("emergency stop", 3.5), ("pull cord", 3.0),
             ("terminasi", 3.0), ("busbar", 2.5), ("lighting", 2.0),
             ("lamp", 2.0), (" led ", 2.0), ("panel", 1.5),
+            ("temperature indicator", 3.5), ("temperature element", 3.5),
+            ("pressure switch", 3.5), ("limit switch", 3.5),
             ("cable", 2.0), ("rewir", 3.0),
         ),
     ),
     (
         "Valve Mechanical",
         (
-            ("butterfly", 4.5), ("seat rubber", 4.5),
+            ("butterfly", 4.5), ("seat rubber", 4.5), ("msv", 5.0),
             ("install valve", 4.0), ("valve control", 3.5), ("position valve", 3.5),
             ("reassembl", 3.5), ("tighten", 1.5), ("bolt", 1.5),
             ("gasket", 2.5), ("mechanical actuator damper", 2.5),
@@ -1258,7 +1261,7 @@ _PERIOD_ACTIVITY_THEME_RULES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]]
         ("coordination pending", ("waiting for coordination", "pending coordination")),
     ),
     "Testing & Commissioning": (
-        ("DCS loop testing", ("loop test", "dcs")),
+        ("DCS loop testing", ("loop test",)),
         ("local functional testing", ("function test", "local")),
         ("continuity checking", ("continuity",)),
         ("ground-resistance testing", ("ground resistance", "earth test", "earth tes")),
@@ -1273,7 +1276,8 @@ _PERIOD_ACTIVITY_THEME_RULES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]]
         # into the unsupported phrase "actuator and cylinder work".
         ("actuator work", ("actuator",)),
         ("pneumatic cylinder work", ("pneumatic", "cylinder", "silinder")),
-        ("solenoid and multi-way valve work", ("solenoid", "5-way", "5 way", "6-way", "6 way")),
+        ("solenoid work", ("solenoid",)),
+        ("multi-way valve work", ("5-way", "5 way", "6-way", "6 way")),
         ("regulator, tubing and hose work", ("regulator", "tubing", "hose", "air instrument")),
         ("pneumatic shaft setting", ("setting shaft", "setting shaf")),
     ),
@@ -1292,10 +1296,11 @@ _PERIOD_ACTIVITY_THEME_RULES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]]
         ("lighting and busbar installation", ("lighting", "lamp", " led ", "busbar")),
         ("sensor / emergency-stop installation", ("speed sensor", "emergency stop", "pull cord")),
         ("wire connection and panel work", ("wire connection", "panel power", "lcp", "plc")),
+        ("instrument and switch checks", ("temperature indicator", "temperature element", "pressure switch", "limit switch")),
         ("termination work", ("termination", "terminasi")),
     ),
     "Valve Mechanical": (
-        ("valve assembly and installation", ("reassembl", "install valve", "seat rubber")),
+        ("valve assembly and installation", ("reassembl", "install valve", "seat rubber", "ring joint")),
         ("valve troubleshooting", ("trouble shoot", "troubleshoot")),
         ("valve position work", ("position valve",)),
         ("bolt-related mechanical maintenance", ("bolt", "tighten", "gasket", "cleaning all mechanical")),
@@ -1535,7 +1540,13 @@ def _period_activity_family(value: Any) -> str:
 def _period_activity_themes(family: str, value: Any) -> list[str]:
     text = _clean_text(value, 2_000).casefold()
     result: list[str] = []
+    if family == "Testing & Commissioning" and "loop test" in text:
+        result.append("DCS loop testing" if "dcs" in text else "loop testing")
+    if family == "Valve Mechanical" and "msv" in text:
+        result.append("MSV installation")
     for label, needles in _PERIOD_ACTIVITY_THEME_RULES.get(family, ()):
+        if label == "DCS loop testing":
+            continue
         # Theme labels are deterministic paraphrases of explicit source terms.
         # Requiring at least one family-specific keyword prevents unrelated work
         # from being pulled into a more attractive management label.
@@ -1546,6 +1557,9 @@ def _period_activity_themes(family: str, value: Any) -> list[str]:
     # Avoid repetitive generic oil-flushing wording when the source gives the
     # more specific LO/CO circuit.  This improves management readability without
     # changing or inferring the underlying activity.
+    if family == "Valve Mechanical" and "MSV installation" in result:
+        if "valve assembly and installation" in result:
+            result.remove("valve assembly and installation")
     if family == "Oil System & Flushing" and "bypass-line oil flushing" in result:
         if any(item in result for item in ("LO bypass-line oil flushing", "CO bypass-line oil flushing")):
             result.remove("bypass-line oil flushing")
@@ -1794,19 +1808,86 @@ def _deterministic_procurement_summary(activities: Any) -> str:
     )
 
 
-def _progress_summary_sentence(draft: Mapping[str, Any]) -> str:
-    progress = draft.get("progress") if isinstance(draft.get("progress"), dict) else {}
+
+def _has_progress_rows(value: Any) -> bool:
+    rows = value.get("rows") if isinstance(value, Mapping) else value
+    return isinstance(rows, list) and any(isinstance(row, Mapping) for row in rows)
+
+
+def _progress_candidate(draft: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    progress = draft.get("progress") if isinstance(draft.get("progress"), Mapping) else {}
     rows = progress.get("rows") if isinstance(progress.get("rows"), list) else []
-    candidate = None
     for row in reversed(rows):
-        if not isinstance(row, dict):
+        if not isinstance(row, Mapping):
             continue
-        if row.get("is_total") or "total" in _clean_text(row.get("description"), 200).casefold():
-            candidate = row
+        if row.get("is_total") or "overall progress" in _clean_text(row.get("description"), 200).casefold() or "total overall" in _clean_text(row.get("description"), 200).casefold():
+            return row
+    return next((row for row in reversed(rows) if isinstance(row, Mapping)), None)
+
+
+def _deterministic_schedule_status(draft: Mapping[str, Any]) -> str:
+    candidate = _progress_candidate(draft)
+    if not isinstance(candidate, Mapping):
+        return "Overall schedule/progress data was not supplied for this reporting period."
+    try:
+        actual = float(candidate.get("to_date"))
+        plan = float(candidate.get("plan"))
+    except (TypeError, ValueError):
+        return "Overall schedule/progress data was not supplied for this reporting period."
+    parts = [f"Latest Daily Overall Progress snapshot records {actual:.2f}% actual versus {plan:.2f}% plan"]
+    variance = candidate.get("variance")
+    try:
+        parts[0] += f", with a variance of {float(variance):+.2f}%"
+    except (TypeError, ValueError):
+        pass
+    progress = draft.get("progress") if isinstance(draft.get("progress"), Mapping) else {}
+    snapshot = _clean_text(progress.get("source_snapshot_date"), 10)
+    if snapshot:
+        parts[0] += f" as of {snapshot}"
+    current = candidate.get("this_month")
+    try:
+        current_value = float(current)
+    except (TypeError, ValueError):
+        current_value = None
+    if current_value is not None:
+        source_label = _clean_text(progress.get("source_period_label"), 100) or "This Period"
+        parts.append(f'The source Daily Report records {current_value:.2f}% actual for "{source_label}"; this value is preserved without recalculation')
+    return ". ".join(parts) + "."
+
+
+def _key_remark_findings(draft: Mapping[str, Any], *, maximum: int = 24) -> list[dict[str, Any]]:
+    """Keep source remarks visible without promoting them to formal constraints."""
+
+    rows = draft.get("remarks") if isinstance(draft.get("remarks"), list) else []
+    findings: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for raw in rows:
+        if not isinstance(raw, Mapping):
+            continue
+        text = _clean_text(raw.get("text", raw.get("remark", raw.get("remarks"))), 2_000)
+        if not text or text.casefold() in {"-", "—", "none", "not supplied", "no remarks"}:
+            continue
+        date = _clean_text(raw.get("date", raw.get("source_date")), 10)
+        area = _clean_text(raw.get("area"), 255) or "General"
+        key = (date, area.casefold(), _activity_match_text(text))
+        if key in seen:
+            continue
+        seen.add(key)
+        findings.append({
+            "date": date,
+            "area": area,
+            "text": text,
+            "source_type": "Daily Report remark/finding",
+            "source_report_id": _clean_text(raw.get("source_report_id"), 200),
+        })
+        if len(findings) >= maximum:
             break
-    if candidate is None and rows:
-        candidate = rows[-1] if isinstance(rows[-1], dict) else None
-    if not isinstance(candidate, dict):
+    return findings
+
+
+def _progress_summary_sentence(draft: Mapping[str, Any]) -> str:
+    candidate = _progress_candidate(draft)
+    if not isinstance(candidate, Mapping):
         return ""
     try:
         actual = float(candidate.get("to_date"))
@@ -1815,10 +1896,21 @@ def _progress_summary_sentence(draft: Mapping[str, Any]) -> str:
         return ""
     variance = candidate.get("variance")
     try:
-        variance_value = float(variance) if variance is not None else actual - plan
+        variance_value = float(variance) if variance is not None else None
     except (TypeError, ValueError):
-        variance_value = actual - plan
-    return f"Overall progress is {actual:.2f}% actual versus {plan:.2f}% plan, a variance of {variance_value:+.2f}%."
+        variance_value = None
+    sentence = f"Overall progress is {actual:.2f}% actual versus {plan:.2f}% plan"
+    if variance_value is not None:
+        sentence += f", a variance of {variance_value:+.2f}%"
+    progress = draft.get("progress") if isinstance(draft.get("progress"), Mapping) else {}
+    current = candidate.get("this_month")
+    try:
+        current_value = float(current)
+    except (TypeError, ValueError):
+        current_value = None
+    if current_value is not None and _clean_text(progress.get("source_period_label"), 100):
+        sentence += f'; the latest Daily source reports {current_value:.2f}% actual for "{_clean_text(progress.get("source_period_label"), 100)}"'
+    return sentence + "."
 
 
 def _period_source_provenance(draft: Mapping[str, Any]) -> tuple[list[str], list[str]]:
@@ -2376,12 +2468,13 @@ def _prepare_draft(
             warnings.append(warning)
     draft["warnings"] = _compact_review_warnings(warnings)
 
-    if not draft.get("progress") and isinstance(draft.get("overall_progress"), dict):
-        monthly_rows = []
-        for row in draft["overall_progress"].get("rows", []):
+    if not _has_progress_rows(draft.get("progress")) and isinstance(draft.get("overall_progress"), dict):
+        progress_rows = []
+        overall_progress = draft["overall_progress"]
+        for row in overall_progress.get("rows", []):
             if not isinstance(row, dict):
                 continue
-            monthly_rows.append({
+            progress_rows.append({
                 "description": row.get("description", ""),
                 "weight": row.get("weight_factor"),
                 "previous": row.get("cumulative_previous_actual"),
@@ -2389,8 +2482,19 @@ def _prepare_draft(
                 "to_date": row.get("cumulative_to_date_actual"),
                 "plan": row.get("cumulative_to_date_plan"),
                 "variance": row.get("deviation"),
+                "is_total": bool(row.get("is_total")),
+                "source_date": row.get("last_source_date"),
             })
-        draft["progress"] = {"rows": monthly_rows}
+        draft["progress"] = {
+            "rows": progress_rows,
+            "source_period_label": overall_progress.get("source_period_label", "This Period"),
+            "source_snapshot_date": overall_progress.get("latest_snapshot_date"),
+            "source_type": "latest_daily_overall_progress_snapshot",
+        }
+        if kind == "weekly" and progress_rows:
+            # Do not silently relabel a Daily Report's source ``This Period`` as
+            # ``This Week``.  The renderer will display the source period label.
+            draft["progress_period_label"] = draft["progress"].get("source_period_label", "This Period")
     draft.setdefault("progress", {"rows": []})
     if isinstance(draft.get("progress"), list):
         draft["progress"] = {"rows": draft["progress"]}
@@ -2435,12 +2539,19 @@ def _prepare_draft(
     if not site.get("this_month_activities"):
         site["this_month_activities"] = grouped_activities or copy.deepcopy(activities_for_summary)
 
-    # Activity Tomorrow is deliberately NOT promoted to next-week/next-month.
-    # Period look-ahead is shown only when the source explicitly supplies it.
+    # Weekly look-ahead may use Activity Tomorrow from the Daily Report that
+    # exactly closes the weekly period. Earlier Daily tomorrow items stay excluded
+    # because they normally become current-week work on subsequent days. Monthly
+    # look-ahead remains explicit-only.
     explicit_lookahead = (
         draft.get("planned_next_week", []) if kind == "weekly"
         else draft.get("planned_next_month", [])
     )
+    if kind == "weekly" and not explicit_lookahead:
+        coverage_meta = draft.get("coverage") if isinstance(draft.get("coverage"), Mapping) else {}
+        last_report_date = _clean_text(coverage_meta.get("last_report_date"), 10)
+        if last_report_date and last_report_date == date_to:
+            explicit_lookahead = copy.deepcopy(draft.get("tomorrow_activities", []))
     cleaned_lookahead: list[Any] = []
     for row in explicit_lookahead if isinstance(explicit_lookahead, list) else []:
         if isinstance(row, dict):
@@ -2452,6 +2563,11 @@ def _prepare_draft(
                     "source_date": _clean_text(row.get("source_date"), 10),
                     "source_report_id": _clean_text(row.get("source_report_id"), 200),
                     "source_path": _clean_text(row.get("source_path"), 500),
+                    "source_type": _clean_text(row.get("source_type"), 120) or (
+                        "period_end_activity_tomorrow"
+                        if kind == "weekly" and _clean_text(row.get("source_date"), 10) == date_to
+                        else "explicit_period_lookahead"
+                    ),
                 })
         else:
             text_value = _clean_text(row, 2_000)
@@ -2459,6 +2575,11 @@ def _prepare_draft(
                 cleaned_lookahead.append(text_value)
     site["next_month_activities"] = cleaned_lookahead
     site["tomorrow_activities"] = copy.deepcopy(draft.get("tomorrow_activities", []))
+
+    schedule_status = _deterministic_schedule_status(draft)
+    if not _clean_text(site.get("schedule_status", site.get("project_schedule_status")), 4_000):
+        site["schedule_status"] = schedule_status
+    site["key_findings"] = _key_remark_findings(draft)
 
     deterministic_concerns = _deterministic_concerns(draft)
     if not site.get("concerns"):
@@ -2515,6 +2636,7 @@ def _prepare_draft(
         },
         "current_activities": copy.deepcopy(grouped_activities),
         "concerns": copy.deepcopy(deterministic_concerns),
+        "key_findings": copy.deepcopy(site.get("key_findings", [])),
         "lookahead": copy.deepcopy(cleaned_lookahead),
     }
     draft["narrative_mode"] = "deterministic"
