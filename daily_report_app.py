@@ -3650,6 +3650,7 @@ def field_submit():
         'activities_today':   data.get('activities_today', []),
         'activities_tomorrow':data.get('activities_tomorrow', []),
         'constraints':        data.get('constraints', ''),
+        'remarks':            data.get('remarks', ''),
         'manpower':           data.get('manpower', []),
         'photos':             data.get('photos', []),
     })
@@ -3696,10 +3697,13 @@ def admin_merge_submissions():
             'activities_today':    sub.get('activities_today', []),
             'activities_tomorrow': sub.get('activities_tomorrow', []),
             'constraints':         sub.get('constraints', ''),
+            'remarks':             sub.get(
+                'remarks',
+                existing_areas.get(area_id, {}).get('remarks', ''),
+            ),
             'manpower':            sub.get('manpower', []),
             'indirect_manpower':   [],
             'photos':              sub.get('photos', []),
-            'remarks':             '',
         }
         existing_areas[area_id] = area_block
 
