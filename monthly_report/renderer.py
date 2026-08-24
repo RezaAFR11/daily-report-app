@@ -1661,7 +1661,15 @@ def _photo_grid_flowables(
             source = _plain(raw.get("source"))
             page = _plain(raw.get("page"))
             area = clean_caption(raw.get("source_area"))
-            fallback = f"{source} - p.{page}" if source and page else source
+            # A current Daily Report photo card may intentionally have no
+            # caption. Do not replace that source-empty caption with a filename
+            # or page reference; provenance is already carried in the dated
+            # appendix grouping and source metadata.
+            photo_card = (
+                _plain(raw.get("context_type")).casefold() == "photo_card"
+                or _plain(raw.get("photo_match_method")).casefold() == "photo_card_geometry"
+            )
+            fallback = "" if photo_card else (f"{source} - p.{page}" if source and page else source)
             caption = clean_caption(raw.get("caption"), fallback)
             caption_group = (area.casefold(), caption.casefold())
             repeated_caption = bool(caption) and caption_counts.get(caption_group, 0) > 1
