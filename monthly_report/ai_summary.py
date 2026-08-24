@@ -232,18 +232,19 @@ def _concern_action_schema() -> dict[str, Any]:
 
 
 def _activity_claim_schema() -> dict[str, Any]:
-    """Source-grounded activity bullet with an explicit construction area."""
+    """Source-grounded activity bullet with authoritative Area + Workstream metadata."""
 
     return {
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "area": {"type": "string"},
+            "workstream": {"type": "string"},
             "text": {"type": "string"},
             "source_ids": {"type": "array", "items": {"type": "string"}},
             "dates": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["area", "text", "source_ids", "dates"],
+        "required": ["area", "workstream", "text", "source_ids", "dates"],
     }
 
 
@@ -361,9 +362,10 @@ Reporting rules:
    is supplied. Return at most ONE bullet for each area + workstream combination;
    merge same-family activities within the same area instead of returning repetitive
    bullets. Keep ``area`` populated whenever a source area exists. When
-   deterministic_summary.current_activities is supplied, preserve its exact area
-   label (including labels such as Turbine Unit 2, Generator Unit 1, or MA-81),
-   workstream, and row order; never replace a known area with generic values such as
+   deterministic_summary.current_activities is supplied, copy its exact ``area`` and
+   exact ``workstream`` into those response fields for every returned row. Preserve
+   labels such as Turbine Unit 2, Generator Unit 1, or MA-81 and preserve row order;
+   never replace a known area with generic values such as
    "Site" or "General". Put ONLY the narrative activity body in ``text``: do not
    prepend the area, the selected workstream, ``Other Site Work:``, or any second
    category label inside ``text``. The separate ``area`` and ``workstream`` fields
@@ -384,7 +386,10 @@ Reporting rules:
    procurement. It is acceptable to state that no separate engineering/procurement
    register was supplied and then distinguish source-backed field evidence (for
    example testing support or materials/accessories observed in use) from formal
-   deliverable/PO/delivery status. Never infer PO status, outstanding quantity,
+   deliverable/PO/delivery status. If the deterministic engineering summary already
+   names supported field evidence such as ground-resistance, megger, loop, function,
+   continuity, calibration, or running tests, retain that evidence instead of
+   collapsing the section to only ``no separate engineering register supplied``. Never infer PO status, outstanding quantity,
    delivery status, or shipment status from field activity alone. Use Not supplied
    when even that distinction is unsupported. Never convert an
    internal placeholder such as "Manual weekly input required" into report prose.
@@ -1328,12 +1333,17 @@ def _validate_activity_claim(
 ) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise AIMalformedResponseError(f"{path} must be an object.")
-    _strict_keys(raw, {"area", "text", "source_ids", "dates"}, path)
+    _strict_keys(raw, {"area", "workstream", "text", "source_ids", "dates"}, path)
     area = " ".join(str(raw.get("area") or "").split())
     if not area:
         raise AIMalformedResponseError(f"{path}.area must be a non-empty string.")
     if len(area) > 200:
         raise AIMalformedResponseError(f"{path}.area exceeds 200 characters.")
+    workstream = " ".join(str(raw.get("workstream") or "").split())
+    if not workstream:
+        raise AIMalformedResponseError(f"{path}.workstream must be a non-empty string.")
+    if len(workstream) > 200:
+        raise AIMalformedResponseError(f"{path}.workstream exceeds 200 characters.")
     claim = _validate_claim(
         {
             "text": raw.get("text"),
@@ -1349,7 +1359,7 @@ def _validate_activity_claim(
         raise AIUnsupportedClaimsError(
             f"{path} must be omitted instead of using Not supplied."
         )
-    return {"area": area, **claim}
+    return {"area": area, "workstream": workstream, **claim}
 
 
 def _validate_concern_action(
