@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/21"
-PROMPT_VERSION = "periodic-narrative-grounding/22"
+SUGGESTION_VERSION = "periodic-ai-suggestion/22"
+PROMPT_VERSION = "periodic-narrative-grounding/23"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -320,7 +320,10 @@ Reporting rules:
    progress/status explicitly stated in the source, genuine project constraints,
    workforce facts, and supported look-ahead. When the deterministic baseline
    contains area-level highlights, retain those useful specifics rather than
-   collapsing them into only a list of generic workstream names. Write it as management-facing report content, never
+   collapsing them into only a list of generic workstream names. When an area has
+   both active work and a small number of standby entries, describe the supported
+   active work as the area highlight; do not reduce that area to ``standby``. Write
+   it as management-facing report content, never
    as a description of how the report was compiled. Never call the report a
    "draft" or say that it "compiles N Daily Reports" unless partial source
    coverage itself is operationally important. Explicit activity status values such as Finished,
@@ -361,7 +364,10 @@ Reporting rules:
    deterministic_summary.current_activities is supplied, preserve its exact area
    label (including labels such as Turbine Unit 2, Generator Unit 1, or MA-81),
    workstream, and row order; never replace a known area with generic values such as
-   "Site" or "General". Keep work details isolated
+   "Site" or "General". Put ONLY the narrative activity body in ``text``: do not
+   prepend the area, the selected workstream, ``Other Site Work:``, or any second
+   category label inside ``text``. The separate ``area`` and ``workstream`` fields
+   own those display labels. Keep work details isolated
    to the same source area: never introduce cylinder/pneumatic work into an actuator-only
    area, and never combine "actuator and cylinder" unless both concepts are explicitly
    supported for that same area/workstream in the deterministic baseline. Never use filler such as "additional
