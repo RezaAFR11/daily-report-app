@@ -1021,7 +1021,7 @@ def _record_date(record: dict[str, Any]) -> str:
 # Client-facing deterministic fallback summarisation.  AI may refine this after
 # Source Data Validation, but the baseline Weekly/Monthly PDF should already read
 # like a period report rather than seven/thirty Daily Reports concatenated together.
-_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/3"
+_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/5"
 
 _PERIOD_ACTIVITY_TAG_RE = re.compile(
     r"\(\s*\d{1,3}\s*-\s*[A-Za-z]{2,}\s*-\s*[^)]*\)", re.IGNORECASE
@@ -1034,6 +1034,33 @@ _PERIOD_ACTIVITY_TAG_RE = re.compile(
 _PERIOD_ACTIVITY_FAMILY_RULES: tuple[
     tuple[str, tuple[tuple[str, float], ...]], ...
 ] = (
+    # General plant-maintenance workstreams come first so the deterministic
+    # compiler is useful beyond the Control Valve project.  The terms remain
+    # conservative and source-derived; project-specific families below still
+    # win whenever their more specific keywords carry a higher score.
+    (
+        "Oil System & Flushing",
+        (
+            ("oil flushing", 6.0), ("bypass line", 3.0),
+            ("make up oil", 5.0), ("make-up oil", 5.0),
+            ("oil loading", 4.0), ("new oil loading", 4.0),
+            ("oil lifting", 4.0), ("reservoir tank", 2.5),
+        ),
+    ),
+    (
+        "Mechanical Maintenance",
+        (
+            ("wiremesh", 5.5), ("turning gear", 5.0),
+            ("packing", 4.0), ("o ring", 2.0), ("o-ring", 2.0),
+            ("pressure gauge", 3.0), ("seal tape", 3.0),
+            ("bearing", 2.0), ("alignment", 3.0), ("fabrication", 2.5),
+            ("filter replacement", 3.0),
+        ),
+    ),
+    (
+        "Standby / Coordination",
+        (("stand by", 8.0), ("standby", 8.0)),
+    ),
     (
         "Testing & Commissioning",
         (
@@ -1073,6 +1100,25 @@ _PERIOD_ACTIVITY_FAMILY_RULES: tuple[
 )
 
 _PERIOD_ACTIVITY_THEME_RULES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
+    "Oil System & Flushing": (
+        ("LO bypass-line oil flushing", ("lo bypass line oil flushing", "lo bearing")),
+        ("CO bypass-line oil flushing", ("co bypass line oil flushing",)),
+        ("bypass-line oil flushing", ("oil flushing",)),
+        ("reservoir make-up oil", ("make up oil", "make-up oil")),
+        ("oil loading and preparation", ("oil loading", "new oil loading", "oil lifting", "preparation for make up oil")),
+    ),
+    "Mechanical Maintenance": (
+        ("wiremesh replacement/fabrication", ("wiremesh",)),
+        ("filter O-ring replacement", ("o ring", "o-ring")),
+        ("turning-gear motor alignment", ("turning gear motor alignment",)),
+        ("packing replacement", ("packing",)),
+        ("pressure-gauge sealing work", ("pressure gauge", "seal tape")),
+        ("mechanical alignment", ("alignment",)),
+    ),
+    "Standby / Coordination": (
+        ("standby", ("stand by", "standby")),
+        ("coordination pending", ("waiting for coordination", "pending coordination")),
+    ),
     "Testing & Commissioning": (
         ("DCS loop testing", ("loop test", "dcs")),
         ("local functional testing", ("function test", "local")),
@@ -1081,7 +1127,11 @@ _PERIOD_ACTIVITY_THEME_RULES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]]
         ("calibration", ("calibrat",)),
     ),
     "Actuator & Pneumatic": (
-        ("actuator and cylinder work", ("actuator", "cylinder", "silinder")),
+        # Keep actuator-only work separate from pneumatic-cylinder work.  The old
+        # combined label could turn source text such as "Lowering the Actuator"
+        # into the unsupported phrase "actuator and cylinder work".
+        ("actuator work", ("actuator",)),
+        ("pneumatic cylinder work", ("pneumatic", "cylinder", "silinder")),
         ("solenoid and multi-way valve work", ("solenoid", "5-way", "5 way", "6-way", "6 way")),
         ("regulator, tubing and hose work", ("regulator", "tubing", "hose", "air instrument")),
         ("pneumatic shaft setting", ("setting shaft", "setting shaf")),
@@ -1105,10 +1155,13 @@ _PERIOD_ACTIVITY_THEME_RULES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]]
 }
 
 _WORKSTREAM_DISPLAY_ORDER = (
+    "Oil System & Flushing",
+    "Mechanical Maintenance",
     "Instrumentation & Electrical",
     "Actuator & Pneumatic",
     "Valve Mechanical",
     "Testing & Commissioning",
+    "Standby / Coordination",
     "Other Site Work",
 )
 
@@ -1170,6 +1223,16 @@ def _period_activity_themes(family: str, value: Any) -> list[str]:
         if any(needle in text for needle in needles):
             if label not in result:
                 result.append(label)
+
+    # Avoid repetitive generic oil-flushing wording when the source gives the
+    # more specific LO/CO circuit.  This improves management readability without
+    # changing or inferring the underlying activity.
+    if family == "Oil System & Flushing" and "bypass-line oil flushing" in result:
+        if any(item in result for item in ("LO bypass-line oil flushing", "CO bypass-line oil flushing")):
+            result.remove("bypass-line oil flushing")
+    if family == "Mechanical Maintenance" and "turning-gear motor alignment" in result:
+        if "mechanical alignment" in result:
+            result.remove("mechanical alignment")
     return result
 
 
@@ -1229,7 +1292,7 @@ def _format_positive_number(value: Any) -> str:
     return _format_number(number)
 
 
-def _summarise_period_activities(value: Any, *, max_phrases_per_group: int = 3) -> list[dict[str, Any]]:
+def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases_per_group: int = 3) -> list[dict[str, Any]]:
     """Build a deterministic management summary by Area + Workstream.
 
     The full Daily activity rows always remain in ``draft['activities']``.  This
@@ -1284,6 +1347,31 @@ def _summarise_period_activities(value: Any, *, max_phrases_per_group: int = 3) 
             group["source_report_ids"].append(source_id)
         if status and status.casefold() not in {item.casefold() for item in group["statuses"]}:
             group["statuses"].append(status)
+
+    # Area remarks can explain a source-backed standby state without becoming a
+    # new work activity.  Only explicit waiting/coordination wording is used, and
+    # only to enrich an already recorded Standby / Coordination group.
+    for raw in remarks if isinstance(remarks, list) else []:
+        if not isinstance(raw, Mapping):
+            continue
+        area = _clean_text(raw.get("area"), 255) or "General"
+        text = _clean_text(raw.get("text", raw.get("remark", raw.get("remarks"))), 2_000)
+        if not text:
+            continue
+        lowered = text.casefold()
+        if not any(token in lowered for token in ("waiting for coordination", "pending coordination")):
+            continue
+        group = groups.get((area, "Standby / Coordination"))
+        if group is None:
+            continue
+        if "coordination pending" not in group["themes"]:
+            group["themes"].append("coordination pending")
+        report_date = _clean_text(raw.get("date", raw.get("source_date")), 10)
+        source_id = _clean_text(raw.get("source_report_id"), 200)
+        if report_date and report_date not in group["dates"]:
+            group["dates"].append(report_date)
+        if source_id and source_id not in group["source_report_ids"]:
+            group["source_report_ids"].append(source_id)
 
     result: list[dict[str, Any]] = []
     for key in group_order:
@@ -1759,7 +1847,7 @@ def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: s
     grouped = draft.get("activity_summary") if isinstance(draft.get("activity_summary"), list) else []
     if not grouped:
         activities = draft.get("activities") if isinstance(draft.get("activities"), list) else []
-        grouped = _summarise_period_activities(activities)
+        grouped = _summarise_period_activities(activities, remarks=draft.get("remarks"))
 
     highlights = _executive_area_highlights(grouped)
     areas = [item["area"] for item in highlights if _clean_text(item.get("area"), 255)]
@@ -1966,7 +2054,7 @@ def _prepare_draft(
     # optional: the deterministic compiler owns classification, grouping, source
     # provenance, workforce numbers and constraint follow-up selection.
     activities_for_summary = draft.get("activities") if isinstance(draft.get("activities"), list) else []
-    grouped_activities = _summarise_period_activities(activities_for_summary)
+    grouped_activities = _summarise_period_activities(activities_for_summary, remarks=draft.get("remarks"))
     draft["activity_summary"] = copy.deepcopy(grouped_activities)
 
     engineering_summary = _deterministic_engineering_summary(activities_for_summary)
@@ -2135,7 +2223,7 @@ def _refresh_deterministic_summary(draft: dict[str, Any]) -> dict[str, Any]:
     old_concerns = previous.get("concerns") if isinstance(previous.get("concerns"), list) else []
 
     activities = draft.get("activities") if isinstance(draft.get("activities"), list) else []
-    grouped = _summarise_period_activities(activities)
+    grouped = _summarise_period_activities(activities, remarks=draft.get("remarks"))
     draft["activity_summary"] = copy.deepcopy(grouped)
     engineering_summary = _deterministic_engineering_summary(activities)
     procurement_summary = _deterministic_procurement_summary(activities)
@@ -2548,17 +2636,29 @@ def _bound_record_photo_candidates(
     *,
     limits=None,
 ) -> list[str]:
-    """Apply report-specific count/byte bounds and exact hash deduplication."""
+    """Apply report-specific bounds without erasing cross-date photo evidence.
+
+    Exact duplicates inside one Daily Report are already removed by ``photos.py``.
+    When the same JPEG is intentionally/repeatedly present in a different Daily
+    Report date, retain a separate reference for that source date while storing
+    the image bytes only once.  This keeps Photo Documentation date coverage
+    auditable without multiplying the asset-byte budget.
+    """
 
     limits = limits or DEFAULT_PHOTO_LIMITS
-    seen: set[str] = set()
-    total_bytes = 0
-    retained = 0
-    removed_duplicates = 0
+    seen_assets: set[str] = set()
+    seen_references: set[tuple[str, str, str]] = set()
+    total_unique_bytes = 0
+    retained_references = 0
+    removed_same_source_duplicates = 0
+    reused_cross_source_assets = 0
     removed_for_limit = 0
+
     for record in records:
         raw = record.get("_photo_candidates")
         bounded: list[dict[str, Any]] = []
+        report_id = str(record.get("report_id") or "")
+        report_date = _record_date(record)
         for item in raw if isinstance(raw, list) else []:
             if not isinstance(item, dict):
                 continue
@@ -2569,29 +2669,40 @@ def _bound_record_photo_candidates(
                 size_bytes = 0
             if not is_asset_id(asset_id) or size_bytes > limits.max_asset_bytes:
                 continue
-            if asset_id in seen:
-                removed_duplicates += 1
-                # Keep the reference on every source record so choosing a
-                # later duplicate record during Source Validation does not
-                # accidentally remove its photo. Output collection dedupes it.
-                bounded.append(copy.deepcopy(item))
+
+            source_date = _clean_text(item.get("source_date"), 10) or report_date
+            reference_key = (report_id, source_date, asset_id)
+            if reference_key in seen_references:
+                removed_same_source_duplicates += 1
                 continue
+
+            is_reused_asset = asset_id in seen_assets
+            additional_bytes = 0 if is_reused_asset else size_bytes
             if (
-                retained >= limits.max_images_per_draft
-                or total_bytes + size_bytes > limits.max_total_asset_bytes_per_draft
+                retained_references >= limits.max_images_per_draft
+                or total_unique_bytes + additional_bytes > limits.max_total_asset_bytes_per_draft
             ):
                 removed_for_limit += 1
                 continue
-            seen.add(asset_id)
-            total_bytes += size_bytes
-            retained += 1
+
+            if is_reused_asset:
+                reused_cross_source_assets += 1
+            else:
+                seen_assets.add(asset_id)
+                total_unique_bytes += size_bytes
+            seen_references.add(reference_key)
+            retained_references += 1
             bounded.append(copy.deepcopy(item))
         record["_photo_candidates"] = bounded
 
     warnings: list[str] = []
-    if removed_duplicates:
+    if removed_same_source_duplicates:
         warnings.append(
-            f"{removed_duplicates} duplicate photo(s) across Daily Reports were removed."
+            f"{removed_same_source_duplicates} duplicate photo reference(s) from the same Daily Report were removed."
+        )
+    if reused_cross_source_assets:
+        warnings.append(
+            f"{reused_cross_source_assets} exact photo reuse occurrence(s) across different Daily Reports were retained by source date for traceability."
         )
     if removed_for_limit:
         warnings.append(
@@ -2601,39 +2712,55 @@ def _bound_record_photo_candidates(
     return warnings
 
 
+def _photo_reference_key(item: Mapping[str, Any]) -> tuple[str, str, str]:
+    return (
+        _clean_text(item.get("source_report_id"), 200),
+        _clean_text(item.get("source_date"), 10),
+        str(item.get("asset_id") or ""),
+    )
+
+
 def _photo_references_for_records(
     records: list[dict[str, Any]],
     *,
     previous: Any = None,
     limits=None,
 ) -> list[dict[str, Any]]:
-    """Return references belonging only to the selected source records."""
+    """Return selected photo references, preserving the same asset across dates."""
 
     limits = limits or DEFAULT_PHOTO_LIMITS
     selected_ids = {str(record.get("report_id") or "") for record in records}
-    prior_by_id: dict[str, dict[str, Any]] = {}
-    prior_order: list[str] = []
+    prior_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    prior_order: list[tuple[str, str, str]] = []
     if isinstance(previous, list):
         for item in previous:
             if not isinstance(item, dict):
                 continue
             asset_id = str(item.get("asset_id") or "")
-            if is_asset_id(asset_id) and asset_id not in prior_by_id:
-                prior_by_id[asset_id] = item
-                prior_order.append(asset_id)
+            if not is_asset_id(asset_id):
+                continue
+            key = _photo_reference_key(item)
+            if key not in prior_by_key:
+                prior_by_key[key] = item
+                prior_order.append(key)
 
-    available: dict[str, dict[str, Any]] = {}
-    discovered_order: list[str] = []
+    available: dict[tuple[str, str, str], dict[str, Any]] = {}
+    discovered_order: list[tuple[str, str, str]] = []
     for record in records:
         report_id = str(record.get("report_id") or "")
         if report_id not in selected_ids:
             continue
+        report_date = _record_date(record)
         candidates = record.get("_photo_candidates")
         for item in candidates if isinstance(candidates, list) else []:
             if not isinstance(item, dict):
                 continue
             asset_id = str(item.get("asset_id") or "")
-            if not is_asset_id(asset_id) or asset_id in available:
+            if not is_asset_id(asset_id):
+                continue
+            source_date = _clean_text(item.get("source_date"), 10) or report_date
+            key = (report_id, source_date, asset_id)
+            if key in available:
                 continue
             try:
                 page_number = int(item.get("page") or 0)
@@ -2644,6 +2771,7 @@ def _photo_references_for_records(
                 "asset_id": asset_id,
                 "source_report_id": report_id,
                 "source": _clean_text(item.get("source"), 255),
+                "source_date": source_date,
                 "width": max(1, int(item.get("width") or 1)),
                 "height": max(1, int(item.get("height") or 1)),
                 "size_bytes": max(0, int(item.get("size_bytes") or 0)),
@@ -2652,7 +2780,6 @@ def _photo_references_for_records(
             if page_number > 0:
                 reference["page"] = page_number
             for metadata_key, maximum_length in (
-                ("source_date", 10),
                 ("source_area", 255),
                 ("activity_id", 100),
                 ("activity_description", 500),
@@ -2664,21 +2791,68 @@ def _photo_references_for_records(
                 metadata_value = _clean_text(item.get(metadata_key), maximum_length)
                 if metadata_value:
                     reference[metadata_key] = metadata_value
-            previous_item = prior_by_id.get(asset_id)
+            previous_item = prior_by_key.get(key)
             if previous_item is not None:
                 previous_caption = _clean_text(previous_item.get("caption"), 500)
                 if previous_caption:
                     reference["caption"] = previous_caption
-            available[asset_id] = reference
-            discovered_order.append(asset_id)
+            available[key] = reference
+            discovered_order.append(key)
 
-    ordered_ids = [asset_id for asset_id in prior_order if asset_id in available]
-    ordered_ids.extend(asset_id for asset_id in discovered_order if asset_id not in ordered_ids)
-    result = [available[asset_id] for asset_id in ordered_ids]
+    ordered_keys = [key for key in prior_order if key in available]
+    ordered_keys.extend(key for key in discovered_order if key not in ordered_keys)
+    result = [available[key] for key in ordered_keys]
     for index, item in enumerate(result):
         item["order"] = index
     return result[: limits.max_images_per_draft]
 
+
+def _photo_coverage_metadata(
+    records: list[dict[str, Any]],
+    references: Any,
+) -> dict[str, Any]:
+    """Summarise photo-date retention for deterministic Final preflight."""
+
+    source_dates: list[str] = []
+    asset_dates: dict[str, set[str]] = {}
+    for record in records:
+        record_date = _record_date(record)
+        candidates = record.get("_photo_candidates")
+        has_photo = False
+        for item in candidates if isinstance(candidates, list) else []:
+            if not isinstance(item, Mapping):
+                continue
+            asset_id = str(item.get("asset_id") or "")
+            if not is_asset_id(asset_id):
+                continue
+            source_date = _clean_text(item.get("source_date"), 10) or record_date
+            if source_date:
+                has_photo = True
+                asset_dates.setdefault(asset_id, set()).add(source_date)
+        if has_photo and record_date and record_date not in source_dates:
+            source_dates.append(record_date)
+
+    rendered_dates: list[str] = []
+    for row in references if isinstance(references, list) else []:
+        if not isinstance(row, Mapping):
+            continue
+        source_date = _clean_text(row.get("source_date"), 10)
+        if source_date and source_date not in rendered_dates:
+            rendered_dates.append(source_date)
+
+    source_dates.sort()
+    rendered_dates.sort()
+    missing_dates = [date for date in source_dates if date not in set(rendered_dates)]
+    reused_assets = sum(1 for dates in asset_dates.values() if len(dates) > 1)
+    return {
+        "source_dates_with_extractable_photos": source_dates,
+        "retained_photo_dates": rendered_dates,
+        "missing_photo_dates": missing_dates,
+        "source_date_count": len(source_dates),
+        "retained_date_count": len(rendered_dates),
+        "retained_reference_count": len(references) if isinstance(references, list) else 0,
+        "cross_date_reused_asset_count": reused_assets,
+    }
 
 def _all_photo_references(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
@@ -2966,9 +3140,16 @@ def _apply_review(draft: dict[str, Any], review: dict[str, Any], *, actor: str =
         ),
     )
     # Preserve Area labels for deterministic/AI activity groups through the
-    # Preview/Generate review round-trip. Older plain-string rows remain valid
-    # and are assigned to the generic Site area.
-    current_site["this_month_activities"] = _clean_activity_rows(current_activities)
+    # Preview/Generate review round-trip. Older plain-string rows remain valid;
+    # when they correspond to deterministic rows, their Area + Workstream metadata
+    # is restored before rendering.
+    # The browser review form can round-trip editable activity rows without the
+    # hidden ``area``/``workstream`` metadata.  Restore that deterministic metadata
+    # before saving the reviewed draft; otherwise the renderer can only show a
+    # generic workstream label and loses the intended ``MA-xx – Workstream`` prefix.
+    cleaned_current_activities = _clean_activity_rows(current_activities)
+    cleaned_current_activities = _align_ai_activity_rows(cleaned_current_activities, value)
+    current_site["this_month_activities"] = cleaned_current_activities
     current_site["next_month_activities"] = _clean_activity_rows(next_activities)
     current_site["current_period_activities"] = current_site["this_month_activities"]
     current_site["this_period_activities"] = current_site["this_month_activities"]
@@ -3168,6 +3349,35 @@ def _is_missing_action_text(value: Any) -> bool:
     return text in {"", "not supplied"}
 
 
+def _concern_match_text(value: Any) -> str:
+    """Normalize minor source/AI wording variants for no-tag concern dedupe."""
+
+    text = _activity_match_text(value)
+    tokens = text.split()
+    replacements = {
+        "founded": "found",
+        "finding": "found",
+        "silinder": "cylinder",
+        "pyston": "piston",
+        "oring": "o-ring",
+    }
+    return " ".join(replacements.get(token, token) for token in tokens)
+
+
+def _concern_similarity(left: Any, right: Any) -> float:
+    a = _concern_match_text(left)
+    b = _concern_match_text(right)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    a_tokens = set(a.split())
+    b_tokens = set(b.split())
+    if not a_tokens or not b_tokens:
+        return 0.0
+    return len(a_tokens & b_tokens) / len(a_tokens | b_tokens)
+
+
 def _merge_concern_rows(existing: Any, accepted: Any) -> list[dict[str, str]]:
     """Merge AI-enriched concerns into deterministic source constraints by tag.
 
@@ -3202,6 +3412,21 @@ def _merge_concern_rows(existing: Any, accepted: Any) -> list[dict[str, str]]:
                 if current_tags.intersection(tags):
                     match_index = index
                     break
+        if match_index is None and concern:
+            # Some formal constraints (for example a leaking regulating valve)
+            # have no equipment tag.  Merge only near-identical source/AI wording
+            # so grammatical cleanup such as "founded" -> "found" cannot create
+            # a duplicate concern row.
+            best_score = 0.0
+            best_index = None
+            for index, current in enumerate(result):
+                score = _concern_similarity(current.get("concern", ""), concern)
+                if score > best_score:
+                    best_score = score
+                    best_index = index
+            if best_index is not None and best_score >= 0.82:
+                match_index = best_index
+
         if match_index is None:
             exact_key = (concern.casefold(), action.casefold())
             if any((row["concern"].casefold(), row["corrective_action"].casefold()) == exact_key for row in result):
@@ -3210,9 +3435,9 @@ def _merge_concern_rows(existing: Any, accepted: Any) -> list[dict[str, str]]:
             continue
 
         current = result[match_index]
-        # Prefer the accepted client-facing concern when it is a richer wording
-        # of the same equipment-tagged issue; never merge rows with different tags.
-        if concern and len(concern) > len(current.get("concern", "")):
+        # Accepted AI wording may clean grammar for the same grounded issue.
+        # Tag overlap or a high no-tag similarity is required before this point.
+        if concern:
             current["concern"] = concern
         if not _is_missing_action_text(action):
             current["corrective_action"] = action
@@ -3763,6 +3988,9 @@ def register_monthly_routes(
             draft["photo_documentation"] = _photo_references_for_records(
                 selected_records, limits=photo_limits
             )
+            draft["photo_coverage"] = _photo_coverage_metadata(
+                selected_records, draft["photo_documentation"]
+            )
             draft_id = _save_draft(
                 data_dir,
                 session["username"],
@@ -4212,6 +4440,9 @@ def register_monthly_routes(
             draft["photo_documentation"] = _photo_references_for_records(
                 selected_records, limits=photo_limits
             )
+            draft["photo_coverage"] = _photo_coverage_metadata(
+                selected_records, draft["photo_documentation"]
+            )
             # Reusing the random upload-session ID closes the crash window
             # between saving the draft and writing the small result tombstone.
             draft_photo_dir = _draft_photo_dir(
@@ -4446,6 +4677,9 @@ def register_monthly_routes(
             draft["photo_documentation"] = _photo_references_for_records(
                 selected_records, limits=photo_limits
             )
+            draft["photo_coverage"] = _photo_coverage_metadata(
+                selected_records, draft["photo_documentation"]
+            )
             draft_id = _save_draft(
                 data_dir,
                 session["username"],
@@ -4632,6 +4866,9 @@ def register_monthly_routes(
                 selected_records,
                 previous=draft.get("photo_documentation"),
                 limits=photo_limits,
+            )
+            refreshed["photo_coverage"] = _photo_coverage_metadata(
+                selected_records, refreshed["photo_documentation"]
             )
             refreshed["draft_id"] = draft_id
             refreshed["owner"] = username
