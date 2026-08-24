@@ -326,6 +326,77 @@ def _deterministic_summary_issues(report: Mapping[str, Any]) -> tuple[list[str],
     return warnings, info
 
 
+def _progress_source_consistency_issues(report: Mapping[str, Any]) -> list[str]:
+    """Ensure source-backed progress survives review/render normalisation verbatim."""
+
+    overall = report.get("overall_progress")
+    progress = report.get("progress")
+    if not isinstance(overall, Mapping) or not overall.get("available"):
+        return []
+    if not isinstance(progress, Mapping):
+        return []
+    if str(progress.get("source_type") or "").strip() != "latest_daily_overall_progress_snapshot":
+        return []
+
+    source_rows = [row for row in _as_list(overall.get("rows")) if isinstance(row, Mapping)]
+    progress_rows = [row for row in _as_list(progress.get("rows")) if isinstance(row, Mapping)]
+    source_total = next(
+        (
+            row for row in reversed(source_rows)
+            if row.get("is_total") or str(row.get("description") or "").strip().casefold() == "overall progress"
+        ),
+        None,
+    )
+    if not isinstance(source_total, Mapping):
+        return []
+
+    total_like = [
+        row for row in progress_rows
+        if row.get("is_total")
+        or str(row.get("description") or "").strip().casefold() in {"overall progress", "total overall"}
+    ]
+    issues: list[str] = []
+    if len(total_like) > 1:
+        issues.append(
+            "Source-backed progress contains more than one overall total row; keep only the authoritative Daily Report OVERALL PROGRESS row."
+        )
+    progress_total = next(
+        (
+            row for row in reversed(total_like)
+            if str(row.get("description") or "").strip().casefold() == "overall progress"
+        ),
+        total_like[-1] if total_like else None,
+    )
+    if not isinstance(progress_total, Mapping):
+        issues.append("The authoritative Daily Report OVERALL PROGRESS row is missing from the rendered progress model.")
+        return issues
+
+    comparisons = (
+        ("Previous Actual", progress_total.get("previous"), source_total.get("cumulative_previous_actual")),
+        ("This Period Actual", progress_total.get("this_month"), source_total.get("this_period_actual")),
+        ("To-date Actual", progress_total.get("to_date"), source_total.get("cumulative_to_date_actual")),
+        ("To-date Plan", progress_total.get("plan"), source_total.get("cumulative_to_date_plan")),
+        ("Variance", progress_total.get("variance"), source_total.get("deviation")),
+    )
+    mismatches: list[str] = []
+    for label, rendered, source in comparisons:
+        rendered_number = _number(rendered)
+        source_number = _number(source)
+        if rendered_number is None or source_number is None:
+            if rendered_number != source_number:
+                mismatches.append(label)
+            continue
+        if abs(rendered_number - source_number) > 0.005:
+            mismatches.append(label)
+    if mismatches:
+        issues.append(
+            "Source-backed Overall Progress changed after review/normalisation for: "
+            + ", ".join(mismatches)
+            + ". Preserve the latest Daily Report snapshot verbatim instead of recalculating it."
+        )
+    return issues
+
+
 def _periodic_source_propagation_issues(report: Mapping[str, Any]) -> list[str]:
     """Catch source-backed period facts that disappeared before rendering."""
 
@@ -458,6 +529,10 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
     for message in _periodic_source_propagation_issues(report):
         target = blockers if for_final else warnings
         target.append({"code": "periodic_source_propagation", "message": message})
+
+    for message in _progress_source_consistency_issues(report):
+        target = blockers if for_final else warnings
+        target.append({"code": "progress_source_consistency", "message": message})
 
     deterministic_warnings, deterministic_info = _deterministic_summary_issues(report)
     for message in deterministic_warnings:
