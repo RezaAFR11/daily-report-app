@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/23"
-PROMPT_VERSION = "periodic-narrative-grounding/24"
+SUGGESTION_VERSION = "periodic-ai-suggestion/25"
+PROMPT_VERSION = "periodic-narrative-grounding/26"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -309,8 +309,8 @@ Deterministic-baseline rule:
   polish and improve readability -- not to rediscover or expand the scope from raw
   Daily lines. Do NOT make the executive summary materially less informative than
   the deterministic baseline. Preserve its supported area-level work highlights,
-  workforce facts, constraints, progress status, missing safety/progress status,
-  numbers and look-ahead facts. Exact raw activities may intentionally be
+  workforce facts, constraints, material key remarks/findings, progress status,
+  missing safety/progress status, numbers and look-ahead facts. Exact raw activities may intentionally be
   omitted from source_data. Use each baseline item's source_report_ids and
   source_dates as the source_ids and dates in your response. Do not add a new
   workstream, equipment tag, corrective action, quantity or status that is absent
@@ -319,7 +319,7 @@ Deterministic-baseline rule:
 Reporting rules:
 6. executive_summary: synthesize the most important work performed, meaningful
    progress/status explicitly stated in the source, genuine project constraints,
-   workforce facts, and supported look-ahead. When the deterministic baseline
+   material source-recorded remarks/findings, workforce facts, and supported look-ahead. When the deterministic baseline
    contains area-level highlights, retain those useful specifics rather than
    collapsing them into only a list of generic workstream names. When an area has
    both active work and a small number of standby entries, describe the supported
@@ -422,7 +422,19 @@ Reporting rules:
 13. claims is optional supporting narrative evidence for the review UI. Do not add
     "claims: Not supplied" to missing_data when no extra claims are needed.
 14. Avoid repetitive bullet-by-bullet copying. Merge duplicates and write concise
-    professional English suitable for a client-facing construction report.
+    professional English suitable for a client-facing construction report. Prefer
+    complete professional action/status wording over awkward gerund constructions
+    such as ``progressing ... installation``. For continuing work, use wording such
+    as ``Progress continued on the installation of ...`` when that meaning is
+    source-backed. Do not use em dashes or en dashes as sentence punctuation in
+    client-facing narrative or activity text; use commas, semicolons, parentheses,
+    or separate sentences instead. For example, when the source explicitly supports
+    continuing installation of MSV A and B for both units together with ring joints,
+    inlet piping, and insulation, a suitable construction is: ``Progress continued
+    on the installation of MSV A and B for both units, including ring joint
+    installation, inlet piping, and insulation works.`` Do not use this example
+    unless every stated detail is present in the supplied source/deterministic
+    baseline.
     The response must fit comfortably inside the output budget:
     - executive_summary: normally 4-6 sentences and preferably <= 1,400 characters when the deterministic baseline contains multiple area highlights.
     - site_summary: normally 2-4 sentences and preferably <= 900 characters.
