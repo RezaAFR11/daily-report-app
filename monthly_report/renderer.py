@@ -725,11 +725,17 @@ def _normalise_progress(value: Any) -> list[dict[str, Any]]:
     return rows
 
 
+def _progress_percent(value: Any) -> str:
+    number = _number(value)
+    return f"{number:.2f}%" if number is not None else "—"
+
+
 def _progress_table(
     rows: list[dict[str, Any]],
     styles: Mapping[str, ParagraphStyle],
     *,
     report_type: str = "monthly",
+    period_label: str = "",
 ) -> LongTable:
     display_rows = rows or [
         {"description": description, "previous": None, "this_month": None,
@@ -739,10 +745,15 @@ def _progress_table(
     header = styles["table_header"]
     body = styles["table"]
     centered = styles["table_center"]
+    source_period_label = _plain(period_label)
     current_period_label = (
-        "This Week\n(b)"
-        if _normalise_report_type(report_type) == "weekly"
-        else "This Month\n(b)"
+        f"{source_period_label}\n(b)"
+        if source_period_label
+        else (
+            "This Week\n(b)"
+            if _normalise_report_type(report_type) == "weekly"
+            else "This Month\n(b)"
+        )
     )
     data: list[list[Any]] = [
         [_paragraph("Description", header), _paragraph("Progress", header), "", "",
@@ -750,16 +761,19 @@ def _progress_table(
          _paragraph("Variance\n(e) = (c) - (d)", header)],
         ["", _paragraph("Previous\n(a)", header),
          _paragraph(current_period_label, header),
-         _paragraph("To-date\n(c) = (a) + (b)", header), "", ""],
+         _paragraph(
+             "To-date\n(c)" if source_period_label else "To-date\n(c) = (a) + (b)",
+             header,
+         ), "", ""],
     ]
     for row in display_rows:
         data.append([
             _paragraph(row.get("description"), body),
-            _paragraph(_percent(row.get("previous")), centered),
-            _paragraph(_percent(row.get("this_month")), centered),
-            _paragraph(_percent(row.get("to_date")), centered),
-            _paragraph(_percent(row.get("plan")), centered),
-            _paragraph(_percent(row.get("variance")), centered),
+            _paragraph(_progress_percent(row.get("previous")), centered),
+            _paragraph(_progress_percent(row.get("this_month")), centered),
+            _paragraph(_progress_percent(row.get("to_date")), centered),
+            _paragraph(_progress_percent(row.get("plan")), centered),
+            _paragraph(_progress_percent(row.get("variance")), centered),
         ])
     table = LongTable(
         data,
@@ -1220,8 +1234,45 @@ def _constraint_reporting_message(report: Mapping[str, Any], site: Mapping[str, 
     reported_dates = _as_list(reporting.get("reported_dates"))
     missing_dates = _as_list(reporting.get("not_supplied_dates"))
     if none_dates and not reported_dates and not missing_dates:
-        return "No constraints or issues were reported in the available Daily Reports."
+        findings = _as_list(site.get("key_findings"))
+        if findings:
+            return "No formal constraints were reported in the available Daily Reports. Key remarks/findings are shown below."
+        return "No formal constraints were reported in the available Daily Reports."
     return "Concern and closeout information was not supplied."
+
+
+
+def _key_findings_table(rows: list[Any], styles: Mapping[str, ParagraphStyle]) -> LongTable | None:
+    data: list[list[Any]] = [[
+        _paragraph("Date / Area", styles["table_header"]),
+        _paragraph("Key Remark / Finding", styles["table_header"]),
+    ]]
+    for raw in rows:
+        if not isinstance(raw, Mapping):
+            continue
+        text = _plain(_value(raw, "text", "remark", "description"))
+        if not text:
+            continue
+        date = _plain(_value(raw, "date", "source_date"))
+        area = _plain(raw.get("area"))
+        label = " / ".join(value for value in (date, area) if value) or "Source remark"
+        data.append([
+            _paragraph(label, styles["table"]),
+            _paragraph(text, styles["table"]),
+        ])
+    if len(data) == 1:
+        return None
+    table = LongTable(data, colWidths=[110, 360], repeatRows=1, splitByRow=1, splitInRow=1)
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), GREY_HEADER),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    return table
 
 
 def _concerns_table(rows: list[Any], styles: Mapping[str, ParagraphStyle]) -> LongTable | None:
@@ -1891,7 +1942,10 @@ def _build_story(
     ])
     story.extend(_coverage_flowables(report, styles))
     story.extend([
-        _progress_table(progress, styles, report_type=report_type),
+        _progress_table(
+            progress, styles, report_type=report_type,
+            period_label=_plain(report.get("progress_period_label")),
+        ),
         Spacer(1, 18),
         _heading("2. Safety Status", styles["h1"], 0),
         Paragraph("<b>Status summary:</b>", styles["body"]),
@@ -2037,6 +2091,9 @@ def _build_story(
         story.append(_paragraph(_constraint_reporting_message(report, site), styles["placeholder"]))
     else:
         story.append(concerns_table)
+    findings_table = _key_findings_table(_as_list(site.get("key_findings")), styles)
+    if findings_table is not None:
+        story.extend([Spacer(1, 5), _display_heading("Key Remarks / Findings", styles["h2"]), findings_table])
     story.append(PageBreak())
 
     if visible_appendices:
