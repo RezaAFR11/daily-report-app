@@ -1146,7 +1146,7 @@ def _record_date(record: dict[str, Any]) -> str:
 # Client-facing deterministic fallback summarisation.  AI may refine this after
 # Source Data Validation, but the baseline Weekly/Monthly PDF should already read
 # like a period report rather than seven/thirty Daily Reports concatenated together.
-_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/9"
+_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/10"
 
 _PERIOD_ACTIVITY_TAG_RE = re.compile(
     r"\(\s*\d{1,3}\s*-\s*[A-Za-z]{2,}\s*-\s*[^)]*\)", re.IGNORECASE
@@ -1825,8 +1825,9 @@ def _deterministic_procurement_summary(activities: Any) -> str:
     if not materials:
         return "No separate procurement, equipment-delivery, or shipment register was supplied in the available Daily Reports."
     return (
-        "No separate PO/material register was supplied. Daily Reports record field use, installation, replacement, or repair "
-        f"involving {', '.join(materials)}. PO status, outstanding quantities, delivery status, and shipment status cannot be determined from the Daily Reports."
+        "No separate PO or material register was supplied. Daily Reports contain field activity references involving "
+        f"{', '.join(materials)}. These field references do not establish PO status, outstanding quantities, delivery status, "
+        "or shipment status from the available Daily Reports."
     )
 
 
@@ -6105,12 +6106,23 @@ def register_monthly_routes(
             existing_concerns = site.get("concerns") if isinstance(site.get("concerns"), list) else []
             merged_concerns = _merge_concern_rows(existing_concerns, accepted["concerns"])
             existing_lookahead = site.get("next_period_activities", site.get("next_month_activities", []))
-            merged_lookahead = _list_text(existing_lookahead)
-            seen_lookahead = {item.casefold() for item in merged_lookahead}
-            for item in accepted["lookahead"]:
-                if item.casefold() not in seen_lookahead:
-                    merged_lookahead.append(item)
-                    seen_lookahead.add(item.casefold())
+            existing_lookahead_text = _list_text(existing_lookahead)
+            if existing_lookahead_text:
+                # Source/manual look-ahead is authoritative. Claude may polish
+                # narrative elsewhere, but it must not append paraphrases of
+                # already extracted period-end Activity Tomorrow items because
+                # that creates duplicate client-facing planned activities.
+                merged_lookahead = copy.deepcopy(existing_lookahead)
+                if not isinstance(merged_lookahead, list):
+                    merged_lookahead = existing_lookahead_text
+            else:
+                merged_lookahead = []
+                seen_lookahead: set[str] = set()
+                for item in accepted["lookahead"]:
+                    key = re.sub(r"[^a-z0-9]+", " ", item.casefold()).strip()
+                    if key and key not in seen_lookahead:
+                        merged_lookahead.append(item)
+                        seen_lookahead.add(key)
             site["concerns"] = merged_concerns
             site["next_month_activities"] = merged_lookahead
             site["next_period_activities"] = merged_lookahead
