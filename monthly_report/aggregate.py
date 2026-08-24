@@ -505,25 +505,17 @@ def _aggregate_progress(selected: list[tuple[str, Mapping[str, Any]]]) -> dict[s
         source_dates.update(report_date for report_date, _ in history)
 
         values = {field: _progress_number(latest.get(field)) for field in _PROGRESS_NUMERIC_FIELDS}
-        previous_plan = _progress_number(earliest.get("cumulative_previous_plan"))
-        previous_actual = _progress_number(earliest.get("cumulative_previous_actual"))
+        # Preserve the latest Daily Report snapshot exactly.  The source table's
+        # ``This Period`` and ``Deviation`` values are evidence, not values for the
+        # periodic compiler to silently recompute/reconcile.  First/last dates are
+        # retained only as provenance.
+        previous_plan = values["cumulative_previous_plan"]
+        previous_actual = values["cumulative_previous_actual"]
         cumulative_plan = values["cumulative_to_date_plan"]
         cumulative_actual = values["cumulative_to_date_actual"]
-
-        if previous_plan is not None and cumulative_plan is not None:
-            period_plan = cumulative_plan - previous_plan
-        else:
-            period_plan = values["this_period_plan"]
-        if previous_actual is not None and cumulative_actual is not None:
-            period_actual = cumulative_actual - previous_actual
-        else:
-            period_actual = values["this_period_actual"]
-
-        deviation = (
-            cumulative_actual - cumulative_plan
-            if cumulative_actual is not None and cumulative_plan is not None
-            else values["deviation"]
-        )
+        period_plan = values["this_period_plan"]
+        period_actual = values["this_period_actual"]
+        deviation = values["deviation"]
         row_result = {
             "key": key,
             "description": _clean_text(latest.get("description")),
@@ -538,31 +530,44 @@ def _aggregate_progress(selected: list[tuple[str, Mapping[str, Any]]]) -> dict[s
             "cumulative_to_date_plan": cumulative_plan,
             "cumulative_to_date_actual": cumulative_actual,
             "deviation": deviation,
+            "is_total": bool(latest.get("is_total")),
+            "source_period_label": _clean_text(latest.get("source_period_label")) or "This Period",
             "first_source_date": earliest_date,
             "last_source_date": latest_date,
         }
         result_rows.append(row_result)
 
+    explicit_total = next((row for row in reversed(result_rows) if row.get("is_total")), None)
     totals: dict[str, float | None] = {}
-    for field in _PROGRESS_TOTAL_FIELDS:
-        weighted = [
-            row["weight_factor"] * row[field] / 100.0
-            for row in result_rows
-            if row["weight_factor"] is not None and row[field] is not None
-        ]
-        totals[field] = round(sum(weighted), 6) if weighted else None
-    plan = totals.get("cumulative_to_date_plan")
-    actual = totals.get("cumulative_to_date_actual")
-    totals["deviation"] = round(actual - plan, 6) if plan is not None and actual is not None else None
-    weights = [row["weight_factor"] for row in result_rows if row["weight_factor"] is not None]
-    totals["weight_total"] = round(sum(weights), 6) if weights else None
+    if explicit_total is not None:
+        for field in _PROGRESS_TOTAL_FIELDS:
+            totals[field] = explicit_total.get(field)
+        totals["deviation"] = explicit_total.get("deviation")
+        totals["weight_total"] = None
+        totals_method = "latest explicit Overall Progress total row"
+    else:
+        for field in _PROGRESS_TOTAL_FIELDS:
+            weighted = [
+                row["weight_factor"] * row[field] / 100.0
+                for row in result_rows
+                if row["weight_factor"] is not None and row[field] is not None
+            ]
+            totals[field] = round(sum(weighted), 6) if weighted else None
+        plan = totals.get("cumulative_to_date_plan")
+        actual = totals.get("cumulative_to_date_actual")
+        totals["deviation"] = round(actual - plan, 6) if plan is not None and actual is not None else None
+        weights = [row["weight_factor"] for row in result_rows if row["weight_factor"] is not None]
+        totals["weight_total"] = round(sum(weights), 6) if weights else None
+        totals_method = "weighted fallback from latest detail rows"
 
     return {
         "available": bool(result_rows),
         "rows": result_rows,
         "totals": totals,
         "source_dates": sorted(source_dates),
-        "method": "latest cumulative minus earliest previous; cumulative values are never summed",
+        "latest_snapshot_date": max(source_dates) if source_dates else None,
+        "source_period_label": "This Period",
+        "method": f"latest Daily Report snapshot preserved; totals: {totals_method}",
     }
 
 
