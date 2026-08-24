@@ -986,7 +986,7 @@ def _activity_flowables(
     *,
     empty_message: str,
 ) -> list[Flowable]:
-    """Render period activities as concise ``MA-xx – Workstream`` bullets.
+    """Render period activities as concise ``Area – Workstream`` bullets.
 
     Area/workstream metadata comes from the deterministic compiler.  Claude may
     polish only the narrative body.  Generic placeholders such as ``Site`` are
@@ -1465,8 +1465,9 @@ def _photo_grid_flowables(
     """Render reviewed photos grouped by source date, up to nine cards per page.
 
     Weekly/Monthly reports are easier to audit when each Daily Report date has a
-    visible photo block.  Exact duplicate assets are removed, while different
-    photographs of the same activity remain available as evidence.
+    visible photo block. Exact duplicates within the same Daily source are removed,
+    while an identical asset reused by a different Daily Report date is retained as
+    a separate dated reference for source traceability.
     """
 
     if photo_base_dir is None:
@@ -1478,14 +1479,21 @@ def _photo_grid_flowables(
 
     root = os.path.realpath(os.fspath(photo_base_dir))
     prepared: list[Mapping[str, Any]] = []
-    seen_assets: set[str] = set()
+    seen_references: set[tuple[str, str, str]] = set()
     for raw in photos:
         if not isinstance(raw, Mapping):
             continue
         asset_id = _plain(raw.get("asset_id"))
-        if not is_asset_id(asset_id) or asset_id in seen_assets:
+        if not is_asset_id(asset_id):
             continue
-        seen_assets.add(asset_id)
+        reference_key = (
+            asset_id,
+            _plain(raw.get("source_report_id")),
+            _plain(raw.get("source_date")),
+        )
+        if reference_key in seen_references:
+            continue
+        seen_references.add(reference_key)
         prepared.append(raw)
 
     prepared.sort(key=lambda row: (
