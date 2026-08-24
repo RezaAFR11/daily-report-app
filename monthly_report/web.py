@@ -3469,40 +3469,171 @@ def _source_validation_payload(review: Any) -> dict[str, Any]:
     }
 
 
-def _normalize_progress(review: Any) -> dict[str, Any]:
-    raw_rows = review.get("rows", []) if isinstance(review, dict) else []
-    rows = []
+def _normalize_progress(review: Any, baseline: Any = None) -> dict[str, Any]:
+    """Normalise reviewed progress without overwriting source snapshot arithmetic.
+
+    Daily Report Overall Progress tables are source snapshots. Their cumulative
+    actual and deviation columns are independent source fields and must not be
+    silently rebuilt as ``Previous + This Period``.  A reviewer form may omit
+    read-only cumulative/deviation fields, so source-backed drafts recover those
+    values from the pre-review baseline by description.
+
+    Manual progress that has no source snapshot keeps the legacy weighted-total
+    fallback when an explicit total row is not supplied.
+    """
+
+    review_map = review if isinstance(review, dict) else {}
+    baseline_map = baseline if isinstance(baseline, dict) else {}
+    raw_rows = review_map.get("rows", []) if isinstance(review_map.get("rows", []), list) else []
+    baseline_rows = (
+        baseline_map.get("rows", [])
+        if isinstance(baseline_map.get("rows", []), list)
+        else []
+    )
+
+    def row_key(row: Mapping[str, Any]) -> str:
+        return _clean_text(row.get("description"), 250).casefold()
+
+    baseline_by_description = {
+        row_key(row): row
+        for row in baseline_rows
+        if isinstance(row, Mapping) and row_key(row)
+    }
+
+    source_type = _clean_text(
+        review_map.get("source_type") or baseline_map.get("source_type"), 100
+    )
+    if not source_type and baseline_map.get("available") and baseline_map.get("latest_snapshot_date"):
+        source_type = "latest_daily_overall_progress_snapshot"
+    source_snapshot = source_type == "latest_daily_overall_progress_snapshot"
+
+    def first_number(*values: Any) -> float | None:
+        for value in values:
+            parsed = _optional_number(value)
+            if parsed is not None:
+                return parsed
+        return None
+
+    rows: list[dict[str, Any]] = []
     for raw in raw_rows[:100]:
         if not isinstance(raw, dict):
             continue
         description = _clean_text(raw.get("description"), 250)
-        if not description or description.lower() in {"total", "total overall"}:
+        if not description or description.casefold() in {"total", "total overall"}:
             continue
-        previous = _number(raw.get("previous"))
-        this_month = _number(raw.get(
-            "this_month",
-            raw.get("this_week", raw.get("this_period", raw.get("this_period_actual"))),
-        ))
-        to_date = previous + this_month
-        plan = _number(raw.get("plan", raw.get("cumulative_to_date_plan")))
+        baseline_row = baseline_by_description.get(description.casefold(), {})
+        if not isinstance(baseline_row, Mapping):
+            baseline_row = {}
+
+        def source_or_review(source_values: tuple[Any, ...], review_values: tuple[Any, ...]) -> float | None:
+            # For an authoritative Daily snapshot, source fields win even when an
+            # older saved draft/review payload already contains v3.3.8-derived
+            # values. Manual progress keeps reviewer values first.
+            return first_number(
+                *(source_values + review_values if source_snapshot else review_values + source_values)
+            )
+
+        previous = source_or_review(
+            (
+                baseline_row.get("previous"),
+                baseline_row.get("previous_actual"),
+                baseline_row.get("cumulative_previous_actual"),
+            ),
+            (
+                raw.get("previous"),
+                raw.get("previous_actual"),
+                raw.get("cumulative_previous_actual"),
+            ),
+        )
+        this_month = source_or_review(
+            (
+                baseline_row.get("this_month"),
+                baseline_row.get("this_week"),
+                baseline_row.get("this_period"),
+                baseline_row.get("this_period_actual"),
+            ),
+            (
+                raw.get("this_month"),
+                raw.get("this_week"),
+                raw.get("this_period"),
+                raw.get("this_period_actual"),
+            ),
+        )
+        to_date = source_or_review(
+            (
+                baseline_row.get("to_date"),
+                baseline_row.get("cumulative"),
+                baseline_row.get("cumulative_to_date_actual"),
+            ),
+            (
+                raw.get("to_date"),
+                raw.get("cumulative"),
+                raw.get("cumulative_to_date_actual"),
+            ),
+        )
+        if to_date is None and previous is not None and this_month is not None:
+            to_date = previous + this_month
+
+        plan = source_or_review(
+            (
+                baseline_row.get("plan"),
+                baseline_row.get("to_date_plan"),
+                baseline_row.get("cumulative_to_date_plan"),
+            ),
+            (
+                raw.get("plan"),
+                raw.get("to_date_plan"),
+                raw.get("cumulative_to_date_plan"),
+            ),
+        )
+        variance = source_or_review(
+            (baseline_row.get("variance"), baseline_row.get("deviation")),
+            (raw.get("variance"), raw.get("deviation")),
+        )
+        if variance is None and to_date is not None and plan is not None:
+            variance = to_date - plan
+
+        weight = first_number(
+            raw.get("weight"), raw.get("weight_factor"),
+            baseline_row.get("weight"), baseline_row.get("weight_factor"),
+        )
+        is_total = bool(raw.get("is_total", baseline_row.get("is_total", False))) or (
+            description.casefold() == "overall progress"
+        )
         rows.append({
             "description": description,
-            "weight": max(0.0, _number(raw.get("weight", raw.get("weight_factor")))),
-            "previous": round(previous, 4),
-            "this_month": round(this_month, 4),
-            "to_date": round(to_date, 4),
-            "plan": round(plan, 4),
-            "variance": round(to_date - plan, 4),
+            "weight": round(max(0.0, weight), 4) if weight is not None else None,
+            "previous": round(previous, 4) if previous is not None else None,
+            "this_month": round(this_month, 4) if this_month is not None else None,
+            "to_date": round(to_date, 4) if to_date is not None else None,
+            "plan": round(plan, 4) if plan is not None else None,
+            "variance": round(variance, 4) if variance is not None else None,
+            "is_total": is_total,
         })
 
-    weight_total = sum(row["weight"] for row in rows)
-    if rows and weight_total > 0:
+    # A Daily source snapshot already contains its authoritative OVERALL PROGRESS
+    # row. Do not append a second, derived ``Total Overall`` row. Manual progress
+    # without an explicit total can still use the weighted fallback.
+    has_explicit_total = any(
+        row.get("is_total") or _clean_text(row.get("description"), 250).casefold() == "overall progress"
+        for row in rows
+    )
+    detail_rows = [row for row in rows if not row.get("is_total")]
+    weight_total = sum(
+        float(row.get("weight"))
+        for row in detail_rows
+        if _optional_number(row.get("weight")) is not None
+    )
+    if detail_rows and weight_total > 0 and not has_explicit_total:
         def weighted(key: str) -> float:
-            return sum(row[key] * row["weight"] / 100.0 for row in rows)
+            return sum(
+                float(row.get(key) or 0.0) * float(row.get("weight") or 0.0) / 100.0
+                for row in detail_rows
+            )
 
         total_previous = weighted("previous")
         total_this = weighted("this_month")
-        total_to_date = total_previous + total_this
+        total_to_date = weighted("to_date")
         total_plan = weighted("plan")
         rows.append({
             "description": "Total Overall",
@@ -3514,7 +3645,25 @@ def _normalize_progress(review: Any) -> dict[str, Any]:
             "variance": round(total_to_date - total_plan, 4),
             "is_total": True,
         })
-    return {"rows": rows}
+
+    result: dict[str, Any] = {"rows": rows}
+    metadata_aliases = {
+        "source_period_label": ("source_period_label",),
+        "source_snapshot_date": ("source_snapshot_date", "latest_snapshot_date"),
+        "source_type": ("source_type",),
+    }
+    for key, aliases in metadata_aliases.items():
+        value = review_map.get(key)
+        if value in (None, ""):
+            for alias in aliases:
+                value = baseline_map.get(alias)
+                if value not in (None, ""):
+                    break
+        if key == "source_type" and value in (None, "") and source_snapshot:
+            value = "latest_daily_overall_progress_snapshot"
+        if value not in (None, ""):
+            result[key] = value
+    return result
 
 
 
@@ -3585,7 +3734,16 @@ def _apply_review(draft: dict[str, Any], review: dict[str, Any], *, actor: str =
     value["report_mode"] = mode
     value["status"] = value["report_mode"]
     value["executive_summary"] = _clean_text(review.get("executive_summary", value.get("executive_summary")))
-    value["progress"] = _normalize_progress(review.get("progress", value.get("progress", {})))
+    progress_baseline = value.get("progress", {})
+    overall_progress_baseline = value.get("overall_progress")
+    if isinstance(overall_progress_baseline, dict) and overall_progress_baseline.get("available"):
+        # Recover from the authoritative Daily snapshot even when an older saved
+        # v3.3.8 draft already contains recalculated progress values.
+        progress_baseline = overall_progress_baseline
+    value["progress"] = _normalize_progress(
+        review.get("progress", value.get("progress", {})),
+        baseline=progress_baseline,
+    )
 
     current_safety = value.get("safety") if isinstance(value.get("safety"), dict) else {}
     safety_review = review.get("safety") if isinstance(review.get("safety"), dict) else {}
