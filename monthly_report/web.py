@@ -822,6 +822,14 @@ def _activity_match_text(value: Any) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
 
 
+def _activity_text_similarity(left: Any, right: Any) -> float:
+    left_tokens = set(_activity_match_text(left).split())
+    right_tokens = set(_activity_match_text(right).split())
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / max(1, len(left_tokens | right_tokens))
+
+
 def _activity_equipment_ids(value: Any) -> set[str]:
     result: set[str] = set()
     text = _clean_text(value, 2_000)
@@ -839,14 +847,21 @@ def _is_generic_activity_area(value: Any) -> bool:
     return _clean_text(value, 200).casefold() in _GENERIC_ACTIVITY_AREAS
 
 
-def _align_ai_activity_rows(value: Any, draft: Mapping[str, Any]) -> list[dict[str, str]]:
+def _align_ai_activity_rows(
+    value: Any,
+    draft: Mapping[str, Any],
+    *,
+    preserve_unmatched_baseline: bool = False,
+) -> list[dict[str, str]]:
     """Polish narrative while keeping deterministic Area + Workstream ownership.
 
-    AI/review text may change wording, but it may not move a source activity to a
-    different area or return a different workstream.  Matching first uses the exact
-    deterministic metadata pair and then falls back to the next unused baseline row
-    in deterministic order.  Extra unmatched AI rows are discarded rather than
-    becoming unsupported client-facing groups.
+    The deterministic Area + Workstream pair is authoritative. AI rows are matched
+    only to the same area (and, when supplied, the same workstream); cross-area
+    positional fallback is deliberately forbidden. This prevents a valid sentence
+    such as ``MA 72 Terminasi ...`` from being attached to ``MA 42/59/67`` merely
+    because Claude changed row order. When ``preserve_unmatched_baseline`` is true,
+    AI becomes a wording overlay: deterministic groups that Claude did not return
+    remain in the report unchanged.
     """
 
     rows = _clean_activity_rows(value, maximum_items=250)
@@ -863,51 +878,94 @@ def _align_ai_activity_rows(value: Any, draft: Mapping[str, Any]) -> list[dict[s
         else []
     )
     baseline = _clean_activity_rows(baseline_raw, maximum_items=250)
-    if not rows or not baseline:
+    if not baseline:
         return rows
-
-    by_key: dict[tuple[str, str], list[int]] = {}
-    for index, base in enumerate(baseline):
-        key = (
-            _activity_match_text(base.get("area")),
-            _activity_match_text(base.get("workstream")),
-        )
-        by_key.setdefault(key, []).append(index)
+    if not rows:
+        return baseline if preserve_unmatched_baseline else rows
 
     used: set[int] = set()
-    aligned: list[dict[str, str]] = []
-    for row_index, row in enumerate(rows):
-        requested_key = (
-            _activity_match_text(row.get("area")),
-            _activity_match_text(row.get("workstream")),
-        )
-        base_index = next((idx for idx in by_key.get(requested_key, []) if idx not in used), None)
-        if base_index is None and row_index < len(baseline) and row_index not in used:
-            base_index = row_index
-        if base_index is None:
-            base_index = next((idx for idx in range(len(baseline)) if idx not in used), None)
-        if base_index is None:
+    replacements: dict[int, dict[str, str]] = {}
+    aligned_order: list[int] = []
+
+    def candidates_for(row: Mapping[str, Any]) -> list[int]:
+        requested_area = _activity_match_text(row.get("area"))
+        requested_workstream = _activity_match_text(row.get("workstream"))
+        candidates = [idx for idx in range(len(baseline)) if idx not in used]
+        if requested_area and not _is_generic_activity_area(row.get("area")):
+            candidates = [
+                idx for idx in candidates
+                if _activity_match_text(baseline[idx].get("area")) == requested_area
+            ]
+            if requested_workstream:
+                exact = [
+                    idx for idx in candidates
+                    if _activity_match_text(baseline[idx].get("workstream")) == requested_workstream
+                ]
+                # v3.3.7 AI rows carry the deterministic workstream explicitly.
+                # If that pair no longer exists, the suggestion is stale or moved
+                # and must not be attached to a different workstream in the area.
+                candidates = exact
+        elif requested_workstream:
+            candidates = [
+                idx for idx in candidates
+                if _activity_match_text(baseline[idx].get("workstream")) == requested_workstream
+            ]
+        return candidates
+
+    for row in rows:
+        candidates = candidates_for(row)
+        if not candidates:
+            # A non-generic AI/review area that does not exist in the deterministic
+            # baseline is unsupported. Do not move it to the next row by position.
+            if row.get("area") and not _is_generic_activity_area(row.get("area")):
+                continue
+            candidates = [idx for idx in range(len(baseline)) if idx not in used]
+        if not candidates:
             break
 
+        # Multiple workstreams can exist in one area. Pick the closest deterministic
+        # body instead of relying on row order; exact workstream metadata from the
+        # v3.3.7 AI schema normally makes this a single candidate.
+        base_index = max(
+            candidates,
+            key=lambda idx: (
+                _activity_text_similarity(row.get("text"), baseline[idx].get("text")),
+                -idx,
+            ),
+        )
         used.add(base_index)
         base = baseline[base_index]
         area = _clean_text(base.get("area"), 200)
         workstream = _clean_text(base.get("workstream"), 200)
         text = _canonical_activity_body(row.get("text"), area=area, workstream=workstream)
-        if not text:
-            text = _canonical_activity_body(base.get("text"), area=area, workstream=workstream)
+        base_text = _canonical_activity_body(base.get("text"), area=area, workstream=workstream)
+
+        # A polished sentence may not assert a different explicit MA ownership or
+        # be semantically unrelated to the deterministic group. Zero token overlap
+        # is a strong signal of row-order drift; preserving the baseline is safer
+        # than publishing a fluent sentence under the wrong workstream.
+        unrelated = bool(text and base_text and _activity_text_similarity(text, base_text) == 0.0)
+        if not text or _activity_area_conflicts(area, text) or unrelated:
+            text = base_text
         if not text:
             continue
 
-        aligned_row = {"area": area, "text": text}
+        aligned_row: dict[str, str] = {"area": area, "text": text}
         if workstream:
             aligned_row["workstream"] = workstream
         status = _clean_text(row.get("status"), 100)
         if status and status.casefold() not in text.casefold():
             aligned_row["status"] = status
-        aligned.append(aligned_row)
+        replacements[base_index] = aligned_row
+        aligned_order.append(base_index)
 
-    return aligned
+    if preserve_unmatched_baseline:
+        result: list[dict[str, str]] = []
+        for idx, base in enumerate(baseline):
+            result.append(replacements.get(idx, base))
+        return result
+
+    return [replacements[idx] for idx in aligned_order if idx in replacements]
 
 
 def _source_activity_status_rows(draft: dict[str, Any]) -> list[dict[str, str]]:
@@ -1088,7 +1146,7 @@ def _record_date(record: dict[str, Any]) -> str:
 # Client-facing deterministic fallback summarisation.  AI may refine this after
 # Source Data Validation, but the baseline Weekly/Monthly PDF should already read
 # like a period report rather than seven/thirty Daily Reports concatenated together.
-_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/6"
+_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/7"
 
 _PERIOD_ACTIVITY_TAG_RE = re.compile(
     r"\(\s*\d{1,3}\s*-\s*[A-Za-z]{2,}\s*-\s*[^)]*\)", re.IGNORECASE
@@ -1121,9 +1179,9 @@ _PERIOD_ACTIVITY_FAMILY_RULES: tuple[
             ("packing", 4.0), ("o ring", 2.0), ("o-ring", 2.0),
             ("pressure gauge", 3.0), ("seal tape", 3.0),
             ("bearing", 2.0), ("alignment", 3.0), ("fabrication", 2.5),
-            ("trafo", 3.0), ("transformer", 3.0), ("base frame", 3.0),
-            ("baseframe", 3.0), ("welding support", 2.5),
-            ("filter replacement", 3.0),
+            ("trafo", 3.5), ("travo", 3.5), ("transformer", 3.5),
+            ("base frame", 3.0), ("baseframe", 3.0), ("welding support", 2.5),
+            ("stopper", 2.5), ("klem", 2.5), ("filter replacement", 3.0),
         ),
     ),
     (
@@ -1157,9 +1215,12 @@ _PERIOD_ACTIVITY_FAMILY_RULES: tuple[
             ("junction box", 3.5), ("flexible conduit", 3.5),
             ("connect cable", 3.0), ("termination", 3.0),
             ("grounding", 3.5), ("ground rod", 4.0), ("earthbar", 4.0),
-            ("wire marker", 3.5), ("glanding", 3.0), ("splicing", 3.0),
-            ("cable ladder", 3.0), ("pulling cable", 3.0), ("puling cable", 3.0),
-            ("busbar", 2.5), ("lighting", 2.0), ("panel", 1.5),
+            ("wire marker", 3.5), ("glanding", 3.0), ("gland motor", 3.5),
+            ("splicing", 3.0), ("cable ladder", 3.0), ("cover ladder", 2.5),
+            ("pulling cable", 3.0), ("puling cable", 3.0), ("wire connection", 3.5),
+            ("speed sensor", 3.5), ("emergency stop", 3.5), ("pull cord", 3.0),
+            ("terminasi", 3.0), ("busbar", 2.5), ("lighting", 2.0),
+            ("lamp", 2.0), (" led ", 2.0), ("panel", 1.5),
             ("cable", 2.0), ("rewir", 3.0),
         ),
     ),
@@ -1188,7 +1249,7 @@ _PERIOD_ACTIVITY_THEME_RULES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]]
         ("turning-gear motor alignment", ("turning gear motor alignment",)),
         ("packing replacement", ("packing",)),
         ("pressure-gauge sealing work", ("pressure gauge", "seal tape")),
-        ("transformer and base-frame work", ("trafo", "transformer", "base frame", "baseframe")),
+        ("transformer and base-frame work", ("trafo", "travo", "transformer", "base frame", "baseframe")),
         ("fabrication and support work", ("fabrication support", "welding support")),
         ("mechanical alignment", ("alignment",)),
     ),
@@ -1227,9 +1288,11 @@ _PERIOD_ACTIVITY_THEME_RULES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]]
         ("grounding and earthing works", ("grounding", "ground rod", "earthbar")),
         ("cable routing and pulling", ("pulling cable", "puling cable", "cable ladder", "routing cable")),
         ("wire-marker and panel wiring", ("wire marker", "wiring connection")),
-        ("splicing and glanding", ("splicing", "glanding", "cable gland")),
-        ("lighting and busbar installation", ("lighting", "busbar")),
-        ("termination work", ("termination",)),
+        ("splicing and glanding", ("splicing", "glanding", "cable gland", "gland motor")),
+        ("lighting and busbar installation", ("lighting", "lamp", " led ", "busbar")),
+        ("sensor / emergency-stop installation", ("speed sensor", "emergency stop", "pull cord")),
+        ("wire connection and panel work", ("wire connection", "panel power", "lcp", "plc")),
+        ("termination work", ("termination", "terminasi")),
     ),
     "Valve Mechanical": (
         ("valve assembly and installation", ("reassembl", "install valve", "seat rubber")),
@@ -1269,6 +1332,10 @@ def _area_sort_key(value: Any) -> tuple[str, int, str]:
 
 _LEADING_MA_AREA_RE = re.compile(
     r"^\s*MA\s*[- ]?(?P<body>\d{1,3}(?:\s*(?:/|&|,|\band\b)\s*(?:MA\s*)?[- ]?\d{1,3}){0,5})\b",
+    re.IGNORECASE,
+)
+_LEADING_MA_HYPHEN_PAIR_RE = re.compile(
+    r"^\s*MA\s+(?P<left>\d{1,2})\s*-\s*(?P<right>\d{1,2})(?=\s+[A-Za-z])",
     re.IGNORECASE,
 )
 
@@ -1324,21 +1391,54 @@ def _reporting_activity_area(source_area: Any, description: Any) -> str:
 
     Current Electrical Daily Reports sometimes use a crew/composite heading such as
     ``MA 42/68`` while an individual activity explicitly begins with ``MA 72`` or
-    ``MA 68``.  For client-facing aggregation only, an explicit *leading* MA label
-    wins.  We deliberately do not scan arbitrary mentions such as ``from MA 59 to
-    MA 42`` because those describe routing, not ownership.  Turbine/Generator and
-    other named areas remain exactly as supplied.
+    ``MA 68``. For client-facing aggregation only, an explicit *leading* MA label
+    wins. A narrow ``MA 85-86 <verb>`` form is also accepted because that notation
+    appears in the Electrical source; equipment identifiers such as ``MA 42-353``
+    are not treated as area pairs. We deliberately do not scan arbitrary mentions
+    such as ``from MA 59 to MA 42`` because those describe routing, not ownership.
+    Turbine/Generator and other named areas remain exactly as supplied.
     """
 
     source = _canonical_source_area_label(source_area)
     if not source.casefold().startswith("ma"):
         return source
     text = _clean_text(description, 2_000)
+    pair = _LEADING_MA_HYPHEN_PAIR_RE.match(text)
+    if pair:
+        explicit = _canonical_numeric_ma_area([pair.group("left"), pair.group("right")])
+        if explicit:
+            return explicit
     match = _LEADING_MA_AREA_RE.match(text)
     if not match:
         return source
     explicit = _canonical_numeric_ma_area(re.findall(r"\d{1,3}", match.group("body")))
     return explicit or source
+
+
+def _numeric_ma_tokens(value: Any) -> set[str]:
+    text = _clean_text(value, 255)
+    if not text.casefold().startswith("ma"):
+        return set()
+    return {str(int(token)) for token in re.findall(r"\d{1,3}", text)}
+
+
+def _leading_numeric_ma_tokens(value: Any) -> set[str]:
+    text = _clean_text(value, 2_000)
+    pair = _LEADING_MA_HYPHEN_PAIR_RE.match(text)
+    if pair:
+        return {str(int(pair.group("left"))), str(int(pair.group("right")))}
+    match = _LEADING_MA_AREA_RE.match(text)
+    if not match:
+        return set()
+    return {str(int(token)) for token in re.findall(r"\d{1,3}", match.group("body"))}
+
+
+def _activity_area_conflicts(area: Any, text: Any) -> bool:
+    """Return True only for an explicit leading MA ownership contradiction."""
+
+    expected = _numeric_ma_tokens(area)
+    explicit = _leading_numeric_ma_tokens(text)
+    return bool(expected and explicit and not explicit.issubset(expected))
 
 
 def _normalised_executive_area_tokens(value: Any) -> list[str]:
@@ -1408,6 +1508,19 @@ def _period_activity_family(value: Any) -> str:
     text = _clean_text(value, 2_000).casefold()
     if not text:
         return "Other Site Work"
+
+    # Explicit test/commissioning evidence must not be buried under mechanical or
+    # electrical installation keywords that happen to occur in the same source row.
+    # This priority is conservative: every trigger is a literal testing term from
+    # the Daily Reports and does not infer a test from ordinary installation work.
+    testing_markers = (
+        "loop test", "calibrat", "commission", "function test", "leak test",
+        "continuity", "ground resistance", "earth test", "earth tes",
+        "megger", "merger test", "running test",
+    )
+    if any(marker in text for marker in testing_markers):
+        return "Testing & Commissioning"
+
     ranked: list[tuple[float, int, str]] = []
     for index, (label, rules) in enumerate(_PERIOD_ACTIVITY_FAMILY_RULES):
         score = sum(weight for needle, weight in rules if needle in text)
@@ -1631,6 +1744,12 @@ def _field_evidence_terms(activities: Any) -> list[str]:
         ("loop testing", "loop test"),
         ("function testing", "function test"),
         ("continuity checking", "continuity"),
+        ("ground-resistance testing", "ground resistance"),
+        ("ground-resistance testing", "grounding resistance"),
+        ("ground-resistance testing", "resistance ground rod"),
+        ("megger testing", "megger"),
+        ("megger testing", "merger test"),
+        ("running test support", "running test"),
         ("regulators", "regulator"),
         ("tubing", "tubing"),
         ("solenoids", "solenoid"),
@@ -1644,21 +1763,29 @@ def _field_evidence_terms(activities: Any) -> list[str]:
 
 
 def _deterministic_engineering_summary(activities: Any) -> str:
-    terms = [term for term in _field_evidence_terms(activities) if term in {
-        "calibration", "loop testing", "function testing", "continuity checking"
-    }]
+    engineering_terms = {
+        "calibration", "loop testing", "function testing", "continuity checking",
+        "ground-resistance testing", "megger testing", "running test support",
+    }
+    terms: list[str] = []
+    for term in _field_evidence_terms(activities):
+        if term in engineering_terms and term not in terms:
+            terms.append(term)
     if not terms:
         return "No separate engineering deliverable register was supplied in the available Daily Reports."
     return (
-        "No separate engineering deliverable register was supplied. Daily Reports record field execution support "
-        f"including {', '.join(terms)}; these observations do not establish engineering deliverable progress."
+        "No separate engineering deliverable register was supplied. Field evidence recorded in the Daily Reports "
+        f"included {_english_join(terms)}. Formal engineering deliverable or drawing status cannot be determined "
+        "from the available Daily Reports."
     )
 
 
 def _deterministic_procurement_summary(activities: Any) -> str:
-    materials = [term for term in _field_evidence_terms(activities) if term not in {
-        "calibration", "loop testing", "function testing", "continuity checking"
-    }]
+    engineering_terms = {
+        "calibration", "loop testing", "function testing", "continuity checking",
+        "ground-resistance testing", "megger testing", "running test support",
+    }
+    materials = [term for term in _field_evidence_terms(activities) if term not in engineering_terms]
     if not materials:
         return "No separate procurement, equipment-delivery, or shipment register was supplied in the available Daily Reports."
     return (
@@ -5406,10 +5533,12 @@ def register_monthly_routes(
                     continue
                 text = _claim_text(row)
                 area = _clean_text(row.get("area"), 200)
+                workstream = _clean_text(row.get("workstream"), 200)
                 if text:
                     references = _clean_ai_references(row)
                     current_activities.append({
                         "area": area,
+                        "workstream": workstream,
                         "text": text,
                         **references,
                     })
@@ -5417,7 +5546,9 @@ def register_monthly_routes(
 
             # Claude may polish wording, but deterministic Area + Workstream
             # grouping remains authoritative and is restored before review.
-            current_activities = _align_ai_activity_rows(current_activities, draft)
+            current_activities = _align_ai_activity_rows(
+                current_activities, draft, preserve_unmatched_baseline=True
+            )
             # Preserve deterministic source status even when Claude omits it.
             current_activities = _enrich_activity_statuses(current_activities, draft)
 
@@ -5561,6 +5692,7 @@ def register_monthly_routes(
                 ai_activities = _align_ai_activity_rows(
                     copy.deepcopy(accepted["current_activities"]),
                     draft,
+                    preserve_unmatched_baseline=True,
                 )
                 ai_activities = _enrich_activity_statuses(ai_activities, draft)
                 site["this_month_activities"] = ai_activities
