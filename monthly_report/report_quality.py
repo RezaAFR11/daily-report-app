@@ -7,6 +7,18 @@ import math
 import re
 
 
+_ACTIVITY_WORKSTREAM_PREFIXES = (
+    "Oil System & Flushing",
+    "Mechanical Maintenance",
+    "Instrumentation & Electrical",
+    "Actuator & Pneumatic",
+    "Valve Mechanical",
+    "Testing & Commissioning",
+    "Standby / Coordination",
+    "Other Site Work",
+)
+
+
 def _as_list(value: Any) -> list[Any]:
     if value in (None, ""):
         return []
@@ -158,6 +170,22 @@ def _client_text_issues(report: Mapping[str, Any]) -> list[str]:
         if isinstance(row, Mapping) and contamination.search(str(row.get("caption") or "")):
             issues.append("Photo caption contains repeated Daily Report header/footer boilerplate.")
             break
+
+    site = report.get("site") if isinstance(report.get("site"), Mapping) else {}
+    current = (
+        site.get("this_week_activities")
+        or site.get("this_month_activities")
+        or report.get("current_period_activities")
+        or []
+    )
+    for row in _as_list(current):
+        if not isinstance(row, Mapping):
+            continue
+        text = str(row.get("text", row.get("description", "")) or "").strip()
+        for label in _ACTIVITY_WORKSTREAM_PREFIXES:
+            if text.casefold().startswith((label + ":").casefold()):
+                issues.append("Activity narrative contains a duplicated/nested workstream label.")
+                return issues
     return issues
 
 
