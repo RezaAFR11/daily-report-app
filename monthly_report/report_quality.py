@@ -325,6 +325,35 @@ def _deterministic_summary_issues(report: Mapping[str, Any]) -> tuple[list[str],
         info.append("Deterministic narrative baseline is available; AI enhancement is optional.")
     return warnings, info
 
+
+def _periodic_source_propagation_issues(report: Mapping[str, Any]) -> list[str]:
+    """Catch source-backed period facts that disappeared before rendering."""
+
+    issues: list[str] = []
+    overall = report.get("overall_progress")
+    if isinstance(overall, Mapping) and overall.get("available") and not _has_progress_rows(report.get("progress")):
+        issues.append("Overall Progress is available from Daily Report source data but is not present in the rendered progress model.")
+
+    report_type = str(report.get("report_type") or "").strip().lower()
+    if report_type == "weekly":
+        period = report.get("period") if isinstance(report.get("period"), Mapping) else {}
+        period_end = str(period.get("end", period.get("date_to", "")) or "").strip()
+        tomorrow = [row for row in _as_list(report.get("tomorrow_activities")) if isinstance(row, Mapping)]
+        period_end_tomorrow = [row for row in tomorrow if str(row.get("source_date") or "").strip() == period_end]
+        site = report.get("site") if isinstance(report.get("site"), Mapping) else {}
+        lookahead = _as_list(site.get("next_week_activities", site.get("next_period_activities")))
+        if period_end_tomorrow and not lookahead:
+            issues.append("The period-end Daily Report contains Activity Tomorrow items, but Weekly Planned Activities Next Week is empty.")
+
+    remarks = [row for row in _as_list(report.get("remarks")) if isinstance(row, Mapping) and str(row.get("text") or "").strip()]
+    if remarks:
+        site = report.get("site") if isinstance(report.get("site"), Mapping) else {}
+        findings = _as_list(site.get("key_findings"))
+        if not findings:
+            issues.append("Daily Report remarks/findings are available but are not surfaced separately from formal constraints.")
+    return issues
+
+
 def _manual_source_issues(report: Mapping[str, Any]) -> list[str]:
     issues: list[str] = []
     sections = ["engineering", "procurement", "equipment_delivery", "shipments", "safety"]
@@ -425,6 +454,10 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
                 "code": "photo_date_coverage_complete",
                 "message": f"Photo Documentation retains extractable photo evidence for {retained_count}/{source_count} source date(s).",
             })
+
+    for message in _periodic_source_propagation_issues(report):
+        target = blockers if for_final else warnings
+        target.append({"code": "periodic_source_propagation", "message": message})
 
     deterministic_warnings, deterministic_info = _deterministic_summary_issues(report)
     for message in deterministic_warnings:
