@@ -717,18 +717,25 @@ def _list_text(value: Any, maximum_items: int = 500) -> list[str]:
 
 
 def _clean_activity_rows(value: Any, maximum_items: int = 250) -> list[dict[str, str]]:
-    """Keep AI-condensed activity bullets structured by area for rendering."""
+    """Keep condensed activity bullets structured by canonical Area + Workstream.
+
+    ``text`` is always stored as the narrative body only.  Generated labels such as
+    ``Other Site Work:`` or a repeated workstream prefix are stripped here so the
+    renderer can own the single ``Area – Workstream:`` presentation layer.
+    """
 
     rows = value if isinstance(value, list) else []
     result: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     for item in rows[:maximum_items]:
         status = ""
+        workstream = ""
         if isinstance(item, str):
             area = ""
             text = _clean_text(item, 2_000)
         elif isinstance(item, dict):
             area = _clean_text(item.get("area"), 200)
+            workstream = _clean_text(item.get("workstream"), 200)
             text = _clean_text(
                 item.get("text", item.get("activity", item.get("description", ""))),
                 2_000,
@@ -736,20 +743,71 @@ def _clean_activity_rows(value: Any, maximum_items: int = 250) -> list[dict[str,
             status = _clean_text(item.get("status"), 100)
         else:
             continue
+        text = _canonical_activity_body(text, area=area, workstream=workstream)
         if not text or text.casefold() == "not supplied":
             continue
-        key = (area.casefold(), text.casefold())
+        key = (area.casefold(), workstream.casefold(), text.casefold())
         if key in seen:
             continue
         seen.add(key)
         row = {"area": area, "text": text}
-        workstream = _clean_text(item.get("workstream"), 200) if isinstance(item, dict) else ""
         if workstream:
             row["workstream"] = workstream
         if status and status.casefold() not in text.casefold():
             row["status"] = status
         result.append(row)
     return result
+
+
+_CANONICAL_ACTIVITY_WORKSTREAMS = (
+    "Oil System & Flushing",
+    "Mechanical Maintenance",
+    "Instrumentation & Electrical",
+    "Actuator & Pneumatic",
+    "Valve Mechanical",
+    "Testing & Commissioning",
+    "Standby / Coordination",
+    "Other Site Work",
+)
+
+
+def _canonical_activity_body(value: Any, *, area: Any = "", workstream: Any = "") -> str:
+    """Return activity prose without duplicated Area/workstream presentation labels."""
+
+    text = _clean_text(value, 2_000)
+    if not text:
+        return ""
+    area_text = _clean_text(area, 200)
+    workstream_text = _clean_text(workstream, 200)
+
+    # Claude/reviewed drafts can occasionally return the whole display bullet in
+    # ``text`` even though ``area`` and ``workstream`` already carry those labels.
+    # Remove only an exact leading metadata prefix; source prose elsewhere remains
+    # untouched.
+    if area_text:
+        for dash in (" – ", " - ", ": "):
+            prefix = area_text + dash
+            if text.casefold().startswith(prefix.casefold()):
+                text = text[len(prefix):].lstrip()
+                break
+
+    # Strip repeated generated workstream labels.  Iterate because old drafts can
+    # contain chains such as ``Instrumentation & Electrical: Other Site Work:``.
+    ordered = []
+    if workstream_text:
+        ordered.append(workstream_text)
+    ordered.extend(label for label in _CANONICAL_ACTIVITY_WORKSTREAMS if label not in ordered)
+    for _ in range(4):
+        changed = False
+        for label in ordered:
+            prefix = label + ":"
+            if text.casefold().startswith(prefix.casefold()):
+                text = text[len(prefix):].lstrip(" -–:;")
+                changed = True
+                break
+        if not changed:
+            break
+    return text.strip()
 
 
 _ACTIVITY_EQUIPMENT_ID_RE = re.compile(
@@ -782,11 +840,13 @@ def _is_generic_activity_area(value: Any) -> bool:
 
 
 def _align_ai_activity_rows(value: Any, draft: Mapping[str, Any]) -> list[dict[str, str]]:
-    """Keep Claude wording while restoring deterministic Area + Workstream metadata.
+    """Polish narrative while keeping deterministic Area + Workstream ownership.
 
-    Claude is allowed to polish the bullet text, but the deterministic compiler remains
-    authoritative for grouping.  This prevents a missing model ``area`` value from
-    becoming an orphan ``Site`` heading and keeps 5.2 traceable to MA-xx work fronts.
+    AI/review text may change wording, but it may not move a source activity to a
+    different area or return a different workstream.  Matching first uses the exact
+    deterministic metadata pair and then falls back to the next unused baseline row
+    in deterministic order.  Extra unmatched AI rows are discarded rather than
+    becoming unsupported client-facing groups.
     """
 
     rows = _clean_activity_rows(value, maximum_items=250)
@@ -806,41 +866,48 @@ def _align_ai_activity_rows(value: Any, draft: Mapping[str, Any]) -> list[dict[s
     if not rows or not baseline:
         return rows
 
-    baseline_areas = {
-        _clean_text(item.get("area"), 200)
-        for item in baseline
-        if not _is_generic_activity_area(item.get("area"))
-    }
+    by_key: dict[tuple[str, str], list[int]] = {}
+    for index, base in enumerate(baseline):
+        key = (
+            _activity_match_text(base.get("area")),
+            _activity_match_text(base.get("workstream")),
+        )
+        by_key.setdefault(key, []).append(index)
 
-    for index, row in enumerate(rows):
-        area = _clean_text(row.get("area"), 200)
-        workstream = _clean_text(row.get("workstream"), 200)
-        text_value = _clean_text(row.get("text"), 2_000)
+    used: set[int] = set()
+    aligned: list[dict[str, str]] = []
+    for row_index, row in enumerate(rows):
+        requested_key = (
+            _activity_match_text(row.get("area")),
+            _activity_match_text(row.get("workstream")),
+        )
+        base_index = next((idx for idx in by_key.get(requested_key, []) if idx not in used), None)
+        if base_index is None and row_index < len(baseline) and row_index not in used:
+            base_index = row_index
+        if base_index is None:
+            base_index = next((idx for idx in range(len(baseline)) if idx not in used), None)
+        if base_index is None:
+            break
 
-        # First recover MA-xx directly from equipment tags when the AI omitted area.
-        if _is_generic_activity_area(area):
-            prefixes = {tag.split("-", 1)[0] for tag in _activity_equipment_ids(text_value)}
-            if len(prefixes) == 1:
-                candidate = f"MA-{next(iter(prefixes))}"
-                if candidate in baseline_areas:
-                    area = candidate
+        used.add(base_index)
+        base = baseline[base_index]
+        area = _clean_text(base.get("area"), 200)
+        workstream = _clean_text(base.get("workstream"), 200)
+        text = _canonical_activity_body(row.get("text"), area=area, workstream=workstream)
+        if not text:
+            text = _canonical_activity_body(base.get("text"), area=area, workstream=workstream)
+        if not text:
+            continue
 
-        # v3.3 asks Claude to preserve deterministic order.  If it still omits area
-        # or workstream, restore those fields from the corresponding deterministic
-        # Area + Workstream row rather than inventing a generic group.
-        base = baseline[index] if index < len(baseline) else {}
-        if _is_generic_activity_area(area):
-            base_area = _clean_text(base.get("area"), 200)
-            if not _is_generic_activity_area(base_area):
-                area = base_area
-        if not workstream:
-            workstream = _clean_text(base.get("workstream"), 200)
-
-        row["area"] = area
+        aligned_row = {"area": area, "text": text}
         if workstream:
-            row["workstream"] = workstream
+            aligned_row["workstream"] = workstream
+        status = _clean_text(row.get("status"), 100)
+        if status and status.casefold() not in text.casefold():
+            aligned_row["status"] = status
+        aligned.append(aligned_row)
 
-    return rows
+    return aligned
 
 
 def _source_activity_status_rows(draft: dict[str, Any]) -> list[dict[str, str]]:
@@ -1021,7 +1088,7 @@ def _record_date(record: dict[str, Any]) -> str:
 # Client-facing deterministic fallback summarisation.  AI may refine this after
 # Source Data Validation, but the baseline Weekly/Monthly PDF should already read
 # like a period report rather than seven/thirty Daily Reports concatenated together.
-_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/5"
+_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/6"
 
 _PERIOD_ACTIVITY_TAG_RE = re.compile(
     r"\(\s*\d{1,3}\s*-\s*[A-Za-z]{2,}\s*-\s*[^)]*\)", re.IGNORECASE
@@ -1054,6 +1121,8 @@ _PERIOD_ACTIVITY_FAMILY_RULES: tuple[
             ("packing", 4.0), ("o ring", 2.0), ("o-ring", 2.0),
             ("pressure gauge", 3.0), ("seal tape", 3.0),
             ("bearing", 2.0), ("alignment", 3.0), ("fabrication", 2.5),
+            ("trafo", 3.0), ("transformer", 3.0), ("base frame", 3.0),
+            ("baseframe", 3.0), ("welding support", 2.5),
             ("filter replacement", 3.0),
         ),
     ),
@@ -1066,6 +1135,8 @@ _PERIOD_ACTIVITY_FAMILY_RULES: tuple[
         (
             ("loop test", 5.0), ("calibrat", 5.0), ("commission", 5.0),
             ("function test", 3.0), ("leak test", 3.0), ("continuity", 3.0),
+            ("ground resistance", 4.0), ("earth test", 4.0), ("earth tes", 4.0),
+            ("megger", 4.0), ("merger test", 4.0), ("running test", 3.5),
             ("dcs", 2.0),
         ),
     ),
@@ -1085,6 +1156,10 @@ _PERIOD_ACTIVITY_FAMILY_RULES: tuple[
             ("selector switch", 4.0), ("proximity", 3.5),
             ("junction box", 3.5), ("flexible conduit", 3.5),
             ("connect cable", 3.0), ("termination", 3.0),
+            ("grounding", 3.5), ("ground rod", 4.0), ("earthbar", 4.0),
+            ("wire marker", 3.5), ("glanding", 3.0), ("splicing", 3.0),
+            ("cable ladder", 3.0), ("pulling cable", 3.0), ("puling cable", 3.0),
+            ("busbar", 2.5), ("lighting", 2.0), ("panel", 1.5),
             ("cable", 2.0), ("rewir", 3.0),
         ),
     ),
@@ -1113,6 +1188,8 @@ _PERIOD_ACTIVITY_THEME_RULES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]]
         ("turning-gear motor alignment", ("turning gear motor alignment",)),
         ("packing replacement", ("packing",)),
         ("pressure-gauge sealing work", ("pressure gauge", "seal tape")),
+        ("transformer and base-frame work", ("trafo", "transformer", "base frame", "baseframe")),
+        ("fabrication and support work", ("fabrication support", "welding support")),
         ("mechanical alignment", ("alignment",)),
     ),
     "Standby / Coordination": (
@@ -1123,6 +1200,9 @@ _PERIOD_ACTIVITY_THEME_RULES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]]
         ("DCS loop testing", ("loop test", "dcs")),
         ("local functional testing", ("function test", "local")),
         ("continuity checking", ("continuity",)),
+        ("ground-resistance testing", ("ground resistance", "earth test", "earth tes")),
+        ("megger testing", ("megger", "merger test")),
+        ("running test support", ("running test",)),
         ("leak testing", ("leak test",)),
         ("calibration", ("calibrat",)),
     ),
@@ -1144,6 +1224,11 @@ _PERIOD_ACTIVITY_THEME_RULES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]]
         ("flexible conduit and cable connection", ("flexible conduit", "connect cable")),
         ("junction-box work", ("junction box",)),
         ("proximity bracket fabrication", ("bracket proximity",)),
+        ("grounding and earthing works", ("grounding", "ground rod", "earthbar")),
+        ("cable routing and pulling", ("pulling cable", "puling cable", "cable ladder", "routing cable")),
+        ("wire-marker and panel wiring", ("wire marker", "wiring connection")),
+        ("splicing and glanding", ("splicing", "glanding", "cable gland")),
+        ("lighting and busbar installation", ("lighting", "busbar")),
         ("termination work", ("termination",)),
     ),
     "Valve Mechanical": (
@@ -1180,6 +1265,127 @@ def _area_sort_key(value: Any) -> tuple[str, int, str]:
     if match:
         return (match.group(1).casefold(), int(match.group(2)), match.group(3).casefold())
     return (text.casefold(), 10**9, "")
+
+
+_LEADING_MA_AREA_RE = re.compile(
+    r"^\s*MA\s*[- ]?(?P<body>\d{1,3}(?:\s*(?:/|&|,|\band\b)\s*(?:MA\s*)?[- ]?\d{1,3}){0,5})\b",
+    re.IGNORECASE,
+)
+
+
+def _canonical_numeric_ma_area(numbers: list[str]) -> str:
+    values: list[str] = []
+    for value in numbers:
+        try:
+            number = str(int(value))
+        except (TypeError, ValueError):
+            continue
+        if number not in values:
+            values.append(number)
+    if not values:
+        return ""
+    if len(values) == 1:
+        return f"MA-{values[0]}"
+    return "MA " + "/".join(values)
+
+
+def _canonical_source_area_label(value: Any) -> str:
+    """Normalise harmless MA label formatting without changing source ownership."""
+
+    source = _clean_text(value, 255) or "General"
+    # WPP headings appear with dots or slashes between the same MA numbers.
+    if re.match(r"^MA\s+WPP\b", source, re.IGNORECASE):
+        return re.sub(r"(?<=\d)\.(?=\d)", "/", source)
+
+    match = re.fullmatch(
+        r"MA\s*[- ]?(?P<body>\d{1,3}(?:\s*/\s*(?:\d{1,3}|Pioneer|Jetty)){0,6})",
+        source,
+        re.IGNORECASE,
+    )
+    if not match:
+        return source
+    parts = [part.strip() for part in match.group("body").split("/") if part.strip()]
+    numbers = sorted({int(part) for part in parts if part.isdigit()})
+    names: list[str] = []
+    for part in parts:
+        if part.isdigit():
+            continue
+        name = part.title()
+        if name not in names:
+            names.append(name)
+    if len(numbers) == 1 and not names:
+        return f"MA-{numbers[0]}"
+    body = "/".join([*(str(number) for number in numbers), *names])
+    return f"MA {body}" if body else source
+
+
+def _reporting_activity_area(source_area: Any, description: Any) -> str:
+    """Return a conservative reporting area while preserving source ownership.
+
+    Current Electrical Daily Reports sometimes use a crew/composite heading such as
+    ``MA 42/68`` while an individual activity explicitly begins with ``MA 72`` or
+    ``MA 68``.  For client-facing aggregation only, an explicit *leading* MA label
+    wins.  We deliberately do not scan arbitrary mentions such as ``from MA 59 to
+    MA 42`` because those describe routing, not ownership.  Turbine/Generator and
+    other named areas remain exactly as supplied.
+    """
+
+    source = _canonical_source_area_label(source_area)
+    if not source.casefold().startswith("ma"):
+        return source
+    text = _clean_text(description, 2_000)
+    match = _LEADING_MA_AREA_RE.match(text)
+    if not match:
+        return source
+    explicit = _canonical_numeric_ma_area(re.findall(r"\d{1,3}", match.group("body")))
+    return explicit or source
+
+
+def _normalised_executive_area_tokens(value: Any) -> list[str]:
+    """Flatten numeric composite MA labels only for the Executive opening sentence."""
+
+    area = _clean_text(value, 255)
+    if not area:
+        return []
+    # Named plant areas must remain literal (Turbine Unit 2, Generator Unit 1,
+    # MA WPP, MA Jetty, etc.).
+    match = re.fullmatch(
+        r"MA\s+((?:\d{1,3}\s*/\s*)+(?:\d{1,3}|Pioneer|Jetty))",
+        area,
+        re.IGNORECASE,
+    )
+    if match:
+        result: list[str] = []
+        for token in [part.strip() for part in match.group(1).split("/") if part.strip()]:
+            if token.isdigit():
+                label = f"MA-{int(token)}"
+            else:
+                label = token.title()
+            if label not in result:
+                result.append(label)
+        return result
+    match = re.fullmatch(r"MA\s*[- ]?(\d{1,3}(?:\s*/\s*\d{1,3})+)", area, re.IGNORECASE)
+    if match:
+        return [f"MA-{int(number)}" for number in re.findall(r"\d{1,3}", match.group(1))]
+    match = re.fullmatch(r"MA\s*[- ]?(\d{1,3})", area, re.IGNORECASE)
+    if match:
+        return [f"MA-{int(match.group(1))}"]
+    return [area]
+
+
+def _executive_area_phrase(highlights: Any, *, max_items: int = 12) -> str:
+    tokens: list[str] = []
+    for item in highlights if isinstance(highlights, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        for token in _normalised_executive_area_tokens(item.get("area")):
+            if token and token not in tokens:
+                tokens.append(token)
+    tokens.sort(key=_area_sort_key)
+    if len(tokens) <= max_items:
+        return _english_join(tokens)
+    visible = tokens[:max_items]
+    return ", ".join(visible) + ", and other reported areas"
 
 
 def _period_activity_base(value: Any) -> str:
@@ -1310,7 +1516,8 @@ def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases
         description = _clean_text(raw.get("description", raw.get("text")), 2_000)
         if not description:
             continue
-        area = _clean_text(raw.get("area"), 255) or "General"
+        source_area = _clean_text(raw.get("area"), 255) or "General"
+        area = _reporting_activity_area(source_area, description)
         family = _period_activity_family(description)
         key = (area, family)
         if key not in groups:
@@ -1323,10 +1530,13 @@ def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases
                 "source_report_ids": [],
                 "statuses": [],
                 "equipment_tags": [],
+                "source_areas": [],
                 "occurrence_count": 0,
             }
             group_order.append(key)
         group = groups[key]
+        if source_area not in group["source_areas"]:
+            group["source_areas"].append(source_area)
         group["occurrence_count"] += 1
         base = _period_activity_base(description) or description
         base_key = _activity_match_text(base)
@@ -1386,7 +1596,7 @@ def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases
         if not detail:
             continue
 
-        text = f"{group['family']}: {detail}."
+        text = detail.rstrip(".") + "."
         tags = group["equipment_tags"]
         # A short equipment list improves traceability for one-off work fronts;
         # broad MA-81 groups keep the tag list in metadata to avoid a wall of IDs.
@@ -1402,6 +1612,7 @@ def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases
             "source_dates": group["dates"],
             "source_report_ids": group["source_report_ids"],
             "equipment_tags": tags,
+            "source_areas": list(group.get("source_areas") or []),
             "representative_activities": phrases[:4],
             "themes": themes,
             "occurrence_count": int(group.get("occurrence_count") or len(phrases)),
@@ -1736,6 +1947,8 @@ def _executive_area_highlights(grouped: Any) -> list[dict[str, Any]]:
             "workstreams": [],
             "themes_by_workstream": {},
             "occurrence_count": 0,
+            "active_occurrence_count": 0,
+            "occurrence_by_workstream": {},
             "source_dates": [],
             "source_report_ids": [],
         })
@@ -1751,9 +1964,16 @@ def _executive_area_highlights(grouped: Any) -> list[dict[str, Any]]:
             if text and text not in bucket:
                 bucket.append(text)
         try:
-            item["occurrence_count"] += max(1, int(row.get("occurrence_count") or 1))
+            occurrence = max(1, int(row.get("occurrence_count") or 1))
         except (TypeError, ValueError):
-            item["occurrence_count"] += 1
+            occurrence = 1
+        item["occurrence_count"] += occurrence
+        if workstream:
+            item["occurrence_by_workstream"][workstream] = (
+                int(item["occurrence_by_workstream"].get(workstream) or 0) + occurrence
+            )
+        if workstream != "Standby / Coordination":
+            item["active_occurrence_count"] += occurrence
         for key, target in (("source_dates", "source_dates"), ("source_report_ids", "source_report_ids")):
             values = row.get(key) if isinstance(row.get(key), list) else []
             for value in values:
@@ -1763,7 +1983,8 @@ def _executive_area_highlights(grouped: Any) -> list[dict[str, Any]]:
 
     result = list(by_area.values())
     for item in result:
-        item["workstreams"].sort(key=_workstream_rank)
+        counts = item.get("occurrence_by_workstream") if isinstance(item.get("occurrence_by_workstream"), Mapping) else {}
+        item["workstreams"].sort(key=lambda value: (-int(counts.get(value) or 0), _workstream_rank(value)))
     result.sort(key=lambda item: _area_sort_key(item.get("area")))
     return result
 
@@ -1774,6 +1995,14 @@ def _area_highlight_detail(item: Mapping[str, Any], *, max_details: int) -> str:
         for value in (item.get("workstreams") if isinstance(item.get("workstreams"), list) else [])
         if _clean_text(value, 255)
     ]
+    occurrence_by_workstream = (
+        item.get("occurrence_by_workstream")
+        if isinstance(item.get("occurrence_by_workstream"), Mapping)
+        else {}
+    )
+    if any(value != "Standby / Coordination" for value in workstreams):
+        workstreams = [value for value in workstreams if value != "Standby / Coordination"]
+    workstreams.sort(key=lambda value: (-int(occurrence_by_workstream.get(value) or 0), _workstream_rank(value)))
     raw_buckets = item.get("themes_by_workstream") if isinstance(item.get("themes_by_workstream"), Mapping) else {}
     buckets: list[list[str]] = []
     for workstream in workstreams:
@@ -1804,12 +2033,15 @@ def _area_highlight_detail(item: Mapping[str, Any], *, max_details: int) -> str:
         depth += 1
 
     if not details:
-        themes = [
-            _clean_text(value, 255)
-            for value in (item.get("themes") if isinstance(item.get("themes"), list) else [])
-            if _clean_text(value, 255)
-        ]
-        details = themes[:max_details] or workstreams[:max_details]
+        if workstreams:
+            details = workstreams[:max_details]
+        else:
+            themes = [
+                _clean_text(value, 255)
+                for value in (item.get("themes") if isinstance(item.get("themes"), list) else [])
+                if _clean_text(value, 255) and _clean_text(value, 255) != "standby"
+            ]
+            details = themes[:max_details]
     return _english_join(details)
 
 
@@ -1850,7 +2082,7 @@ def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: s
         grouped = _summarise_period_activities(activities, remarks=draft.get("remarks"))
 
     highlights = _executive_area_highlights(grouped)
-    areas = [item["area"] for item in highlights if _clean_text(item.get("area"), 255)]
+    area_phrase = _executive_area_phrase(highlights)
     workstreams: list[str] = []
     for row in grouped:
         if not isinstance(row, Mapping):
@@ -1868,8 +2100,8 @@ def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: s
         if period_label:
             opening += f" ({period_label})"
         opening += ", field activities were carried out"
-        if areas:
-            opening += f" across {_english_join(areas)}"
+        if area_phrase:
+            opening += f" across {area_phrase}"
         sentences.append(opening + ".")
 
         # Give the busiest recorded area enough detail to be useful, without
@@ -1877,7 +2109,11 @@ def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: s
         # is used only to choose presentation order, never as a progress metric.
         ranked = sorted(
             highlights,
-            key=lambda item: (-int(item.get("occurrence_count") or 0), _area_sort_key(item.get("area"))),
+            key=lambda item: (
+                -int(item.get("active_occurrence_count") or 0),
+                -int(item.get("occurrence_count") or 0),
+                _area_sort_key(item.get("area")),
+            ),
         )
         if ranked:
             focus = ranked[0]
@@ -2164,8 +2400,8 @@ def _activity_summary_signature(value: Any) -> list[tuple[str, str, str]]:
     return [
         (
             _activity_match_text(row.get("area")),
+            _activity_match_text(row.get("workstream")),
             _activity_match_text(row.get("text")),
-            _activity_match_text(row.get("status")),
         )
         for row in rows
     ]
