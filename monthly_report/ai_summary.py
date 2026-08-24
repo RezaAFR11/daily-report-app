@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/19"
-PROMPT_VERSION = "periodic-narrative-grounding/20"
+SUGGESTION_VERSION = "periodic-ai-suggestion/21"
+PROMPT_VERSION = "periodic-narrative-grounding/22"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -350,15 +350,21 @@ Reporting rules:
    period. When deterministic_summary.current_activities exists, polish those
    Area + Workstream groups directly and preserve their grouping. Otherwise, group
    repeated/continuing work instead of copying every Daily Report
-   line. Organize primarily by area and workstream (for example instrumentation/
-   electrical, actuator/pneumatic, testing/commissioning, or valve mechanical)
-   only when the source wording supports that grouping. Return at most ONE bullet
-   for each area + workstream combination; merge same-family activities within the
-   same area instead of returning several Testing & commissioning bullets. Use the
-   exact area/equipment label from source data when available and keep ``area``
-   populated whenever a source area exists. When deterministic_summary.current_activities
-   is supplied, preserve its exact MA-xx area and row order; never replace a known
-   area with generic values such as "Site" or "General". Never use filler such as "additional
+   line. Organize primarily by the exact source area/equipment label and a supported
+   workstream. Workstreams may vary by project -- for example Oil System & Flushing,
+   Mechanical Maintenance, Standby / Coordination, Instrumentation & Electrical,
+   Actuator & Pneumatic, Testing & Commissioning, or Valve Mechanical -- but never
+   invent a category that is absent from the deterministic baseline when that baseline
+   is supplied. Return at most ONE bullet for each area + workstream combination;
+   merge same-family activities within the same area instead of returning repetitive
+   bullets. Keep ``area`` populated whenever a source area exists. When
+   deterministic_summary.current_activities is supplied, preserve its exact area
+   label (including labels such as Turbine Unit 2, Generator Unit 1, or MA-81),
+   workstream, and row order; never replace a known area with generic values such as
+   "Site" or "General". Keep work details isolated
+   to the same source area: never introduce cylinder/pneumatic work into an actuator-only
+   area, and never combine "actuator and cylinder" unless both concepts are explicitly
+   supported for that same area/workstream in the deterministic baseline. Never use filler such as "additional
    related activities were recorded during the period"; write only the useful
    representative work summary.
    Preserve technical terms, quantities, durations, dates, unit/equipment
