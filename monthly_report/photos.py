@@ -62,16 +62,29 @@ DEFAULT_PHOTO_LIMITS = PhotoLimits()
 # Keep all decoder/asset safety bounds, but give Weekly/Monthly compilation a
 # period-appropriate count and aggregate-byte budget.
 WEEKLY_PHOTO_LIMITS = PhotoLimits(
-    max_images_per_pdf=80,
-    max_images_per_draft=300,
-    max_total_asset_bytes_per_pdf=48 * 1024 * 1024,
-    max_total_asset_bytes_per_draft=128 * 1024 * 1024,
+    # A 7-day field report can legitimately contain several hundred photos.
+    # Keep a high count ceiling and make the byte budget, rather than an old
+    # 300-photo cap, the meaningful safety bound. Images are downscaled and
+    # adaptively compressed by ``_normalise_image`` before they reach it.
+    max_images_per_pdf=250,
+    max_images_per_draft=2000,
+    max_asset_bytes=768 * 1024,
+    max_total_asset_bytes_per_pdf=64 * 1024 * 1024,
+    max_total_asset_bytes_per_draft=192 * 1024 * 1024,
+    max_dimension=960,
+    jpeg_quality=66,
 )
 MONTHLY_PHOTO_LIMITS = PhotoLimits(
-    max_images_per_pdf=80,
-    max_images_per_draft=1200,
-    max_total_asset_bytes_per_pdf=48 * 1024 * 1024,
-    max_total_asset_bytes_per_draft=256 * 1024 * 1024,
+    # Monthly reports need an even larger reference budget. The lower image
+    # dimension/quality is intentional because photographs are rendered as
+    # compact evidence cards in the PDF, not as full-resolution originals.
+    max_images_per_pdf=250,
+    max_images_per_draft=5000,
+    max_asset_bytes=640 * 1024,
+    max_total_asset_bytes_per_pdf=64 * 1024 * 1024,
+    max_total_asset_bytes_per_draft=384 * 1024 * 1024,
+    max_dimension=900,
+    jpeg_quality=62,
 )
 
 
@@ -190,22 +203,50 @@ def _normalise_image(raw: bytes, limits: PhotoLimits) -> tuple[bytes, int, int] 
                 elif image.mode != "RGB":
                     image = image.convert("RGB")
 
-                encoded = io.BytesIO()
-                image.save(
-                    encoded,
-                    format="JPEG",
-                    quality=limits.jpeg_quality,
-                    optimize=True,
-                    progressive=True,
-                )
-                payload = encoded.getvalue()
-                if len(payload) > limits.max_asset_bytes:
-                    # A second bounded pass avoids retaining unusually noisy,
-                    # oversized photographs in a report draft.
-                    image.thumbnail((960, 960), Image.Resampling.LANCZOS)
+                def encode_jpeg(source: Any, quality: int) -> bytes:
                     encoded = io.BytesIO()
-                    image.save(encoded, format="JPEG", quality=68, optimize=True)
-                    payload = encoded.getvalue()
+                    source.save(
+                        encoded,
+                        format="JPEG",
+                        quality=max(35, min(90, int(quality))),
+                        optimize=True,
+                        progressive=True,
+                    )
+                    return encoded.getvalue()
+
+                payload = encode_jpeg(image, limits.jpeg_quality)
+
+                # Periodic-report photographs are displayed in small 3-column
+                # evidence cards. Use the draft byte budget to derive a soft
+                # per-photo target, then progressively reduce quality/dimensions
+                # before ever considering exclusion. This lets dense Weekly/
+                # Monthly reports keep every safe report photo without creating
+                # unnecessarily heavy PDFs.
+                average_budget = max(48 * 1024, int(
+                    limits.max_total_asset_bytes_per_draft
+                    / max(1, limits.max_images_per_draft)
+                ))
+                soft_target = min(limits.max_asset_bytes, average_budget)
+                if len(payload) > soft_target:
+                    for dimension, quality in (
+                        (min(limits.max_dimension, 900), min(limits.jpeg_quality, 62)),
+                        (min(limits.max_dimension, 820), 58),
+                        (min(limits.max_dimension, 740), 54),
+                        (min(limits.max_dimension, 660), 50),
+                        (min(limits.max_dimension, 580), 46),
+                    ):
+                        if max(image.size) > dimension:
+                            image.thumbnail((dimension, dimension), Image.Resampling.LANCZOS)
+                        payload = encode_jpeg(image, quality)
+                        if len(payload) <= soft_target:
+                            break
+
+                # ``max_asset_bytes`` remains a hard safety ceiling. Give an
+                # unusually noisy image one final compact pass before rejecting
+                # it as unsafe for a report asset.
+                if len(payload) > limits.max_asset_bytes:
+                    image.thumbnail((520, 520), Image.Resampling.LANCZOS)
+                    payload = encode_jpeg(image, 42)
                 if len(payload) > limits.max_asset_bytes:
                     return None
                 return payload, int(image.width), int(image.height)
