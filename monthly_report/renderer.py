@@ -10,6 +10,7 @@ import io
 import math
 import os
 import re
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from html import escape
@@ -980,6 +981,45 @@ def _content_flowables(
     return rendered
 
 
+_ACTIVITY_WORKSTREAM_PREFIXES = (
+    "Oil System & Flushing",
+    "Mechanical Maintenance",
+    "Instrumentation & Electrical",
+    "Actuator & Pneumatic",
+    "Valve Mechanical",
+    "Testing & Commissioning",
+    "Standby / Coordination",
+    "Other Site Work",
+)
+
+
+def _strip_generated_activity_prefixes(value: Any, *, area: str = "", workstream: str = "") -> str:
+    """Last-resort cleanup for old/reviewed drafts with nested display labels."""
+
+    text = _plain(value).strip()
+    if not text:
+        return ""
+    if area:
+        for dash in (" – ", " - ", ": "):
+            prefix = area + dash
+            if text.casefold().startswith(prefix.casefold()):
+                text = text[len(prefix):].lstrip()
+                break
+    ordered = [workstream] if workstream else []
+    ordered.extend(label for label in _ACTIVITY_WORKSTREAM_PREFIXES if label and label not in ordered)
+    for _ in range(4):
+        changed = False
+        for label in ordered:
+            prefix = label + ":"
+            if text.casefold().startswith(prefix.casefold()):
+                text = text[len(prefix):].lstrip(" -–:;")
+                changed = True
+                break
+        if not changed:
+            break
+    return text.strip()
+
+
 def _activity_flowables(
     value: Any,
     styles: Mapping[str, ParagraphStyle],
@@ -1020,11 +1060,9 @@ def _activity_flowables(
         if area.casefold() in generic_areas:
             area = ""
 
-        detail = text
-        # Deterministic rows already begin with "Workstream:".  Avoid rendering
-        # "MA-78 – Valve Mechanical: Valve Mechanical: ...".
-        if workstream and detail.casefold().startswith((workstream + ":").casefold()):
-            detail = detail[len(workstream) + 1:].strip()
+        detail = _strip_generated_activity_prefixes(text, area=area, workstream=workstream)
+        if not detail:
+            continue
 
         if area and workstream:
             display = f"{area} – {workstream}: {detail}"
@@ -1535,6 +1573,18 @@ def _photo_grid_flowables(
         rows: list[list[Any]] = []
         current: list[Any] = []
 
+        # Keep every photo, but avoid printing the same activity caption on all
+        # nine cards of a page.  The first card in each repeated Area+Caption group
+        # carries the full caption; subsequent cards keep the area label and image.
+        # The group heading naturally repeats on a continuation page because each
+        # page chunk is built independently.
+        caption_counts: Counter[tuple[str, str]] = Counter()
+        for candidate in items:
+            area_key = clean_caption(candidate.get("source_area")) if isinstance(candidate, Mapping) else ""
+            caption_key = clean_caption(candidate.get("caption")) if isinstance(candidate, Mapping) else ""
+            caption_counts[(area_key.casefold(), caption_key.casefold())] += 1
+        seen_caption_groups: set[tuple[str, str]] = set()
+
         for raw in items:
             asset_id = _plain(raw.get("asset_id"))
             path = os.path.realpath(os.path.join(root, asset_filename(asset_id)))
@@ -1559,15 +1609,23 @@ def _photo_grid_flowables(
 
             source = _plain(raw.get("source"))
             page = _plain(raw.get("page"))
-            area = _plain(raw.get("source_area"))
+            area = clean_caption(raw.get("source_area"))
             fallback = f"{source} - p.{page}" if source and page else source
             caption = clean_caption(raw.get("caption"), fallback)
+            caption_group = (area.casefold(), caption.casefold())
+            repeated_caption = bool(caption) and caption_counts.get(caption_group, 0) > 1
+            show_caption = caption
+            if repeated_caption and caption_group in seen_caption_groups:
+                show_caption = ""
+            elif repeated_caption:
+                seen_caption_groups.add(caption_group)
 
             card_rows: list[list[Any]] = []
             if area:
                 card_rows.append([Paragraph(f"<b>{_xml(area)}</b>", styles["small"])])
             if caption:
-                card_rows.append([Paragraph(f"<i>{_xml(caption)}</i>", styles["small"])])
+                caption_markup = f"<i>{_xml(show_caption)}</i>" if show_caption else "&#160;"
+                card_rows.append([Paragraph(caption_markup, styles["small"])])
             card_rows.append([rendered_image])
             card = Table(card_rows, colWidths=[cell_width - 4])
             card_style = [
