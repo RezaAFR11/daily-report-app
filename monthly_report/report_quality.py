@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from typing import Any
+import difflib
 import math
 import re
 
@@ -397,6 +398,55 @@ def _progress_source_consistency_issues(report: Mapping[str, Any]) -> list[str]:
     return issues
 
 
+
+
+def _lookahead_text(value: Any) -> str:
+    if isinstance(value, Mapping):
+        value = value.get("text", value.get("description", value.get("activity", "")))
+    return " ".join(str(value or "").split()).strip()
+
+
+def _lookahead_normalised(value: Any) -> str:
+    text = _lookahead_text(value).casefold()
+    # Area suffixes added by AI are presentation-only and must not make the same
+    # source plan look distinct.
+    text = re.sub(r"\(\s*ma\s*[- ]?\d{1,3}\s*\)\s*[.]?$", "", text, flags=re.I)
+    text = re.sub(r"[^a-z0-9#]+", " ", text).strip()
+    return text
+
+
+def _lookahead_identifiers(value: Any) -> set[str]:
+    text = _lookahead_normalised(value)
+    return {
+        re.sub(r"\s+", "", token)
+        for token in re.findall(r"\b(?:unit|tg|ma)?\s*#?\s*\d+\b", text, flags=re.I)
+    }
+
+
+def _duplicate_lookahead_issues(value: Any) -> list[str]:
+    rows = [_lookahead_text(row) for row in _as_list(value)]
+    rows = [row for row in rows if row]
+    for index, left in enumerate(rows):
+        left_norm = _lookahead_normalised(left)
+        if not left_norm:
+            continue
+        left_ids = _lookahead_identifiers(left)
+        for right in rows[index + 1:]:
+            right_norm = _lookahead_normalised(right)
+            if not right_norm:
+                continue
+            right_ids = _lookahead_identifiers(right)
+            if left_ids or right_ids:
+                if left_ids != right_ids:
+                    continue
+            score = difflib.SequenceMatcher(None, left_norm, right_norm).ratio()
+            if score >= 0.92:
+                return [
+                    "Planned activities contain near-duplicate look-ahead items; keep one source-backed item per planned activity."
+                ]
+    return []
+
+
 def _periodic_source_propagation_issues(report: Mapping[str, Any]) -> list[str]:
     """Catch source-backed period facts that disappeared before rendering."""
 
@@ -415,6 +465,7 @@ def _periodic_source_propagation_issues(report: Mapping[str, Any]) -> list[str]:
         lookahead = _as_list(site.get("next_week_activities", site.get("next_period_activities")))
         if period_end_tomorrow and not lookahead:
             issues.append("The period-end Daily Report contains Activity Tomorrow items, but Weekly Planned Activities Next Week is empty.")
+        issues.extend(_duplicate_lookahead_issues(lookahead))
 
     remarks = [row for row in _as_list(report.get("remarks")) if isinstance(row, Mapping) and str(row.get("text") or "").strip()]
     if remarks:
