@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/22"
-PROMPT_VERSION = "periodic-narrative-grounding/23"
+SUGGESTION_VERSION = "periodic-ai-suggestion/23"
+PROMPT_VERSION = "periodic-narrative-grounding/24"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -376,7 +376,12 @@ Reporting rules:
    related activities were recorded during the period"; write only the useful
    representative work summary.
    Preserve technical terms, quantities, durations, dates, unit/equipment
-   identifiers, and explicit activity status when source-backed. If a source
+   identifiers, and explicit activity status when source-backed. Do not expand
+   abbreviations into a different equipment concept unless the deterministic baseline
+   explicitly supplies that expansion (for example, keep ``MSV`` as ``MSV``; do not
+   rewrite a generic solenoid check as ``multi-way valve`` work). Do not call a DCS
+   indication/check a ``DCS loop test`` unless ``loop test`` is explicitly source-backed.
+   If a source
    activity has status Finished/Completed, keep that status visible in the bullet.
    Do not infer completion from a photograph or from an activity disappearing on a
    later day. Consolidate repeated "Stand by" entries into a single supported
@@ -406,10 +411,14 @@ Reporting rules:
     valid information, not missing data, and must not be turned into a concern.
     Internal data-quality or project-identity validation warnings are not project
     concerns.
-12. lookahead: use only activities explicitly identified by the periodic source
-    as next-period / next-week / next-month work. Daily "Activity Tomorrow" is not
-    periodic look-ahead and must never be promoted into a weekly/monthly lookahead.
-    Do not turn current activities into future plans.
+12. lookahead: use only deterministic_summary.lookahead / explicit periodic
+    look-ahead supplied by the application. For Weekly reports, the deterministic
+    compiler may deliberately promote ONLY ``Activity Tomorrow`` from the Daily
+    Report whose date exactly equals the weekly period end; when that item is already
+    present in deterministic_summary.lookahead it is valid next-week evidence and may
+    be polished without changing scope. Never promote Activity Tomorrow from earlier
+    Daily Reports, and never promote Activity Tomorrow into Monthly look-ahead. Do not
+    turn current activities into future plans.
 13. claims is optional supporting narrative evidence for the review UI. Do not add
     "claims: Not supplied" to missing_data when no extra claims are needed.
 14. Avoid repetitive bullet-by-bullet copying. Merge duplicates and write concise
