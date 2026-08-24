@@ -200,6 +200,25 @@ def _photo_mapping_issues(report: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def _photo_date_coverage_issues(report: Mapping[str, Any]) -> list[str]:
+    """Detect source dates with extractable photos that disappeared from the appendix."""
+
+    coverage = report.get("photo_coverage")
+    if not isinstance(coverage, Mapping):
+        return []
+    missing = [
+        str(value).strip()
+        for value in _as_list(coverage.get("missing_photo_dates"))
+        if str(value).strip()
+    ]
+    if not missing:
+        return []
+    return [
+        "Photo Documentation is missing retained photo references for source date(s): "
+        + ", ".join(missing)
+        + "."
+    ]
+
 
 def _deterministic_summary_issues(report: Mapping[str, Any]) -> tuple[list[str], list[str]]:
     """Check the non-AI narrative baseline without making AI mandatory."""
@@ -321,6 +340,23 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
             "code": "photo_area_mapping_review",
             "message": message,
         })
+
+    photo_date_issues = _photo_date_coverage_issues(report)
+    for message in photo_date_issues:
+        target = blockers if for_final else warnings
+        target.append({
+            "code": "photo_date_coverage",
+            "message": message,
+        })
+    photo_coverage = report.get("photo_coverage")
+    if isinstance(photo_coverage, Mapping) and not photo_date_issues:
+        source_count = int(photo_coverage.get("source_date_count") or 0)
+        retained_count = int(photo_coverage.get("retained_date_count") or 0)
+        if source_count:
+            info.append({
+                "code": "photo_date_coverage_complete",
+                "message": f"Photo Documentation retains extractable photo evidence for {retained_count}/{source_count} source date(s).",
+            })
 
     deterministic_warnings, deterministic_info = _deterministic_summary_issues(report)
     for message in deterministic_warnings:
