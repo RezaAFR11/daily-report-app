@@ -2348,10 +2348,29 @@ def _source_manifest(records: list[dict[str, Any]], method: str) -> list[dict[st
 
 
 _DAILY_REPORT_DOCUMENT_NO_RE = re.compile(r"(?:^|[-_/])DAR(?:$|[-_/])", re.IGNORECASE)
+_DAILY_SEQUENCE_DOCUMENT_NO_RE = re.compile(
+    r"^\s*NO\.?\s*(?P<day>\d{1,5})\s*/",
+    re.IGNORECASE,
+)
 
 
-def _looks_like_daily_report_document_no(value: Any) -> bool:
-    return bool(_DAILY_REPORT_DOCUMENT_NO_RE.search(_clean_text(value, 250)))
+def _looks_like_daily_report_document_no(value: Any, day_no: Any = None) -> bool:
+    """Recognise Daily document-control numbers without treating them as Project No.
+
+    Newer GPA Daily templates can use ``NO. 123/...`` where the leading number
+    equals the Working Day instead of a ``*-DAR`` suffix.  Matching that number
+    to ``day_no`` is conservative enough to classify it as a Daily document
+    number while preserving the raw value for traceability.
+    """
+
+    text = _clean_text(value, 250)
+    if _DAILY_REPORT_DOCUMENT_NO_RE.search(text):
+        return True
+    match = _DAILY_SEQUENCE_DOCUMENT_NO_RE.search(text)
+    if not match:
+        return False
+    day_match = re.search(r"\d{1,5}", _clean_text(day_no, 40))
+    return bool(day_match and int(match.group("day")) == int(day_match.group(0)))
 
 
 def _project_title_alias_key(value: Any) -> str:
@@ -2392,7 +2411,10 @@ def _compact_review_warnings(values: Any) -> list[str]:
         "duplicate_photos": 0,
         "template_artwork": 0,
         "signature_artwork": 0,
+        "title_suggestions": 0,
+        "manpower_rows": 0,
     }
+    manpower_areas: set[str] = set()
     patterns = (
         ("ignored_images", re.compile(r":\s*(\d+)\s+small, oversized, or unsupported image occurrence\(s\) were ignored\.$", re.I)),
         ("duplicate_photos", re.compile(r":\s*(\d+)\s+duplicate photo occurrence\(s\) were removed\.$", re.I)),
@@ -2404,6 +2426,23 @@ def _compact_review_warnings(values: Any) -> list[str]:
         if not text:
             continue
         matched = False
+        title_match = re.search(
+            r"A non-critical title suggestion is available but was not auto-applied",
+            text,
+            re.IGNORECASE,
+        )
+        if title_match:
+            counters["title_suggestions"] += 1
+            continue
+        manpower_match = re.search(
+            r"(\d+)\s+manpower row\(s\) for area '([^']+)' could not be mapped safely",
+            text,
+            re.IGNORECASE,
+        )
+        if manpower_match:
+            counters["manpower_rows"] += int(manpower_match.group(1))
+            manpower_areas.add(manpower_match.group(2).strip())
+            continue
         for key, pattern in patterns:
             match = pattern.search(text)
             if match:
@@ -2425,6 +2464,21 @@ def _compact_review_warnings(values: Any) -> list[str]:
     for key, template in summaries:
         if counters[key]:
             result.append(template.format(n=counters[key]))
+    if counters["title_suggestions"]:
+        result.append(
+            "Source parsing: "
+            f"{counters['title_suggestions']} non-critical project-title suggestion(s) "
+            "were available and were not auto-applied."
+        )
+    if counters["manpower_rows"]:
+        area_preview = ", ".join(sorted(manpower_areas)[:6])
+        suffix = f" Areas: {area_preview}." if area_preview else ""
+        result.append(
+            "Manpower parsing: "
+            f"{counters['manpower_rows']} ambiguous/blank row(s) across "
+            f"{len(manpower_areas)} area table(s) were left unmapped; no manpower values were guessed."
+            + suffix
+        )
     return result
 
 
@@ -2553,7 +2607,11 @@ def _record_from_uploaded_pdf(
     data = _sanitize_current_split_uploaded_payload(data)
     parsed_project = _clean_text(data.get("project_no"), 250)
     parsed_project_title = _clean_text(data.get("project_title"), 500)
-    daily_document_no = parsed_project if _looks_like_daily_report_document_no(parsed_project) else ""
+    daily_document_no = (
+        parsed_project
+        if _looks_like_daily_report_document_no(parsed_project, data.get("day_no"))
+        else ""
+    )
     title_matches_selected = _high_confidence_selected_title_match(
         imported, project_no, parsed_project_title, project_title
     )
