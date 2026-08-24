@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/25"
-PROMPT_VERSION = "periodic-narrative-grounding/26"
+SUGGESTION_VERSION = "periodic-ai-suggestion/26"
+PROMPT_VERSION = "periodic-narrative-grounding/27"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -389,9 +389,11 @@ Reporting rules:
 9. engineering_summary and procurement_summary: use only facts explicitly
    belonging to those subjects. Do not relabel site work as engineering or
    procurement. It is acceptable to state that no separate engineering/procurement
-   register was supplied and then distinguish source-backed field evidence (for
-   example testing support or materials/accessories observed in use) from formal
-   deliverable/PO/delivery status. If the deterministic engineering summary already
+   register was supplied and then distinguish source-backed field evidence from
+   formal deliverable/PO/delivery status. A field mention or check of an item does
+   NOT prove that it was installed, replaced, repaired, purchased, delivered, or
+   used; state those action verbs only when the Daily Report explicitly supports
+   them. If the deterministic engineering summary already
    names supported field evidence such as ground-resistance, megger, loop, function,
    continuity, calibration, or running tests, retain that evidence instead of
    collapsing the section to only ``no separate engineering register supplied``. Never infer PO status, outstanding quantity,
@@ -414,11 +416,13 @@ Reporting rules:
 12. lookahead: use only deterministic_summary.lookahead / explicit periodic
     look-ahead supplied by the application. For Weekly reports, the deterministic
     compiler may deliberately promote ONLY ``Activity Tomorrow`` from the Daily
-    Report whose date exactly equals the weekly period end; when that item is already
-    present in deterministic_summary.lookahead it is valid next-week evidence and may
-    be polished without changing scope. Never promote Activity Tomorrow from earlier
-    Daily Reports, and never promote Activity Tomorrow into Monthly look-ahead. Do not
-    turn current activities into future plans.
+    Report whose date exactly equals the weekly period end. When such items are already
+    present in deterministic_summary.lookahead, preserve their item count, order, and
+    source meaning; do not add area-suffixed duplicates or paraphrased copies of the
+    same planned activity. Prefer the source wording verbatim for these look-ahead
+    items. Never promote Activity Tomorrow from earlier Daily Reports, and never
+    promote Activity Tomorrow into Monthly look-ahead. Do not turn current activities
+    into future plans.
 13. claims is optional supporting narrative evidence for the review UI. Do not add
     "claims: Not supplied" to missing_data when no extra claims are needed.
 14. Avoid repetitive bullet-by-bullet copying. Merge duplicates and write concise
