@@ -1132,6 +1132,17 @@ def _parse_manpower_lines(
         # If a page begins with continuation rows but the PDF extractor did
         # not retain the preceding header, use the section's known category
         # and record that the schema had to be inferred.
+        # Some exported Daily tables contain a visually blank filler row where
+        # the PDF text layer preserves only the row number and Working Hours
+        # (for example ``12  07:00 - 17:00``). It is not an employee record and
+        # must not become a false manpower warning. Rows with any name/role text
+        # still go through the strict parser below.
+        if re.fullmatch(
+            r"\s*\d{1,4}\s*[.)]?\s+\d{1,2}:\d{2}\s*[-\u2013\u2014]\s*\d{1,2}:\d{2}\s*",
+            line,
+        ):
+            continue
+
         inferred_header = header is None
         parsed = _parse_manpower_row(
             line,
