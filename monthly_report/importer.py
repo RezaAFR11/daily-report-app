@@ -26,7 +26,7 @@ from typing import Any, BinaryIO, Iterable, Mapping, Sequence
 
 
 SCHEMA_VERSION = "daily-report-import/1"
-PARSER_VERSION = "monthly-pdf-importer/1.5"
+PARSER_VERSION = "monthly-pdf-importer/1.6"
 
 # Supported Daily Report layout families.  These are parser profiles only; they
 # do not change the canonical output shape consumed by weekly/monthly reports.
@@ -1230,21 +1230,52 @@ def _merge_area_note(area: dict[str, Any], key: str, value: Any) -> None:
 
 
 def _inline_area_notes(lines: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Extract inline Constraints/Remarks including wrapped continuation text."""
+
     constraints: list[str] = []
     remarks: list[str] = []
-    for raw in lines:
+    index = 0
+    while index < len(lines):
+        raw = str(lines[index] or "")
         text = _compact(raw)
-        match = re.match(r"^Constraints?\s*:\s*(.+?)\s*$", text, re.IGNORECASE)
-        if match:
-            note = _note_text(match.group(1))
-            if note:
-                constraints.append(note)
+        match = re.match(r"^(Constraints?|Remarks?)\s*:\s*(.*?)\s*$", text, re.IGNORECASE)
+        if not match:
+            index += 1
             continue
-        match = re.match(r"^Remarks?\s*:\s*(.+?)\s*$", text, re.IGNORECASE)
-        if match:
-            note = _note_text(match.group(1))
-            if note:
-                remarks.append(note)
+        label = match.group(1).casefold()
+        parts: list[str] = []
+        initial = _note_text(match.group(2))
+        if initial:
+            parts.append(initial)
+        continuation_index = index + 1
+        while continuation_index < len(lines):
+            continuation_raw = str(lines[continuation_index] or "")
+            continuation = _note_text(continuation_raw)
+            if not continuation:
+                break
+            folded = continuation.casefold()
+            if (
+                _AREA_MARKER.match(_compact(continuation_raw))
+                or _SECTION_HEADING.match(_compact(continuation_raw))
+                or re.match(r"^(?:Constraints?|Remarks?)\s*:", continuation, re.IGNORECASE)
+                or re.match(r"^(?:Activity\s+Today|Activity\s+Tomorrow)\b", continuation, re.IGNORECASE)
+                or re.match(r"^No\.\s+Name\b", continuation, re.IGNORECASE)
+                or _NUMBERED_ITEM.match(continuation)
+                or _is_document_boilerplate_note(continuation)
+                or "working hours" in folded and "role" in folded
+            ):
+                break
+            # Wrapped table-cell text is indented in the generated PDF. Requiring
+            # leading whitespace prevents unrelated left-aligned prose from being
+            # swallowed into the note.
+            if not continuation_raw[:1].isspace():
+                break
+            parts.append(continuation)
+            continuation_index += 1
+        note = _note_text(" ".join(parts))
+        if note:
+            (constraints if label.startswith("constraint") else remarks).append(note)
+        index = max(index + 1, continuation_index)
     return constraints, remarks
 
 
@@ -1369,6 +1400,135 @@ def _extract_weather(section: str) -> dict[str, str]:
                 result[key] = value
         return result
     return {}
+
+
+
+_PROGRESS_ROW_RE = re.compile(
+    r"^\s*(?P<item>\d{1,3})\s+"
+    r"(?P<description>.+?)\s+"
+    r"(?P<duration>\d+(?:\.\d+)?)\s+"
+    r"(?P<weight>[-+]?\d+(?:\.\d+)?%)\s+"
+    r"(?P<start>\d{1,2}-[A-Za-z]{3}-\d{2,4})\s+"
+    r"(?P<finish>\d{1,2}-[A-Za-z]{3}-\d{2,4})\s+"
+    r"(?P<previous_plan>[-+]?\d+(?:\.\d+)?%)\s+"
+    r"(?P<previous_actual>[-+]?\d+(?:\.\d+)?%)\s+"
+    r"(?P<this_plan>[-+]?\d+(?:\.\d+)?%)\s+"
+    r"(?P<this_actual>[-+]?\d+(?:\.\d+)?%)\s+"
+    r"(?P<cumulative_plan>[-+]?\d+(?:\.\d+)?%)\s+"
+    r"(?P<cumulative_actual>[-+]?\d+(?:\.\d+)?%)\s+"
+    r"(?P<deviation>[-+]?\d+(?:\.\d+)?%)\s*$",
+    re.IGNORECASE,
+)
+_PROGRESS_PERCENT_RE = re.compile(r"[-+]?\d+(?:\.\d+)?%")
+
+
+def _progress_percent(value: Any) -> float | None:
+    text = _compact(str(value or "")).replace("%", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _extract_overall_progress(section: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Parse the exact Daily Report Overall Progress table without recomputing it.
+
+    Source percentages are preserved exactly as reported.  In particular, the
+    source ``This Period`` values are never replaced by a derived cumulative
+    difference.  This keeps Weekly/Monthly progress traceable even when a Daily
+    template contains a source-side arithmetic inconsistency that requires human
+    review rather than silent correction.
+    """
+
+    if not _compact(section):
+        return [], []
+    rows: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    total_row: dict[str, Any] | None = None
+    for raw_line in section.splitlines():
+        line = _compact(raw_line)
+        if not line:
+            continue
+        match = _PROGRESS_ROW_RE.match(line)
+        if match:
+            groups = match.groupdict()
+            rows.append({
+                "item_id": groups["item"],
+                "description": groups["description"].strip(),
+                "duration": groups["duration"],
+                "weight_factor": _progress_percent(groups["weight"]),
+                "start": groups["start"],
+                "finish": groups["finish"],
+                "cumulative_previous_plan": _progress_percent(groups["previous_plan"]),
+                "cumulative_previous_actual": _progress_percent(groups["previous_actual"]),
+                "this_period_plan": _progress_percent(groups["this_plan"]),
+                "this_period_actual": _progress_percent(groups["this_actual"]),
+                "cumulative_to_date_plan": _progress_percent(groups["cumulative_plan"]),
+                "cumulative_to_date_actual": _progress_percent(groups["cumulative_actual"]),
+                "deviation": _progress_percent(groups["deviation"]),
+                "is_total": False,
+                "source_period_label": "This Period",
+            })
+            continue
+        if "overall progress" in line.casefold():
+            percentages = _PROGRESS_PERCENT_RE.findall(line)
+            # The total row contains exactly the seven source progress values:
+            # previous plan/actual, this-period plan/actual, cumulative plan/actual,
+            # and deviation.  Do not infer a weight factor from this row.
+            if len(percentages) >= 7:
+                values = [_progress_percent(value) for value in percentages[-7:]]
+                total_row = {
+                    "item_id": "TOTAL",
+                    "description": "OVERALL PROGRESS",
+                    "duration": "",
+                    "weight_factor": None,
+                    "start": "",
+                    "finish": "",
+                    "cumulative_previous_plan": values[0],
+                    "cumulative_previous_actual": values[1],
+                    "this_period_plan": values[2],
+                    "this_period_actual": values[3],
+                    "cumulative_to_date_plan": values[4],
+                    "cumulative_to_date_actual": values[5],
+                    "deviation": values[6],
+                    "is_total": True,
+                    "source_period_label": "This Period",
+                }
+    if total_row is not None:
+        rows.append(total_row)
+    if not rows:
+        warnings.append(_warning(
+            "overall_progress_requires_manual_review",
+            "Overall Progress section was found but its table could not be mapped safely",
+            field="overall_progress",
+        ))
+    elif total_row is None:
+        warnings.append(_warning(
+            "overall_progress_total_missing",
+            "Overall Progress detail rows were extracted but the source total row was not mapped",
+            field="overall_progress",
+        ))
+    return rows, warnings
+
+
+def _project_title_alias_equivalent(source_title: Any, master_title: Any) -> bool:
+    """Accept a conservative long-title/short-title alias under an exact project no.
+
+    The raw Daily title is still retained.  This only suppresses repetitive
+    non-critical mismatch warnings when, for example, the master title prepends a
+    project/program phrase to the exact meaningful Daily title.
+    """
+
+    left = re.sub(r"[^a-z0-9]+", " ", _normalized_identifier(str(source_title or ""))).strip()
+    right = re.sub(r"[^a-z0-9]+", " ", _normalized_identifier(str(master_title or ""))).strip()
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
+    return len(shorter.split()) >= 4 and re.search(rf"(?:^|\s){re.escape(shorter)}(?:$|\s)", longer) is not None
 
 
 def _constraint_section_status(section: str) -> str:
@@ -1517,10 +1677,15 @@ def _extract_daily_content(
             area_id=area_id,
             source_section="direct_manpower",
         )
-        if metadata["rows_extracted"]:
+        inline_constraints, inline_remarks = _inline_area_notes(lines)
+        if metadata["rows_extracted"] or inline_constraints or inline_remarks:
             area = ensure_area(area_id)
             area["manpower"].extend(parsed_rows["direct"])
             area["indirect_manpower"].extend(parsed_rows["indirect"])
+            for note in inline_constraints:
+                _merge_area_note(area, "constraints", note)
+            for note in inline_remarks:
+                _merge_area_note(area, "remarks", note)
         manpower_metadata.append(metadata)
         provenance_rows.extend(metadata.pop("row_provenance"))
         warnings.extend(row_warnings)
@@ -1828,6 +1993,9 @@ def parse_daily_report_pages(
             and candidate.get("title")
             and _normalized_identifier(extracted["project_title"])
             != _normalized_identifier(candidate["title"])
+            and not _project_title_alias_equivalent(
+                extracted["project_title"], candidate["title"]
+            )
         ):
             warnings.append(
                 _warning(
@@ -1853,8 +2021,12 @@ def parse_daily_report_pages(
         )
     _apply_photo_activity_statuses(areas, sections.get("photo_documentation", ""))
     weather = _extract_weather(sections.get("weather", ""))
+    overall_progress, progress_warnings = _extract_overall_progress(
+        sections.get("overall_progress", "")
+    )
     constraint_status = _constraint_section_status(sections.get("constraints", ""))
     warnings.extend(manpower_warnings)
+    warnings.extend(progress_warnings)
     if sections.get("daily_activities") and not areas:
         warnings.append(
             _warning(
@@ -1913,8 +2085,8 @@ def parse_daily_report_pages(
         "weather": weather,
         "constraint_status": constraint_status,
         "indirect_manpower": indirect_manpower,
-        "show_overall_progress": False,
-        "overall_progress": [],
+        "show_overall_progress": bool(overall_progress),
+        "overall_progress": overall_progress,
         "areas": areas,
         "sign_offs": [],
     }
