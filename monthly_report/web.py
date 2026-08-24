@@ -1146,7 +1146,7 @@ def _record_date(record: dict[str, Any]) -> str:
 # Client-facing deterministic fallback summarisation.  AI may refine this after
 # Source Data Validation, but the baseline Weekly/Monthly PDF should already read
 # like a period report rather than seven/thirty Daily Reports concatenated together.
-_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/8"
+_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/9"
 
 _PERIOD_ACTIVITY_TAG_RE = re.compile(
     r"\(\s*\d{1,3}\s*-\s*[A-Za-z]{2,}\s*-\s*[^)]*\)", re.IGNORECASE
@@ -1542,8 +1542,21 @@ def _period_activity_themes(family: str, value: Any) -> list[str]:
     result: list[str] = []
     if family == "Testing & Commissioning" and "loop test" in text:
         result.append("DCS loop testing" if "dcs" in text else "loop testing")
+    if family == "Mechanical Maintenance" and "turning gear" in text:
+        if "test" in text or "testing" in text:
+            result.append("turning-gear operation and testing")
+        else:
+            result.append("turning-gear operation")
+    if family == "Mechanical Maintenance" and any(needle in text for needle in (
+        "control oil", "auxiliary oil", "oil pipeline", "oil return pipe",
+        "lube oil", "oil purifier", "purifier filter",
+    )):
+        result.append("oil-system and mechanical works")
     if family == "Valve Mechanical" and "msv" in text:
-        result.append("MSV installation")
+        if "piping" in text or "pipe" in text:
+            result.append("MSV installation and associated piping")
+        else:
+            result.append("MSV installation")
     for label, needles in _PERIOD_ACTIVITY_THEME_RULES.get(family, ()):
         if label == "DCS loop testing":
             continue
@@ -1557,9 +1570,13 @@ def _period_activity_themes(family: str, value: Any) -> list[str]:
     # Avoid repetitive generic oil-flushing wording when the source gives the
     # more specific LO/CO circuit.  This improves management readability without
     # changing or inferring the underlying activity.
-    if family == "Valve Mechanical" and "MSV installation" in result:
+    if family == "Valve Mechanical" and any(
+        item in result for item in ("MSV installation", "MSV installation and associated piping")
+    ):
         if "valve assembly and installation" in result:
             result.remove("valve assembly and installation")
+        if "MSV installation and associated piping" in result and "MSV installation" in result:
+            result.remove("MSV installation")
     if family == "Oil System & Flushing" and "bypass-line oil flushing" in result:
         if any(item in result for item in ("LO bypass-line oil flushing", "CO bypass-line oil flushing")):
             result.remove("bypass-line oil flushing")
@@ -1713,7 +1730,12 @@ def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases
     result: list[dict[str, Any]] = []
     for key in group_order:
         group = groups[key]
-        themes = sorted(group["themes"], key=lambda item: _theme_rank(group["family"], item))
+        themes = list(group["themes"])
+        if group["family"] == "Mechanical Maintenance" and "turning-gear operation and testing" in themes:
+            themes = [item for item in themes if item != "turning-gear operation"]
+        if group["family"] == "Valve Mechanical" and "MSV installation and associated piping" in themes:
+            themes = [item for item in themes if item != "MSV installation"]
+        themes = sorted(themes, key=lambda item: _theme_rank(group["family"], item))
         phrases = list(group["phrases"])
         if themes:
             detail = _english_join(themes[:5])
@@ -1883,6 +1905,95 @@ def _key_remark_findings(draft: Mapping[str, Any], *, maximum: int = 24) -> list
         if len(findings) >= maximum:
             break
     return findings
+
+
+def _executive_remark_theme(value: Any) -> tuple[int, str]:
+    """Return a concise, source-grounded management theme for a material remark.
+
+    Remarks remain remarks; this helper never promotes them to formal constraints.
+    Only explicit issue/follow-up language is eligible for the Executive Summary.
+    """
+
+    text = _clean_text(value, 2_000)
+    folded = text.casefold()
+    if not text:
+        return (0, "")
+
+    tg_match = re.search(r"\bTG\s*#?\s*(\d+)\b", text, re.IGNORECASE)
+    tg = f" TG #{tg_match.group(1)}" if tg_match else ""
+
+    if "auxiliary pump" in folded and ("ndt" in folded or "pt must" in folded or "penetrant" in folded):
+        return (90, f"Auxiliary Pump{tg} flange finding requiring PT/NDT")
+    if "ohc" in folded and any(word in folded for word in ("damage", "damaged", "unable", "cannot")):
+        return (95, "OHC equipment issue")
+    if "leak" in folded or "leakage" in folded or "rembes" in folded:
+        if "msv" in folded and "return" in folded:
+            return (100, "MSV return-line leakage")
+        if any(word in folded for word in ("oil return", "oil pipeline", "lube oil", "oil line", "oil tank")):
+            return (98, "oil-system leakage")
+        if "generator cooler" in folded:
+            return (86, "generator-cooler leakage")
+        return (82, "reported leakage")
+    if "vibration" in folded and any(word in folded for word in ("high", "above", "rms")):
+        return (80, "high-vibration finding")
+    if "short cable" in folded or ("solenoid" in folded and "short" in folded):
+        return (78, "solenoid-valve power/cable issue")
+    if any(word in folded for word in ("broken", "damaged", "unable", "cannot be repaired", "must be replaced")):
+        return (72, "source-recorded equipment/repair issue")
+    if any(word in folded for word in ("alarm", "finding", "must be performed", "required")):
+        return (68, "source-recorded follow-up finding")
+    if any(word in folded for word in ("waiting for", "not yet", "pending")):
+        return (55, "pending coordination/work item")
+    return (0, "")
+
+
+def _executive_constraint_and_findings_sentence(draft: Mapping[str, Any]) -> str:
+    """Summarise formal-constraint status and material Daily remarks separately."""
+
+    constraints = _real_constraint_rows(draft.get("constraints"))
+    if constraints:
+        return ""
+
+    reporting = draft.get("constraint_reporting") if isinstance(draft.get("constraint_reporting"), Mapping) else {}
+    reported_dates = reporting.get("reported_dates") if isinstance(reporting.get("reported_dates"), list) else []
+    none_dates = reporting.get("none_reported_dates") if isinstance(reporting.get("none_reported_dates"), list) else []
+    not_supplied_dates = reporting.get("not_supplied_dates") if isinstance(reporting.get("not_supplied_dates"), list) else []
+    formal_none = bool(none_dates) and not reported_dates and not not_supplied_dates
+
+    ranked: list[tuple[int, str, str]] = []
+    for row in _key_remark_findings(draft, maximum=32):
+        priority, label = _executive_remark_theme(row.get("text"))
+        if not label:
+            continue
+        ranked.append((priority, _clean_text(row.get("date"), 10), label))
+    ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
+
+    labels: list[str] = []
+    for _, _, label in ranked:
+        if label not in labels:
+            labels.append(label)
+        if len(labels) >= 4:
+            break
+
+    # Multiple Daily remarks can describe the same oil/MSV leakage chain.  Present
+    # that recurring issue once in management prose while preserving each dated
+    # source remark separately in Section 5.4.
+    if "oil-system leakage" in labels and "MSV return-line leakage" in labels:
+        first = min(labels.index("oil-system leakage"), labels.index("MSV return-line leakage"))
+        labels = [label for label in labels if label not in {"oil-system leakage", "MSV return-line leakage"}]
+        labels.insert(first, "oil/MSV return-line leakage")
+
+    labels = labels[:3]
+    if formal_none and labels:
+        return (
+            "No formal constraints were reported, although field remarks recorded "
+            f"follow-up items including {_english_join(labels)}."
+        )
+    if formal_none:
+        return "No formal constraints were reported in the available Daily Reports."
+    if labels:
+        return f"Field remarks recorded follow-up items including {_english_join(labels)}."
+    return ""
 
 
 def _progress_summary_sentence(draft: Mapping[str, Any]) -> str:
@@ -2388,6 +2499,10 @@ def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: s
         if tags:
             detail += f" for {_english_join(tags)}"
         sentences.append(detail + "; details and source-recorded follow-up are shown in Section 5.4.")
+    else:
+        findings_sentence = _executive_constraint_and_findings_sentence(draft)
+        if findings_sentence:
+            sentences.append(findings_sentence)
 
     missing_sentence = _missing_management_status_sentence(draft)
     if missing_sentence:
@@ -3990,7 +4105,10 @@ def _executive_ai_candidate(draft: Mapping[str, Any], value: Any) -> str:
         if isinstance(deterministic.get("executive_summary"), Mapping) else baseline,
         4_000,
     ).casefold()
-    for phrase in ("peak daily headcount", "man-hours", "overall progress percentages", "safety incident metrics"):
+    for phrase in (
+        "peak daily headcount", "man-hours", "overall progress percentages",
+        "safety incident metrics", "no formal constraints", "field remarks",
+    ):
         if phrase in deterministic_exec and phrase not in baseline_folded:
             return baseline
     return candidate
