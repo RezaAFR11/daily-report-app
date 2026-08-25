@@ -727,12 +727,10 @@ def refresh_preflight_readiness(
 def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False) -> dict[str, Any]:
     """Return risk-tiered readiness without making Draft review unnecessarily strict.
 
-    Preview/Draft output is always allowed by this pure quality gate.  The same
-    call still reports hypothetical Final blockers through ``readiness`` and
-    ``risk_tiers`` so the UI can surface them early.  Final blockers are reserved
-    for source ambiguity/errors, workforce arithmetic, and authoritative progress
-    consistency; narrative, coverage and photo completeness remain reviewable
-    warnings.
+    Preview/Draft output remains available with review warnings. Final issue is
+    stricter: source ambiguity/errors, workforce arithmetic, authoritative progress
+    consistency, client-text contamination, incomplete photo evidence/date coverage,
+    and source-backed facts lost during periodic propagation are hard blockers.
     """
 
     final_blockers: list[dict[str, str]] = []
@@ -840,13 +838,20 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
         add_final_blocker("workforce_reconciliation", message)
 
     for message in _client_text_issues(report):
-        warnings.append({"code": "client_text_quality", "message": message})
+        if for_final:
+            add_final_blocker("client_text_quality", message)
+        else:
+            warnings.append({"code": "client_text_quality", "message": message})
 
     for message in _photo_completeness_issues(report):
-        warnings.append({
-            "code": "photo_documentation_incomplete",
-            "message": "Photo Documentation may be incomplete: " + message,
-        })
+        rendered_message = "Photo Documentation may be incomplete: " + message
+        if for_final:
+            add_final_blocker("photo_documentation_incomplete", rendered_message)
+        else:
+            warnings.append({
+                "code": "photo_documentation_incomplete",
+                "message": rendered_message,
+            })
 
     for message in _photo_mapping_issues(report):
         warnings.append({
@@ -856,10 +861,13 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
 
     photo_date_issues = _photo_date_coverage_issues(report)
     for message in photo_date_issues:
-        warnings.append({
-            "code": "photo_date_coverage",
-            "message": message,
-        })
+        if for_final:
+            add_final_blocker("photo_date_coverage", message)
+        else:
+            warnings.append({
+                "code": "photo_date_coverage",
+                "message": message,
+            })
     photo_coverage = report.get("photo_coverage")
     if isinstance(photo_coverage, Mapping) and not photo_date_issues:
         source_count = int(photo_coverage.get("source_date_count") or 0)
@@ -871,7 +879,10 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
             })
 
     for message in _periodic_source_propagation_issues(report):
-        warnings.append({"code": "periodic_source_propagation", "message": message})
+        if for_final:
+            add_final_blocker("periodic_source_propagation", message)
+        else:
+            warnings.append({"code": "periodic_source_propagation", "message": message})
 
     for message in _progress_source_consistency_issues(report):
         add_final_blocker("progress_source_consistency", message)
