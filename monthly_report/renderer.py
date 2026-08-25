@@ -1751,20 +1751,27 @@ def _manpower_appendix_flowables(
     header = styles["table_header"]
     body = styles["table"]
     center = styles["table_center"]
+
+    def person_days_text(value: Any) -> Any:
+        number = _number(value)
+        if number is None:
+            return value
+        return int(number) if float(number).is_integer() else number
+
     summary_rows = [
         ["Category", "Person-days", "Regular MH", "OT MH", "Total MH"],
         [
-            "Direct", totals.get("direct_person_days", "Not supplied"),
+            "Direct", person_days_text(totals.get("direct_person_days", "Not supplied")),
             totals.get("regular_direct_man_hours", totals.get("direct_man_hours", "Not supplied")),
             totals.get("direct_overtime_man_hours", "Not supplied"), totals.get("direct_man_hours", "Not supplied"),
         ],
         [
-            "Indirect", totals.get("indirect_person_days", "Not supplied"),
+            "Indirect", person_days_text(totals.get("indirect_person_days", "Not supplied")),
             totals.get("regular_indirect_man_hours", totals.get("indirect_man_hours", "Not supplied")),
             totals.get("indirect_overtime_man_hours", "Not supplied"), totals.get("indirect_man_hours", "Not supplied"),
         ],
         [
-            "Total", totals.get("total_person_days", "Not supplied"),
+            "Total", person_days_text(totals.get("total_person_days", "Not supplied")),
             totals.get("regular_man_hours", totals.get("total_man_hours", "Not supplied")),
             totals.get("overtime_man_hours", "Not supplied"), totals.get("total_man_hours", "Not supplied"),
         ],
@@ -1874,7 +1881,7 @@ def _manpower_appendix_flowables(
         for row in roles:
             role_rows.append([
                 row.get("role", "Unspecified"),
-                row.get("person_days", row.get("present_person_days", "")),
+                person_days_text(row.get("person_days", row.get("present_person_days", ""))),
                 row.get("man_hours", row.get("physical_manhours", "")),
             ])
         table = LongTable(
