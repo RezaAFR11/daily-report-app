@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/27"
-PROMPT_VERSION = "periodic-narrative-grounding/28"
+SUGGESTION_VERSION = "periodic-ai-suggestion/28"
+PROMPT_VERSION = "periodic-narrative-grounding/29"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -136,11 +136,17 @@ class AISummaryError(RuntimeError):
         code: str | None = None,
         retryable: bool | None = None,
         status_code: int | None = None,
+        provider_error_type: str | None = None,
+        provider_request_id: str | None = None,
+        provider_detail: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code or self.code
         self.retryable = self.retryable if retryable is None else retryable
         self.status_code = status_code
+        self.provider_error_type = provider_error_type or ""
+        self.provider_request_id = provider_request_id or ""
+        self.provider_detail = provider_detail or ""
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -150,6 +156,12 @@ class AISummaryError(RuntimeError):
         }
         if self.status_code is not None:
             result["status_code"] = self.status_code
+        if self.provider_error_type:
+            result["provider_error_type"] = self.provider_error_type
+        if self.provider_request_id:
+            result["provider_request_id"] = self.provider_request_id
+        if self.provider_detail:
+            result["provider_detail"] = self.provider_detail
         return result
 
 
@@ -1796,29 +1808,92 @@ def _extract_usage(response: Any) -> dict[str, int]:
     return result
 
 
-def _map_provider_error(exc: Exception, anthropic_module: Any) -> AISummaryError:
+def _provider_request_id(exc: Exception) -> str:
+    """Best-effort Anthropic request ID extraction without SDK-specific assumptions."""
+    for attr in ("request_id", "_request_id"):
+        value = getattr(exc, attr, None)
+        if value:
+            return " ".join(str(value).split())[:200]
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        for key in ("request-id", "x-request-id", "anthropic-request-id"):
+            try:
+                value = headers.get(key)
+            except Exception:
+                value = None
+            if value:
+                return " ".join(str(value).split())[:200]
+    return ""
+
+
+def _safe_provider_detail(exc: Exception) -> str:
+    """Return short diagnostic provider text with common credential shapes redacted."""
+    text = " ".join(str(exc or "").split())
+    if not text:
+        return ""
+    patterns = (
+        (r"(?i)sk-ant-[A-Za-z0-9_-]{8,}", "[REDACTED_API_KEY]"),
+        (r"(?i)(x-api-key\s*[:=]\s*)[^,;\s]+", r"\1[REDACTED]"),
+        (r"(?i)(authorization\s*[:=]\s*bearer\s+)[^,;\s]+", r"\1[REDACTED]"),
+        (r"(?i)(api[_-]?key\s*[:=]\s*)[^,;\s]+", r"\1[REDACTED]"),
+    )
+    for pattern, replacement in patterns:
+        text = re.sub(pattern, replacement, text)
+    return text[:900]
+
+
+def _provider_meta(exc: Exception) -> dict[str, Any]:
     status = getattr(exc, "status_code", None)
+    try:
+        status = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    return {
+        "status_code": status,
+        "provider_error_type": type(exc).__name__,
+        "provider_request_id": _provider_request_id(exc),
+        "provider_detail": _safe_provider_detail(exc),
+    }
+
+
+def _map_provider_error(exc: Exception, anthropic_module: Any) -> AISummaryError:
+    meta = _provider_meta(exc)
+    status = meta["status_code"]
     if isinstance(exc, getattr(anthropic_module, "AuthenticationError", ())):
-        return AIAuthenticationError("Claude API authentication failed.", status_code=status)
+        return AIAuthenticationError("Claude API authentication failed.", **meta)
     if status == 402:
-        return AIBillingError("Claude API usage credit is required.", status_code=status)
+        return AIBillingError("Claude API usage credit is required.", **meta)
     if isinstance(exc, getattr(anthropic_module, "PermissionDeniedError", ())) or status == 403:
-        return AIPermissionError("Claude API permission was denied.", status_code=status)
+        return AIPermissionError("Claude API permission was denied.", **meta)
     if isinstance(exc, getattr(anthropic_module, "RateLimitError", ())) or status == 429:
-        return AIRateLimitError("Claude API rate limit was reached.", status_code=status)
+        return AIRateLimitError("Claude API rate limit was reached.", **meta)
     timeout_types = tuple(
-        item
-        for item in (getattr(anthropic_module, "APITimeoutError", None), TimeoutError)
+        item for item in (getattr(anthropic_module, "APITimeoutError", None), TimeoutError)
         if isinstance(item, type)
     )
     if isinstance(exc, timeout_types) or status in {408, 504}:
-        return AITimeoutError("Claude API request timed out.", status_code=status)
+        return AITimeoutError("Claude API request timed out.", **meta)
     if isinstance(exc, getattr(anthropic_module, "OverloadedError", ())) or status == 529:
-        return AIProviderError("Claude API is temporarily overloaded.", status_code=status)
-    if isinstance(exc, getattr(anthropic_module, "APIError", ())):
-        return AIProviderError("Claude API request failed.", status_code=status)
-    return AIProviderError("Claude API request failed.", status_code=status)
+        return AIProviderError("Claude API is temporarily overloaded.", **meta)
 
+    connection_type = getattr(anthropic_module, "APIConnectionError", ())
+    if isinstance(exc, connection_type):
+        return AIProviderError("Claude API connection failed.", code="connection_error", retryable=True, **meta)
+
+    bad_request_type = getattr(anthropic_module, "BadRequestError", ())
+    if isinstance(exc, bad_request_type) or status in {400, 422}:
+        return AIProviderError("Claude API rejected the request.", code="bad_request", retryable=False, **meta)
+
+    not_found_type = getattr(anthropic_module, "NotFoundError", ())
+    if isinstance(exc, not_found_type) or status == 404:
+        return AIProviderError("Claude API model or endpoint was not found.", code="not_found", retryable=False, **meta)
+
+    if status is not None and status >= 500:
+        return AIProviderError("Claude API server returned an error.", retryable=True, **meta)
+    if isinstance(exc, getattr(anthropic_module, "APIError", ())):
+        return AIProviderError("Claude API request failed.", **meta)
+    return AIProviderError("Claude API request failed.", **meta)
 
 
 def _structured_output_unsupported(exc: TypeError) -> bool:
