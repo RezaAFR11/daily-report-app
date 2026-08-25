@@ -6291,7 +6291,16 @@ def register_monthly_routes(
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         except AISummaryError as exc:
-            app.logger.warning("AI summary failed code=%s retryable=%s", exc.code, exc.retryable)
+            diagnostic = exc.to_dict()
+            app.logger.warning(
+                "AI summary failed code=%s status=%s retryable=%s type=%s request_id=%s detail=%s",
+                exc.code,
+                diagnostic.get("status_code", ""),
+                exc.retryable,
+                diagnostic.get("provider_error_type", ""),
+                diagnostic.get("provider_request_id", ""),
+                diagnostic.get("provider_detail", ""),
+            )
             if exc.code == "rate_limited":
                 return _ai_retry_response(
                     str(exc),
@@ -6299,8 +6308,10 @@ def register_monthly_routes(
                     status=429,
                     retry_after=30,
                 )
-            status = 503 if exc.code in {"missing_api_key", "billing_required"} else 502
-            return jsonify({"error": str(exc), "code": exc.code, "retryable": exc.retryable}), status
+            status = 503 if exc.code in {"missing_api_key", "billing_required", "connection_error"} else 502
+            payload = dict(diagnostic)
+            payload["error"] = payload.pop("message", str(exc))
+            return jsonify(payload), status
         except Exception:
             app.logger.exception("AI summary failed for draft %s", draft_id)
             return jsonify({"error": "AI summary failed unexpectedly. The report content is unchanged."}), 500
