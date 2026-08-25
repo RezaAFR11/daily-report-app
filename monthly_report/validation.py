@@ -16,6 +16,11 @@ from difflib import SequenceMatcher
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from .identity import (
+    looks_like_daily_report_document_no as _shared_daily_document_no,
+    project_title_match,
+)
+
 
 def _clean(value: Any) -> str:
     return " ".join(str(value or "").split())
@@ -105,21 +110,16 @@ def _title_similarity(left: str, right: str) -> float:
     return round(float(fuzz.WRatio(left, right)), 2)
 
 
-_DAILY_REPORT_DOCUMENT_NO_RE = re.compile(r"(?:^|[-_/])DAR(?:$|[-_/])", re.IGNORECASE)
+_TRUSTED_CANONICAL_MATCH_METHODS = {
+    "approved_alias",
+    "exact",
+    "exact_project_no",
+    "reviewed_merge",
+    "title_token_equivalent",
+}
 
 
-def _project_title_alias_key(value: Any) -> str:
-    """Conservative key for common report-title spelling variants.
-
-    Only normalises punctuation/case plus the service/services inflection seen
-    between the Daily template and the project master.
-    """
-
-    tokens = _normalise(value).split()
-    return " ".join("service" if token == "services" else token for token in tokens)
-
-
-def _looks_like_daily_report_document_no(value: Any) -> bool:
+def _looks_like_daily_report_document_no(value: Any, day_no: Any = None) -> bool:
     """Recognise document-control Daily Report numbers such as ``...-DAR``.
 
     Historical GPA Daily PDFs place a Daily Report document number in the visual
@@ -127,7 +127,7 @@ def _looks_like_daily_report_document_no(value: Any) -> bool:
     Vendor Project No. and must not create seven false project-mismatch groups.
     """
 
-    return bool(_DAILY_REPORT_DOCUMENT_NO_RE.search(_clean(value)))
+    return _shared_daily_document_no(value, day_no)
 
 
 def _validation_identity(
@@ -136,6 +136,8 @@ def _validation_identity(
     source_project_title: str,
     selected_project_no: str,
     selected_project_title: str,
+    source_day_no: Any = None,
+    trusted_canonical_match: bool = False,
 ) -> tuple[str, str, str]:
     """Return (project_no, project_title, document_no) for validation grouping.
 
@@ -144,21 +146,37 @@ def _validation_identity(
     number remains available for traceability.
     """
 
-    document_no = source_project_no if _looks_like_daily_report_document_no(source_project_no) else ""
-    title_alias_match = bool(
-        source_project_title
-        and selected_project_title
-        and _project_title_alias_key(source_project_title) == _project_title_alias_key(selected_project_title)
+    document_no = (
+        source_project_no
+        if _looks_like_daily_report_document_no(source_project_no, source_day_no)
+        else ""
     )
-    similarity = _title_similarity(source_project_title, selected_project_title)
+    deterministic_title_match = project_title_match(
+        source_project_title,
+        selected_project_title,
+    )
+    title_alias_match = bool(deterministic_title_match.get("matched"))
+    number_exact = bool(
+        selected_project_no
+        and _normalise(source_project_no) == _normalise(selected_project_no)
+    )
+    if number_exact and selected_project_title and (title_alias_match or trusted_canonical_match):
+        return _clean(selected_project_no), _clean(selected_project_title), document_no
     if (
         document_no
         and selected_project_no
         and selected_project_title
-        and (title_alias_match or similarity >= 92.0)
+        and (title_alias_match or trusted_canonical_match)
     ):
         return _clean(selected_project_no), _clean(selected_project_title), document_no
-    return _clean(source_project_no), _clean(source_project_title), document_no
+    # A confirmed Daily document number is never a project-group identifier.
+    # If its title still needs review, group all files with the same source title
+    # together instead of asking for one decision per sequential document number.
+    return (
+        "" if document_no else _clean(source_project_no),
+        _clean(source_project_title),
+        document_no,
+    )
 
 
 def build_source_validation(
@@ -174,6 +192,7 @@ def build_source_validation(
     selected_title_norm = _normalise(selected_project_title)
     grouped: dict[str, dict[str, Any]] = {}
     dated_records: dict[str, list[dict[str, Any]]] = {}
+    review_requested = False
 
     for index, record in enumerate(records):
         if not isinstance(record, Mapping):
@@ -182,11 +201,21 @@ def build_source_validation(
         source_project_title = _metadata(record, "project_title")
         source_identity = record.get("source_identity") if isinstance(record.get("source_identity"), Mapping) else {}
         explicit_document_no = _clean(source_identity.get("document_no"))
+        trusted_canonical_match = bool(
+            _normalise(source_identity.get("canonical_project_no")) == selected_no_norm
+            and _normalise(source_identity.get("canonical_project_title")) == selected_title_norm
+            and _clean(source_identity.get("review_state")).casefold() in {"matched", "confirmed"}
+            and _clean(source_identity.get("match_method")).casefold()
+            in _TRUSTED_CANONICAL_MATCH_METHODS
+        )
+        review_requested = review_requested or bool(record.get("review_required"))
         project_no, project_title, document_no = _validation_identity(
             source_project_no=source_project_no,
             source_project_title=source_project_title,
             selected_project_no=selected_project_no,
             selected_project_title=selected_project_title,
+            source_day_no=_payload(record).get("day_no"),
+            trusted_canonical_match=trusted_canonical_match,
         )
         document_no = explicit_document_no or document_no
         record_id = _record_id(record, index)
@@ -264,11 +293,17 @@ def build_source_validation(
                     "field": _clean(issue.get("field")),
                     "filename": _clean(issue.get("filename")),
                     "message": message,
+                    "can_override": _clean(issue.get("severity") or "warning").casefold()
+                    not in {"error", "critical", "blocker"},
                 })
         else:
             message = _clean(issue)
             if message:
-                issue_rows.append({"severity": "warning", "message": message})
+                issue_rows.append({
+                    "severity": "warning",
+                    "message": message,
+                    "can_override": True,
+                })
 
     duplicate_groups = []
     for report_date, candidates in sorted(dated_records.items()):
@@ -283,14 +318,22 @@ def build_source_validation(
             "requires_confirmation": True,
         })
 
-    required = len(project_groups) > 1 or any(
+    decision_required = len(project_groups) > 1 or any(
         group["requires_confirmation"] for group in project_groups
-    ) or bool(duplicate_groups) or bool(issue_rows)
+    ) or bool(duplicate_groups) or any(
+        str(issue.get("severity") or "warning").casefold()
+        in {"error", "critical", "blocker"}
+        for issue in issue_rows
+    )
+    required = decision_required or review_requested
+    automatically_confirmed = not required
     return {
         "schema_version": "source-validation/1",
         "required": required,
-        "applied": False,
-        "confirmed": False,
+        "applied": automatically_confirmed,
+        "confirmed": automatically_confirmed,
+        "confirmation_method": "auto_exact" if automatically_confirmed else "manual_review",
+        "decision_required": decision_required,
         "selected_project_no": _clean(selected_project_no),
         "selected_project_title": _clean(selected_project_title),
         "project_groups": project_groups,
@@ -352,11 +395,20 @@ def resolve_project_records(
         source_no = _metadata(record, "project_no")
         prior_identity = record.get("source_identity") if isinstance(record.get("source_identity"), Mapping) else {}
         explicit_document_no = _clean(prior_identity.get("document_no"))
+        trusted_canonical_match = bool(
+            _normalise(prior_identity.get("canonical_project_no")) == _normalise(project_no)
+            and _normalise(prior_identity.get("canonical_project_title")) == _normalise(project_title)
+            and _clean(prior_identity.get("review_state")).casefold() in {"matched", "confirmed"}
+            and _clean(prior_identity.get("match_method")).casefold()
+            in _TRUSTED_CANONICAL_MATCH_METHODS
+        )
         effective_no, effective_title, document_no = _validation_identity(
             source_project_no=source_no,
             source_project_title=source_title,
             selected_project_no=project_no,
             selected_project_title=project_title,
+            source_day_no=_payload(record).get("day_no"),
+            trusted_canonical_match=trusted_canonical_match,
         )
         document_no = explicit_document_no or document_no
         key = _record_group_key(record, index, effective_title, effective_no)
@@ -367,13 +419,19 @@ def resolve_project_records(
             continue
 
         record["source_identity"] = {
-            "project_no": effective_no,
-            "project_title": effective_title,
+            # Keep reported identity immutable; canonical identity is explicit
+            # below and on the working record/payload.
+            "project_no": source_no,
+            "project_title": source_title,
             "reported_project_no": source_no,
             "reported_project_title": source_title,
             "document_no": document_no,
             "validation_group_key": key,
             "record_id": _record_id(record, index),
+            "canonical_project_no": project_no,
+            "canonical_project_title": project_title,
+            "match_method": "reviewed_merge",
+            "review_state": "confirmed",
         }
         record["project_no"] = project_no
         record["project_title"] = project_title

@@ -27,7 +27,10 @@ class ProjectConfigTests(unittest.TestCase):
 
     def test_default_config_contains_requested_project_pairs(self):
         self.assertEqual(
-            DEFAULT_PROJECTS,
+            [
+                {"title": row["title"], "project_no": row["project_no"]}
+                for row in DEFAULT_PROJECTS
+            ],
             [
                 {
                     'title': 'Electrical Construction and Installation - Manpower Supply',
@@ -43,6 +46,58 @@ class ProjectConfigTests(unittest.TestCase):
                 },
             ],
         )
+        self.assertIn(
+            "Electrical Installation and Construction - Manpower Supply",
+            DEFAULT_PROJECTS[0]["title_aliases"],
+        )
+        self.assertIn(
+            "RE-ACTIVATION TURBINES AND GENERATORS",
+            DEFAULT_PROJECTS[2]["title_aliases"],
+        )
+        self.assertIn(
+            "REACTIVATION FOR TURBINES AND GENERATORS",
+            DEFAULT_PROJECTS[2]["title_aliases"],
+        )
+
+    def test_existing_default_project_pairs_gain_compatibility_aliases(self):
+        legacy_projects = [
+            {"title": row["title"], "project_no": row["project_no"]}
+            for row in DEFAULT_PROJECTS
+        ]
+        with open(self.config_path, 'w', encoding='utf-8') as config_file:
+            json.dump({'projects': legacy_projects}, config_file)
+
+        projects = load_config()['projects']
+
+        self.assertIn(
+            "Electrical Installation and Construction - Manpower Supply",
+            projects[0]["title_aliases"],
+        )
+        self.assertIn(
+            "REACTIVATION FOR TURBINES AND GENERATORS",
+            projects[2]["title_aliases"],
+        )
+
+    def test_project_aliases_and_work_hours_policy_round_trip(self):
+        projects = [{
+            "title": "Canonical Project",
+            "project_no": "P-001",
+            "title_aliases": ["Legacy Daily Title"],
+            "work_hours_policy": {
+                "mode": "elapsed_less_break",
+                "break_minutes": 60,
+                "deduct_when_elapsed_gte_minutes": 360,
+                "allow_overnight": True,
+            },
+        }]
+
+        response = self.client.post('/save_config', json={'projects': projects})
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        saved = load_config()['projects'][0]
+        self.assertEqual(saved['title_aliases'], ["Legacy Daily Title"])
+        self.assertEqual(saved['work_hours_policy']['mode'], "elapsed_less_break")
+        self.assertEqual(saved['work_hours_policy']['break_minutes'], 60)
 
     def test_legacy_config_gains_projects_without_losing_old_defaults(self):
         with open(self.config_path, 'w', encoding='utf-8') as config_file:

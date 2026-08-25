@@ -704,14 +704,10 @@ def _normalise_progress(value: Any) -> list[dict[str, Any]]:
         to_date = _number(_value(
             raw, "to_date", "cumulative", "cumulative_to_date_actual", default=None
         ))
-        if to_date is None and previous is not None and this_month is not None:
-            to_date = previous + this_month
         plan = _number(_value(
             raw, "plan", "to_date_plan", "cumulative_to_date_plan", default=None
         ))
         variance = _number(_value(raw, "variance", "deviation", default=None))
-        if variance is None and to_date is not None and plan is not None:
-            variance = to_date - plan
         rows.append({
             "description": _plain(raw.get("description"), f"Progress item {index}"),
             "previous": previous,
@@ -758,13 +754,10 @@ def _progress_table(
     data: list[list[Any]] = [
         [_paragraph("Description", header), _paragraph("Progress", header), "", "",
          _paragraph("To-date Plan\n(d)", header),
-         _paragraph("Variance\n(e) = (c) - (d)", header)],
+         _paragraph("Reported Variance\n(e)", header)],
         ["", _paragraph("Previous\n(a)", header),
          _paragraph(current_period_label, header),
-         _paragraph(
-             "To-date\n(c)" if source_period_label else "To-date\n(c) = (a) + (b)",
-             header,
-         ), "", ""],
+         _paragraph("To-date\n(c)", header), "", ""],
     ]
     for row in display_rows:
         data.append([
@@ -818,14 +811,14 @@ def _executive_summary(report: Mapping[str, Any], progress: list[dict[str, Any]]
     )
     if total and total.get("to_date") is not None and total.get("plan") is not None:
         variance = total.get("variance")
-        if variance is None:
-            variance = total["to_date"] - total["plan"]
-        return (
+        summary = (
             "For this reporting period, overall project progress is "
             f"{_percent(total['to_date'])} compared with the plan of "
-            f"{_percent(total['plan'])}, for a variance of {_percent(variance)}. "
-            "The summary of progress and S-Curve are shown in the appendices."
+            f"{_percent(total['plan'])}. "
         )
+        if variance is not None:
+            summary = summary[:-2] + f", for a reported variance of {_percent(variance)}. "
+        return summary + "The summary of progress and S-Curve are shown in the appendices."
     return (
         "Overall progress values have not been supplied for this reporting period. "
         "Complete and review the progress table before issue."
@@ -1278,7 +1271,7 @@ def _key_findings_table(rows: list[Any], styles: Mapping[str, ParagraphStyle]) -
 def _concerns_table(rows: list[Any], styles: Mapping[str, ParagraphStyle]) -> LongTable | None:
     data: list[list[Any]] = [[
         _paragraph("Area of Concern", styles["table_header"]),
-        _paragraph("Suggested Corrective Action", styles["table_header"]),
+        _paragraph("Source-Recorded Action / Follow-up", styles["table_header"]),
     ]]
     for raw in rows:
         if isinstance(raw, Mapping):
@@ -1789,6 +1782,40 @@ def _manpower_appendix_flowables(
         ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]))
     result: list[Flowable] = [summary, Spacer(1, 10)]
+    supplied_days = _number(totals.get("manpower_supplied_day_count"))
+    covered_days = _number(totals.get("covered_daily_report_count"))
+    expected_days = _number(totals.get("expected_day_count"))
+    average_headcount = _number(totals.get("average_daily_headcount"))
+    peak_headcount = _number(totals.get("peak_headcount"))
+    not_supplied_days = _number(totals.get("manpower_not_supplied_day_count"))
+    def metric_text(number: float | None) -> str:
+        if number is None:
+            return "Not supplied"
+        return str(int(number)) if float(number).is_integer() else f"{number:.2f}".rstrip("0").rstrip(".")
+
+    metric_parts: list[str] = []
+    if covered_days is not None and expected_days is not None:
+        metric_parts.append(f"Daily Report coverage: {metric_text(covered_days)}/{metric_text(expected_days)} days")
+    if supplied_days is not None:
+        metric_parts.append(f"manpower supplied: {metric_text(supplied_days)} days")
+    if average_headcount is not None:
+        metric_parts.append(f"average daily headcount: {metric_text(average_headcount)}")
+    if peak_headcount is not None:
+        metric_parts.append(f"peak daily headcount: {metric_text(peak_headcount)}")
+    if metric_parts:
+        result.extend([
+            _paragraph("; ".join(metric_parts) + ".", styles["placeholder"]),
+            Spacer(1, 6),
+        ])
+    if not_supplied_days is not None and not_supplied_days > 0:
+        result.extend([
+            _paragraph(
+                f"Manpower was not supplied for {metric_text(not_supplied_days)} covered Daily Report date(s); "
+                "averages and known totals exclude those dates.",
+                styles["placeholder"],
+            ),
+            Spacer(1, 6),
+        ])
     if int(_number(totals.get("cross_category_duplicate_count")) or 0) > 0:
         result.extend([
             _paragraph(
@@ -1802,6 +1829,18 @@ def _manpower_appendix_flowables(
             "Date", "Direct HC", "Indirect HC", "Total HC", "Regular MH", "OT MH", "Total MH",
         ]]
         for row in daily:
+            supplied = row.get("supplied") is not False
+            if not supplied:
+                table_rows.append([
+                    row.get("date", ""),
+                    "Not supplied",
+                    "Not supplied",
+                    "Not supplied",
+                    "Not supplied",
+                    row.get("overtime_man_hours", "Not supplied"),
+                    "Not supplied",
+                ])
+                continue
             regular = row.get("regular_man_hours")
             if regular is None:
                 # Prefer the reconciled unique-person daily total. Older drafts
@@ -1855,6 +1894,11 @@ def _manpower_appendix_flowables(
         result.extend([Spacer(1, 8), _paragraph(
             "Source: reviewed attendance workbook. Regular physical man-hours use 10 hours per present day; "
             "overtime is elapsed clock time only when explicitly applied.", styles["placeholder"],
+        )])
+    elif value.get("hours_method"):
+        result.extend([Spacer(1, 8), _paragraph(
+            "Source: Daily Reports. Calculation policy: " + _plain(value.get("hours_method")) + ".",
+            styles["placeholder"],
         )])
     return result
 

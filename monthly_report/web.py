@@ -19,7 +19,19 @@ from zoneinfo import ZoneInfo
 from flask import jsonify, request, send_file, session, url_for
 
 from .aggregate import aggregate_monthly_records
+from .area_normalization import (
+    activity_area_conflicts as _shared_activity_area_conflicts,
+    canonical_source_area_label as _shared_canonical_source_area_label,
+    leading_numeric_ma_tokens as _shared_leading_numeric_ma_tokens,
+    numeric_ma_tokens as _shared_numeric_ma_tokens,
+    reporting_activity_area as _shared_reporting_activity_area,
+)
 from .ai_summary import AISummaryError, generate_ai_summary
+from .identity import (
+    looks_like_daily_report_document_no as _shared_daily_document_no,
+    normalise_identity as _shared_identity_key,
+    project_title_match,
+)
 from .importer import DEFAULT_LIMITS, PDFImportError, import_daily_report_pdf
 from .overtime import parse_overtime_workbooks
 from .photos import (
@@ -33,7 +45,7 @@ from .photos import (
     store_photo_candidates,
 )
 from .renderer import render_monthly_report
-from .report_quality import build_report_preflight
+from .report_quality import build_report_preflight, refresh_preflight_readiness
 from .storage import list_canonical_records
 from .timesheet import TimesheetError, compile_timesheets
 from .validation import (
@@ -310,27 +322,33 @@ def _photo_asset_preflight_issues(
     username: str,
     draft_id: str,
     report: Mapping[str, Any],
-) -> list[str]:
+) -> list[dict[str, Any]]:
     """Return reviewed photo references whose draft-local JPEG asset is unavailable."""
     photos = report.get("photo_documentation")
     if not isinstance(photos, list) or not photos:
         return []
 
     directory = _draft_photo_dir(data_dir, username, draft_id, create=False)
-    issues: list[str] = []
+    issues: list[dict[str, Any]] = []
     for index, row in enumerate(photos, start=1):
         if not isinstance(row, Mapping):
-            issues.append(f"Photo {index} has invalid metadata.")
+            issues.append({"message": f"Photo {index} has invalid metadata.", "required": False})
             continue
         asset_id = str(row.get("asset_id") or "")
         if not is_asset_id(asset_id):
-            issues.append(f"Photo {index} has an invalid asset reference.")
+            issues.append({
+                "message": f"Photo {index} has an invalid asset reference.",
+                "required": bool(row.get("required")),
+            })
             continue
         path = directory / asset_filename(asset_id) if directory is not None else None
         if path is None or not path.is_file():
             caption = _clean_text(row.get("caption"), 120)
             label = f" ({caption})" if caption else ""
-            issues.append(f"Photo {index}{label} asset is unavailable.")
+            issues.append({
+                "message": f"Photo {index}{label} asset is unavailable.",
+                "required": bool(row.get("required")),
+            })
 
     return issues
 
@@ -344,15 +362,29 @@ def _append_runtime_preflight_blockers(
     report: Mapping[str, Any],
     for_final: bool,
 ) -> dict[str, Any]:
-    """Add checks that need filesystem/runtime context to the pure preflight result."""
-    if for_final:
-        for message in _photo_asset_preflight_issues(data_dir, username, draft_id, report):
-            preflight.setdefault("blockers", []).append({
-                "code": "photo_asset_unavailable",
-                "message": message,
-            })
-    preflight["ready"] = not bool(preflight.get("blockers"))
-    return preflight
+    """Add filesystem checks without making optional evidence a hard blocker.
+
+    A missing draft-local photo must be visible to the reviewer, but it should
+    not prevent a report from being issued when the Daily source is otherwise
+    valid.  Photos explicitly marked ``required`` remain a Final blocker.
+    """
+
+    runtime_final_blockers: list[dict[str, str]] = []
+    for issue in _photo_asset_preflight_issues(data_dir, username, draft_id, report):
+        row = {
+            "code": "photo_asset_unavailable",
+            "message": str(issue.get("message") or "Photo asset is unavailable."),
+        }
+        target = preflight.setdefault("warnings", [])
+        if issue.get("required"):
+            runtime_final_blockers.append(row)
+            if for_final:
+                target = preflight.setdefault("blockers", [])
+        target.append(row)
+    return refresh_preflight_readiness(
+        preflight,
+        additional_final_blockers=runtime_final_blockers,
+    )
 
 
 def _remove_draft_assets(data_dir: str | Path, username: str, draft_id: str) -> None:
@@ -500,7 +532,11 @@ def _public_upload_item(item: dict[str, Any]) -> dict[str, Any]:
         "included": bool(item.get("included")),
         "report_date": str(item.get("report_date") or ""),
         "size_bytes": int(item.get("size_bytes") or 0),
-        "warnings": [str(value) for value in item.get("warnings", []) if str(value).strip()],
+        "warnings": [
+            _warning_text(value)
+            for value in item.get("warnings", [])
+            if _warning_text(value)
+        ],
         "source_project_no": str(source_identity.get("project_no") or ""),
         "source_project_title": str(source_identity.get("project_title") or ""),
     }
@@ -716,7 +752,7 @@ def _list_text(value: Any, maximum_items: int = 500) -> list[str]:
     return result
 
 
-def _clean_activity_rows(value: Any, maximum_items: int = 250) -> list[dict[str, str]]:
+def _clean_activity_rows(value: Any, maximum_items: int = 250) -> list[dict[str, Any]]:
     """Keep condensed activity bullets structured by canonical Area + Workstream.
 
     ``text`` is always stored as the narrative body only.  Generated labels such as
@@ -725,11 +761,12 @@ def _clean_activity_rows(value: Any, maximum_items: int = 250) -> list[dict[str,
     """
 
     rows = value if isinstance(value, list) else []
-    result: list[dict[str, str]] = []
+    result: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
     for item in rows[:maximum_items]:
         status = ""
         workstream = ""
+        metadata: dict[str, Any] = {}
         if isinstance(item, str):
             area = ""
             text = _clean_text(item, 2_000)
@@ -741,6 +778,24 @@ def _clean_activity_rows(value: Any, maximum_items: int = 250) -> list[dict[str,
                 2_000,
             )
             status = _clean_text(item.get("status"), 100)
+            stable_id = _clean_text(item.get("stable_id"), 100)
+            if stable_id:
+                metadata["stable_id"] = stable_id
+            for key in (
+                "source_dates",
+                "source_report_ids",
+                "source_areas",
+                "area_mapping_methods",
+                "equipment_tags",
+            ):
+                values = item.get(key)
+                if isinstance(values, list):
+                    cleaned = [_clean_text(entry, 255) for entry in values[:250]]
+                    cleaned = list(dict.fromkeys(entry for entry in cleaned if entry))
+                    if cleaned:
+                        metadata[key] = cleaned
+            if item.get("area_review_required"):
+                metadata["area_review_required"] = True
         else:
             continue
         text = _canonical_activity_body(text, area=area, workstream=workstream)
@@ -750,7 +805,7 @@ def _clean_activity_rows(value: Any, maximum_items: int = 250) -> list[dict[str,
         if key in seen:
             continue
         seen.add(key)
-        row = {"area": area, "text": text}
+        row: dict[str, Any] = {"area": area, "text": text, **metadata}
         if workstream:
             row["workstream"] = workstream
         if status and status.casefold() not in text.casefold():
@@ -852,7 +907,7 @@ def _align_ai_activity_rows(
     draft: Mapping[str, Any],
     *,
     preserve_unmatched_baseline: bool = False,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Polish narrative while keeping deterministic Area + Workstream ownership.
 
     The deterministic Area + Workstream pair is authoritative. AI rows are matched
@@ -884,10 +939,18 @@ def _align_ai_activity_rows(
         return baseline if preserve_unmatched_baseline else rows
 
     used: set[int] = set()
-    replacements: dict[int, dict[str, str]] = {}
+    replacements: dict[int, dict[str, Any]] = {}
     aligned_order: list[int] = []
 
     def candidates_for(row: Mapping[str, Any]) -> list[int]:
+        requested_id = _clean_text(row.get("stable_id"), 100)
+        if requested_id:
+            return [
+                idx
+                for idx in range(len(baseline))
+                if idx not in used
+                and _clean_text(baseline[idx].get("stable_id"), 100) == requested_id
+            ]
         requested_area = _activity_match_text(row.get("area"))
         requested_workstream = _activity_match_text(row.get("workstream"))
         candidates = [idx for idx in range(len(baseline)) if idx not in used]
@@ -950,7 +1013,8 @@ def _align_ai_activity_rows(
         if not text:
             continue
 
-        aligned_row: dict[str, str] = {"area": area, "text": text}
+        aligned_row: dict[str, Any] = copy.deepcopy(dict(base))
+        aligned_row.update({"area": area, "text": text})
         if workstream:
             aligned_row["workstream"] = workstream
         status = _clean_text(row.get("status"), 100)
@@ -1053,10 +1117,12 @@ def _record_photo_areas(record: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _warning_text(value: Any) -> str:
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         message = value.get("message") or value.get("code") or "PDF parsing warning"
         severity = str(value.get("severity") or "warning").upper()
-        return f"{severity}: {message}"
+        filename = _clean_text(value.get("filename"), 255)
+        prefix = f"{filename}: " if filename else ""
+        return f"{prefix}{severity}: {message}"
     return _clean_text(value, 1_000)
 
 
@@ -1362,33 +1428,7 @@ def _canonical_numeric_ma_area(numbers: list[str]) -> str:
 
 
 def _canonical_source_area_label(value: Any) -> str:
-    """Normalise harmless MA label formatting without changing source ownership."""
-
-    source = _clean_text(value, 255) or "General"
-    # WPP headings appear with dots or slashes between the same MA numbers.
-    if re.match(r"^MA\s+WPP\b", source, re.IGNORECASE):
-        return re.sub(r"(?<=\d)\.(?=\d)", "/", source)
-
-    match = re.fullmatch(
-        r"MA\s*[- ]?(?P<body>\d{1,3}(?:\s*/\s*(?:\d{1,3}|Pioneer|Jetty)){0,6})",
-        source,
-        re.IGNORECASE,
-    )
-    if not match:
-        return source
-    parts = [part.strip() for part in match.group("body").split("/") if part.strip()]
-    numbers = sorted({int(part) for part in parts if part.isdigit()})
-    names: list[str] = []
-    for part in parts:
-        if part.isdigit():
-            continue
-        name = part.title()
-        if name not in names:
-            names.append(name)
-    if len(numbers) == 1 and not names:
-        return f"MA-{numbers[0]}"
-    body = "/".join([*(str(number) for number in numbers), *names])
-    return f"MA {body}" if body else source
+    return _shared_canonical_source_area_label(value)
 
 
 def _reporting_activity_area(source_area: Any, description: Any) -> str:
@@ -1404,46 +1444,21 @@ def _reporting_activity_area(source_area: Any, description: Any) -> str:
     Turbine/Generator and other named areas remain exactly as supplied.
     """
 
-    source = _canonical_source_area_label(source_area)
-    if not source.casefold().startswith("ma"):
-        return source
-    text = _clean_text(description, 2_000)
-    pair = _LEADING_MA_HYPHEN_PAIR_RE.match(text)
-    if pair:
-        explicit = _canonical_numeric_ma_area([pair.group("left"), pair.group("right")])
-        if explicit:
-            return explicit
-    match = _LEADING_MA_AREA_RE.match(text)
-    if not match:
-        return source
-    explicit = _canonical_numeric_ma_area(re.findall(r"\d{1,3}", match.group("body")))
-    return explicit or source
+    return str(_shared_reporting_activity_area(source_area, description)["reporting_area"])
 
 
 def _numeric_ma_tokens(value: Any) -> set[str]:
-    text = _clean_text(value, 255)
-    if not text.casefold().startswith("ma"):
-        return set()
-    return {str(int(token)) for token in re.findall(r"\d{1,3}", text)}
+    return _shared_numeric_ma_tokens(value)
 
 
 def _leading_numeric_ma_tokens(value: Any) -> set[str]:
-    text = _clean_text(value, 2_000)
-    pair = _LEADING_MA_HYPHEN_PAIR_RE.match(text)
-    if pair:
-        return {str(int(pair.group("left"))), str(int(pair.group("right")))}
-    match = _LEADING_MA_AREA_RE.match(text)
-    if not match:
-        return set()
-    return {str(int(token)) for token in re.findall(r"\d{1,3}", match.group("body"))}
+    return _shared_leading_numeric_ma_tokens(value)
 
 
 def _activity_area_conflicts(area: Any, text: Any) -> bool:
     """Return True only for an explicit leading MA ownership contradiction."""
 
-    expected = _numeric_ma_tokens(area)
-    explicit = _leading_numeric_ma_tokens(text)
-    return bool(expected and explicit and not explicit.issubset(expected))
+    return _shared_activity_area_conflicts(area, text)
 
 
 def _normalised_executive_area_tokens(value: Any) -> list[str]:
@@ -1660,8 +1675,10 @@ def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases
         description = _clean_text(raw.get("description", raw.get("text")), 2_000)
         if not description:
             continue
-        source_area = _clean_text(raw.get("area"), 255) or "General"
-        area = _reporting_activity_area(source_area, description)
+        source_area = _clean_text(raw.get("source_area", raw.get("area")), 255) or "General"
+        area = _clean_text(raw.get("reporting_area"), 255) or _reporting_activity_area(
+            source_area, description
+        )
         family = _period_activity_family(description)
         key = (area, family)
         if key not in groups:
@@ -1675,12 +1692,20 @@ def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases
                 "statuses": [],
                 "equipment_tags": [],
                 "source_areas": [],
+                "area_mapping_methods": [],
+                "area_review_required": False,
                 "occurrence_count": 0,
             }
             group_order.append(key)
         group = groups[key]
         if source_area not in group["source_areas"]:
             group["source_areas"].append(source_area)
+        mapping_method = _clean_text(raw.get("area_mapping_method"), 80)
+        if mapping_method and mapping_method not in group["area_mapping_methods"]:
+            group["area_mapping_methods"].append(mapping_method)
+        group["area_review_required"] = bool(
+            group["area_review_required"] or raw.get("area_review_required")
+        )
         group["occurrence_count"] += 1
         base = _period_activity_base(description) or description
         base_key = _activity_match_text(base)
@@ -1754,7 +1779,11 @@ def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases
         statuses = group["statuses"]
         if len(statuses) == 1 and len(phrases) == 1:
             text += f" Status: {statuses[0]}."
+        stable_id = "activity-" + hashlib.sha256(
+            f"{_activity_match_text(group['area'])}\0{_activity_match_text(group['family'])}".encode("utf-8")
+        ).hexdigest()[:16]
         result.append({
+            "stable_id": stable_id,
             "area": group["area"],
             "workstream": group["family"],
             "text": text,
@@ -1762,6 +1791,8 @@ def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases
             "source_report_ids": group["source_report_ids"],
             "equipment_tags": tags,
             "source_areas": list(group.get("source_areas") or []),
+            "area_mapping_methods": list(group.get("area_mapping_methods") or []),
+            "area_review_required": bool(group.get("area_review_required")),
             "representative_activities": phrases[:4],
             "themes": themes,
             "occurrence_count": int(group.get("occurrence_count") or len(phrases)),
@@ -2112,16 +2143,20 @@ def _constraint_followup_score(constraint: Mapping[str, Any], activity: Mapping[
 
 
 def _deterministic_concerns(draft: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Return formal constraints with only source-backed related follow-up.
+    """Return an auditable constraint register without inventing closeout action.
 
-    A Daily activity is attached only when it shares an explicit equipment tag
-    with the constraint and contains enough lexical/action evidence to be useful.
-    This avoids AI-style causal inference while still making Section 5.4 more
-    informative before Claude is used.
+    Exact recurring constraints are consolidated by the aggregate layer.  Only
+    action/PIC/status values explicitly present in source data are surfaced;
+    an activity that happens to share an equipment tag is not promoted to a
+    corrective action.
     """
 
-    constraints = _real_constraint_rows(draft.get("constraints"))
-    activities = draft.get("activities") if isinstance(draft.get("activities"), list) else []
+    register = draft.get("constraint_register")
+    constraints = (
+        [row for row in register if isinstance(row, Mapping)]
+        if isinstance(register, list) and register
+        else _real_constraint_rows(draft.get("constraints"))
+    )
     result: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for raw in constraints:
@@ -2130,67 +2165,32 @@ def _deterministic_concerns(draft: Mapping[str, Any]) -> list[dict[str, Any]]:
         concern_text = _clean_text(raw.get("text", raw.get("concern")), 2_000)
         if not concern_text:
             continue
-        area = _clean_text(raw.get("area"), 255)
+        area = _clean_text(raw.get("reporting_area", raw.get("area")), 255)
         identity = (area.casefold(), _activity_match_text(concern_text))
         if identity in seen:
             continue
         seen.add(identity)
 
-        ranked: list[tuple[float, str, Mapping[str, Any]]] = []
-        for activity in activities:
-            if not isinstance(activity, Mapping):
-                continue
-            activity_area = _clean_text(activity.get("area"), 255)
-            if area and activity_area and area.casefold() != activity_area.casefold():
-                continue
-            score = _constraint_followup_score(raw, activity)
-            if score < 12.0:
-                continue
-            ranked.append((
-                score,
-                _valid_iso_date_text(activity.get("date", activity.get("source_date"))) or "9999-99-99",
-                activity,
-            ))
-        ranked.sort(key=lambda item: (-item[0], item[1], _activity_match_text(item[2].get("description", ""))))
-
-        followups: list[str] = []
-        followup_sources: list[str] = []
-        followup_dates: list[str] = []
-        for _score, _date_key, activity in ranked:
-            description = _clean_text(activity.get("description", activity.get("text")), 2_000)
-            if not description:
-                continue
-            description_key = _activity_match_text(description)
-            if description_key in {_activity_match_text(item) for item in followups}:
-                continue
-            followups.append(description)
-            source_id = _clean_text(activity.get("source_report_id"), 200)
-            source_date = _valid_iso_date_text(activity.get("date", activity.get("source_date")))
-            if source_id and source_id not in followup_sources:
-                followup_sources.append(source_id)
-            if source_date and source_date not in followup_dates:
-                followup_dates.append(source_date)
-            if len(followups) >= 2:
-                break
-
-        corrective_action = ""
-        if followups:
-            corrective_action = "Related source-recorded follow-up: " + "; ".join(followups) + "."
-
-        source_ids = []
-        source_id = _clean_text(raw.get("source_report_id"), 200)
-        if source_id:
-            source_ids.append(source_id)
-        for item in followup_sources:
-            if item not in source_ids:
-                source_ids.append(item)
-        source_dates = []
-        constraint_date = _valid_iso_date_text(raw.get("date", raw.get("source_date")))
-        if constraint_date:
-            source_dates.append(constraint_date)
-        for item in followup_dates:
-            if item not in source_dates:
-                source_dates.append(item)
+        corrective_action = _clean_text(
+            raw.get("corrective_action", raw.get("action")), 2_000
+        )
+        source_ids = [
+            _clean_text(value, 200)
+            for value in (
+                raw.get("source_report_ids")
+                if isinstance(raw.get("source_report_ids"), list)
+                else [raw.get("source_report_id")]
+            )
+            if _clean_text(value, 200)
+        ]
+        source_dates = list(dict.fromkeys(filter(None, (
+            _valid_iso_date_text(value)
+            for value in (
+                raw.get("reported_dates")
+                if isinstance(raw.get("reported_dates"), list)
+                else [raw.get("date", raw.get("source_date"))]
+            )
+        ))))
 
         display_concern = concern_text
         if area and not concern_text.casefold().startswith(area.casefold()):
@@ -2201,8 +2201,13 @@ def _deterministic_concerns(draft: Mapping[str, Any]) -> list[dict[str, Any]]:
             "corrective_action": corrective_action,
             "source_dates": source_dates,
             "source_report_ids": source_ids,
+            "constraint_id": _clean_text(raw.get("constraint_id", raw.get("id")), 100),
+            "occurrence_count": int(_number(raw.get("occurrence_count")) or 1),
+            "status": _clean_text(raw.get("status"), 100) or "reported",
+            "pic": _clean_text(raw.get("pic"), 200),
+            "target_date": _clean_text(raw.get("target_date"), 40),
             "equipment_tags": sorted(_activity_equipment_ids(concern_text)),
-            "summary_type": "deterministic_constraint_v2",
+            "summary_type": "deterministic_constraint_register_v1",
         })
     return result
 
@@ -2478,13 +2483,26 @@ def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: s
     manpower = draft.get("manpower") if isinstance(draft.get("manpower"), Mapping) else {}
     totals = manpower.get("totals") if isinstance(manpower.get("totals"), Mapping) else {}
     peak = _format_positive_number(totals.get("peak_headcount"))
+    average = _format_positive_number(totals.get("average_daily_headcount"))
     man_hours = _format_positive_number(totals.get("total_man_hours"))
-    if peak and man_hours:
-        sentences.append(f"Peak daily headcount was {peak} personnel with {man_hours} man-hours recorded during the period.")
+    supplied_days = int(_number(totals.get("manpower_supplied_day_count")) or 0)
+    not_supplied_days = int(_number(totals.get("manpower_not_supplied_day_count")) or 0)
+    if average and peak and man_hours:
+        day_label = "day" if supplied_days == 1 else "days"
+        sentences.append(
+            f"Across {supplied_days} manpower-supplied {day_label}, average daily headcount was "
+            f"{average}, peak daily headcount was {peak}, and {man_hours} known man-hours were recorded."
+        )
     elif peak:
         sentences.append(f"Peak daily headcount was {peak} personnel.")
     elif man_hours:
         sentences.append(f"Recorded man-hours for the period totaled {man_hours}.")
+    if not_supplied_days:
+        day_label = "date" if not_supplied_days == 1 else "dates"
+        sentences.append(
+            f"Manpower data was not supplied for {not_supplied_days} covered Daily Report {day_label}; "
+            "workforce averages therefore use supplied dates only."
+        )
 
     progress_sentence = _progress_summary_sentence(draft)
     if progress_sentence:
@@ -2620,10 +2638,10 @@ def _prepare_draft(
         else {}
     )
     draft.setdefault("safety", {
-        "total_manpower": manpower_totals.get("peak_headcount", 0),
-        "peak_daily_headcount": manpower_totals.get("peak_headcount", 0),
+        "total_manpower": manpower_totals.get("peak_headcount"),
+        "peak_daily_headcount": manpower_totals.get("peak_headcount"),
         "headcount_metric": "peak_daily",
-        "total_man_hours": manpower_totals.get("total_man_hours", 0),
+        "total_man_hours": manpower_totals.get("total_man_hours"),
         # Absence of an incident field in a Daily Report is not evidence of
         # zero incidents. Keep these values explicitly unsupplied until a
         # reviewer enters verified HSE data.
@@ -2666,6 +2684,17 @@ def _prepare_draft(
     if kind == "weekly" and not explicit_lookahead:
         coverage_meta = draft.get("coverage") if isinstance(draft.get("coverage"), Mapping) else {}
         last_report_date = _clean_text(coverage_meta.get("last_report_date"), 10)
+        if not last_report_date:
+            candidate_dates = coverage_meta.get("covered_dates", coverage_meta.get("found_dates", []))
+            valid_dates = sorted({
+                value
+                for value in (
+                    _valid_iso_date_text(item)
+                    for item in (candidate_dates if isinstance(candidate_dates, list) else [])
+                )
+                if value
+            })
+            last_report_date = valid_dates[-1] if valid_dates else ""
         if last_report_date and last_report_date == date_to:
             explicit_lookahead = copy.deepcopy(draft.get("tomorrow_activities", []))
     cleaned_lookahead: list[Any] = []
@@ -2699,7 +2728,9 @@ def _prepare_draft(
 
     deterministic_concerns = _deterministic_concerns(draft)
     if not site.get("concerns"):
-        site["concerns"] = deterministic_concerns or draft.get("concerns", draft.get("constraints", []))
+        site["concerns"] = deterministic_concerns or _real_constraint_rows(
+            draft.get("concerns")
+        )
     if isinstance(draft.get("constraint_reporting"), dict):
         site["constraint_reporting"] = copy.deepcopy(draft["constraint_reporting"])
     if isinstance(draft.get("weather"), list):
@@ -2946,15 +2977,6 @@ def _source_manifest(records: list[dict[str, Any]], method: str) -> list[dict[st
         manifest.append(row)
     return manifest
 
-
-
-_DAILY_REPORT_DOCUMENT_NO_RE = re.compile(r"(?:^|[-_/])DAR(?:$|[-_/])", re.IGNORECASE)
-_DAILY_SEQUENCE_DOCUMENT_NO_RE = re.compile(
-    r"^\s*NO\.?\s*(?P<day>\d{1,5})\s*/",
-    re.IGNORECASE,
-)
-
-
 def _looks_like_daily_report_document_no(value: Any, day_no: Any = None) -> bool:
     """Recognise Daily document-control numbers without treating them as Project No.
 
@@ -2964,20 +2986,53 @@ def _looks_like_daily_report_document_no(value: Any, day_no: Any = None) -> bool
     number while preserving the raw value for traceability.
     """
 
-    text = _clean_text(value, 250)
-    if _DAILY_REPORT_DOCUMENT_NO_RE.search(text):
-        return True
-    match = _DAILY_SEQUENCE_DOCUMENT_NO_RE.search(text)
-    if not match:
-        return False
-    day_match = re.search(r"\d{1,5}", _clean_text(day_no, 40))
-    return bool(day_match and int(match.group("day")) == int(day_match.group(0)))
+    return _shared_daily_document_no(value, day_no)
 
 
-def _project_title_alias_key(value: Any) -> str:
-    text = unicodedata.normalize("NFKC", _clean_text(value, 500)).casefold().replace("&", " and ")
-    tokens = " ".join(re.sub(r"[^a-z0-9]+", " ", text).split()).split()
-    return " ".join("service" if token == "services" else token for token in tokens)
+def _project_work_hours_policy(
+    config: Any,
+    *,
+    project_no: Any,
+    project_title: Any,
+) -> dict[str, Any] | None:
+    """Return the explicitly configured policy for one canonical project.
+
+    Selection is exact and deterministic.  A project number is preferred;
+    approved title aliases are used only to disambiguate otherwise matching
+    entries.  Absence of a policy intentionally returns ``None`` so aggregation
+    keeps its backward-compatible no-break default.
+    """
+
+    projects = config.get("projects") if isinstance(config, Mapping) else []
+    if not isinstance(projects, list):
+        return None
+    wanted_no = _shared_identity_key(project_no)
+    wanted_title = _shared_identity_key(project_title)
+    matches: list[tuple[int, Mapping[str, Any]]] = []
+    for row in projects:
+        if not isinstance(row, Mapping):
+            continue
+        row_no = _shared_identity_key(row.get("project_no"))
+        aliases = row.get("title_aliases") if isinstance(row.get("title_aliases"), list) else []
+        title_match = project_title_match(
+            project_title,
+            row.get("title"),
+            approved_aliases=aliases,
+        )
+        number_matches = bool(wanted_no and row_no == wanted_no)
+        title_matches = bool(wanted_title and title_match.get("matched"))
+        if not number_matches and not title_matches:
+            continue
+        matches.append(((2 if number_matches else 0) + (1 if title_matches else 0), row))
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0], reverse=True)
+    best_score = matches[0][0]
+    best = [row for score, row in matches if score == best_score]
+    if len(best) != 1:
+        return None
+    policy = best[0].get("work_hours_policy")
+    return copy.deepcopy(dict(policy)) if isinstance(policy, Mapping) else None
 
 
 def _high_confidence_selected_title_match(
@@ -2986,19 +3041,59 @@ def _high_confidence_selected_title_match(
     parsed_project_title: str,
     selected_project_title: str,
 ) -> bool:
-    if (
-        parsed_project_title
-        and selected_project_title
-        and _project_title_alias_key(parsed_project_title) == _project_title_alias_key(selected_project_title)
-    ):
+    title_match = project_title_match(parsed_project_title, selected_project_title)
+    if title_match.get("matched"):
         return True
     extraction = imported.get("extraction") if isinstance(imported.get("extraction"), Mapping) else {}
     match = extraction.get("project_match") if isinstance(extraction.get("project_match"), Mapping) else {}
     candidate = match.get("candidate") if isinstance(match.get("candidate"), Mapping) else {}
+    nested = match.get("title_match") if isinstance(match.get("title_match"), Mapping) else {}
+    method = _clean_text(nested.get("method") or match.get("method"), 100)
+    deterministic_method = method in {
+        "exact",
+        "approved_alias",
+        "title_token_equivalent",
+    }
     return bool(
-        match.get("high_confidence_suggestion")
+        deterministic_method
+        and (nested.get("matched") or match.get("canonical_title_match"))
         and _clean_text(candidate.get("project_no"), 250).casefold() == _clean_text(project_no, 250).casefold()
     )
+
+
+def _selected_title_match_method(
+    imported: Mapping[str, Any],
+    project_no: Any,
+    parsed_project_title: Any,
+    selected_project_title: Any,
+) -> str:
+    direct = project_title_match(parsed_project_title, selected_project_title)
+    if direct.get("matched"):
+        return str(direct.get("method") or "deterministic_title_match")
+    extraction = imported.get("extraction") if isinstance(imported.get("extraction"), Mapping) else {}
+    match = extraction.get("project_match") if isinstance(extraction.get("project_match"), Mapping) else {}
+    candidate = match.get("candidate") if isinstance(match.get("candidate"), Mapping) else {}
+    nested = match.get("title_match") if isinstance(match.get("title_match"), Mapping) else {}
+    method = _clean_text(nested.get("method") or match.get("method"), 100)
+    if (
+        method in {"exact", "approved_alias", "title_token_equivalent"}
+        and (nested.get("matched") or match.get("canonical_title_match"))
+        and _clean_text(candidate.get("project_no"), 250).casefold()
+        == _clean_text(project_no, 250).casefold()
+    ):
+        return method
+    return ""
+
+
+def _selected_title_match_alias(imported: Mapping[str, Any]) -> str:
+    """Return the exact configured alias used by the importer, if any."""
+
+    extraction = imported.get("extraction") if isinstance(imported.get("extraction"), Mapping) else {}
+    match = extraction.get("project_match") if isinstance(extraction.get("project_match"), Mapping) else {}
+    nested = match.get("title_match") if isinstance(match.get("title_match"), Mapping) else {}
+    if _clean_text(nested.get("method"), 100) != "approved_alias":
+        return ""
+    return _clean_text(nested.get("alias"), 500)
 
 
 def _compact_review_warnings(values: Any) -> list[str]:
@@ -3081,6 +3176,40 @@ def _compact_review_warnings(values: Any) -> list[str]:
             + suffix
         )
     return result
+
+
+def _source_validation_issues(values: Any) -> list[Any]:
+    """Keep structured parser severity while compacting ordinary display notes."""
+
+    rows = values if isinstance(values, list) else []
+    structured: list[dict[str, str]] = []
+    plain: list[Any] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for raw in rows:
+        if not isinstance(raw, Mapping):
+            plain.append(raw)
+            continue
+        message = _clean_text(raw.get("message") or raw.get("code"), 1_000)
+        if not message:
+            continue
+        row = {
+            "code": _clean_text(raw.get("code"), 120),
+            "severity": _clean_text(raw.get("severity") or "warning", 40).casefold(),
+            "field": _clean_text(raw.get("field"), 160),
+            "filename": _clean_text(raw.get("filename"), 255),
+            "message": message,
+        }
+        key = (
+            row["code"],
+            row["severity"],
+            row["field"],
+            row["filename"],
+            row["message"],
+        )
+        if key not in seen:
+            seen.add(key)
+            structured.append(row)
+    return [*structured, *_compact_review_warnings(plain)]
 
 
 def _periodic_revision_description(report: Mapping[str, Any]) -> str:
@@ -3202,8 +3331,8 @@ def _record_from_uploaded_pdf(
     date_from: str,
     date_to: str,
     report_type: str = "monthly",
-) -> tuple[dict[str, Any] | None, list[str]]:
-    warnings: list[str] = []
+) -> tuple[dict[str, Any] | None, list[Any]]:
+    warnings: list[Any] = []
     data = copy.deepcopy(imported.get("data")) if isinstance(imported.get("data"), dict) else {}
     data = _sanitize_current_split_uploaded_payload(data)
     parsed_project = _clean_text(data.get("project_no"), 250)
@@ -3250,6 +3379,26 @@ def _record_from_uploaded_pdf(
 
     source = imported.get("source") if isinstance(imported.get("source"), dict) else {}
     report_id = f"pdf-{source.get('sha256') or uuid.uuid4().hex}"
+    identity_requires_review = bool(
+        not parsed_project
+        or not parsed_project_title
+        or not title_matches_selected
+        or (
+            parsed_project
+            and not daily_document_no
+            and parsed_project.casefold() != project_no.casefold()
+        )
+    )
+    canonical_identity_match = bool(
+        title_matches_selected
+        and (
+            daily_document_no
+            or (
+                parsed_project
+                and parsed_project.casefold() == project_no.casefold()
+            )
+        )
+    )
     record = {
         "record_type": "final_daily_report",
         "report_id": report_id,
@@ -3263,15 +3412,39 @@ def _record_from_uploaded_pdf(
         "source": source,
         "confidence": imported.get("confidence", {}),
         "import_status": imported.get("status", "needs_review"),
-        "review_required": True,
+        # Exact/approved identities can flow straight to a Draft. Ambiguous
+        # identities and critical parser failures still require confirmation.
+        "review_required": bool(
+            identity_requires_review or imported.get("status") != "ready"
+        ),
         "source_identity": {
             # ``*-DAR`` values are document-control numbers, not the Vendor
             # Project No. used by the periodic report. Preserve both identities.
-            "project_no": project_no if daily_document_no and title_matches_selected else parsed_project,
-            "project_title": project_title if daily_document_no and title_matches_selected else parsed_project_title,
+            "project_no": parsed_project,
+            "project_title": parsed_project_title,
             "reported_project_no": parsed_project,
             "reported_project_title": parsed_project_title,
             "document_no": daily_document_no,
+            "canonical_project_no": project_no if canonical_identity_match else "",
+            "canonical_project_title": project_title if canonical_identity_match else "",
+            "match_method": (
+                _selected_title_match_method(
+                    imported,
+                    project_no,
+                    parsed_project_title,
+                    project_title,
+                )
+                if canonical_identity_match
+                else "confirmation_required"
+            ),
+            "matched_title_alias": (
+                _selected_title_match_alias(imported)
+                if canonical_identity_match
+                else ""
+            ),
+            "review_state": (
+                "matched" if canonical_identity_match else "confirmation_required"
+            ),
         },
     }
     if imported.get("status") != "ready":
@@ -3279,14 +3452,30 @@ def _record_from_uploaded_pdf(
     for warning in imported.get("warnings", []):
         if (
             isinstance(warning, Mapping)
-            and str(warning.get("code") or "") == "project_title_fuzzy_suggestion"
+            and str(warning.get("code") or "") in {
+                "project_title_fuzzy_suggestion",
+                "project_title_alias_suggestion",
+            }
             and daily_document_no
             and title_matches_selected
         ):
             # A high-confidence title match plus an explicit Daily Report
             # document number is expected and need not be repeated for every day.
             continue
-        warnings.append(f"{filename}: {_warning_text(warning)}")
+        if isinstance(warning, Mapping):
+            issue = {
+                "code": _clean_text(warning.get("code"), 120),
+                "severity": _clean_text(warning.get("severity") or "warning", 40).casefold(),
+                "field": _clean_text(warning.get("field"), 160),
+                "filename": _clean_text(warning.get("filename") or filename, 255),
+                "message": _clean_text(
+                    warning.get("message") or warning.get("code") or "PDF parsing warning",
+                    1_000,
+                ),
+            }
+            warnings.append(issue)
+        else:
+            warnings.append(f"{filename}: {_warning_text(warning)}")
     return record, warnings
 
 
@@ -3529,13 +3718,11 @@ def _provisional_project_records(
     project_no: str,
     project_title: str,
 ) -> list[dict[str, Any]]:
-    """Provisionally merge uploaded project identities for the review preview.
+    """Build a safe preview from identities that already match the selection.
 
-    Source Data Validation remains unapplied/unconfirmed, so the reviewer must
-    still decide Merge vs Keep separate before Final issue.  Including all
-    uploaded identities in the provisional preview prevents a project-number
-    mismatch from being misreported as a *missing date* when the Daily Report
-    for that date was actually uploaded and parsed successfully.
+    Ambiguous identities remain visible in Source Data Validation, but are not
+    silently merged into calculations or photo hydration.  A reviewer can add
+    them later with an explicit ``Merge`` decision.
     """
 
     groups = validation.get("project_groups") if isinstance(validation, dict) else []
@@ -3545,7 +3732,7 @@ def _provisional_project_records(
             continue
         resolutions.append({
             "group_key": group["key"],
-            "decision": "merge",
+            "decision": "merge" if group.get("matches_selected") else "separate",
         })
     try:
         included, _ = resolve_project_records(
@@ -3802,49 +3989,49 @@ def _apply_review(draft: dict[str, Any], review: dict[str, Any], *, actor: str =
     _parse_period(period.get("start"), period.get("end"), kind, mode)
     stored_validation = value.get("source_validation")
     if isinstance(stored_validation, dict):
-        if not stored_validation.get("applied") or not stored_validation.get("confirmed"):
-            raise ValueError("Apply Source Data Validation before Preview or Generate.")
+        validation_applied = bool(
+            stored_validation.get("applied") and stored_validation.get("confirmed")
+        )
         incoming_raw = review.get("source_validation")
         if incoming_raw is not None:
             incoming_validation = _source_validation_payload(incoming_raw)
-            if not incoming_validation["confirmed"]:
-                raise ValueError("Confirm Source Data Validation before Preview or Generate.")
-            if (
-                incoming_validation["project_no"] != str(value.get("project_no") or "")
-                or incoming_validation["project_title"] != str(value.get("project_title") or "")
-            ):
-                raise ValueError("Project identity changed. Apply Source Data Validation again.")
-            stored_decisions = {
-                str(group.get("key") or ""): str(group.get("decision") or "")
-                for group in stored_validation.get("project_groups", [])
-                if isinstance(group, dict)
-            }
-            incoming_decisions = {
-                str(row.get("group_key") or ""): str(row.get("decision") or "")
-                for row in incoming_validation["project_resolutions"]
-                if isinstance(row, dict)
-            }
-            if incoming_decisions != stored_decisions:
-                raise ValueError("Project decisions changed. Apply Source Data Validation again.")
-            stored_duplicates = {
-                str(group.get("key") or ""): str(group.get("selected_record_id") or "")
-                for group in stored_validation.get("duplicate_groups", [])
-                if isinstance(group, dict)
-            }
-            incoming_duplicates = {
-                str(row.get("group_key") or ""): str(row.get("selected_record_id") or "")
-                for row in incoming_validation["duplicate_resolutions"]
-                if isinstance(row, dict)
-            }
-            if incoming_duplicates != stored_duplicates:
-                raise ValueError("Duplicate source choices changed. Apply Source Data Validation again.")
+            if validation_applied:
+                if not incoming_validation["confirmed"]:
+                    raise ValueError("Source Data Validation was already applied; keep it confirmed or apply the changed decisions again.")
+                if (
+                    incoming_validation["project_no"] != str(value.get("project_no") or "")
+                    or incoming_validation["project_title"] != str(value.get("project_title") or "")
+                ):
+                    raise ValueError("Project identity changed. Apply Source Data Validation again.")
+                stored_decisions = {
+                    str(group.get("key") or ""): str(group.get("decision") or "")
+                    for group in stored_validation.get("project_groups", [])
+                    if isinstance(group, dict)
+                }
+                incoming_decisions = {
+                    str(row.get("group_key") or ""): str(row.get("decision") or "")
+                    for row in incoming_validation["project_resolutions"]
+                    if isinstance(row, dict)
+                }
+                if incoming_decisions != stored_decisions:
+                    raise ValueError("Project decisions changed. Apply Source Data Validation again.")
+                stored_duplicates = {
+                    str(group.get("key") or ""): str(group.get("selected_record_id") or "")
+                    for group in stored_validation.get("duplicate_groups", [])
+                    if isinstance(group, dict)
+                }
+                incoming_duplicates = {
+                    str(row.get("group_key") or ""): str(row.get("selected_record_id") or "")
+                    for row in incoming_validation["duplicate_resolutions"]
+                    if isinstance(row, dict)
+                }
+                if incoming_duplicates != stored_duplicates:
+                    raise ValueError("Duplicate source choices changed. Apply Source Data Validation again.")
             stored_validation["notes"] = incoming_validation["notes"]
         value["source_validation"] = stored_validation
-    if has_pending_workforce_review(value):
-        raise ValueError("Apply or keep every timesheet/overtime preview before Preview or Generate.")
-    ai_summary = value.get("ai_summary")
-    if isinstance(ai_summary, dict) and ai_summary.get("status") == "suggested":
-        raise ValueError("Accept or reject the pending AI narrative suggestions before Preview or Generate.")
+    # Pending source/workforce/AI reviews are surfaced by preflight. They do
+    # not prevent a Draft/Preview from rendering; only critical Final checks
+    # may block issue.
     value["report_type"] = kind
     value["report_title"] = f"{_report_name(kind)} Progress Report"
     value["report_mode"] = mode
@@ -4750,6 +4937,9 @@ def register_monthly_routes(
                 date_to=end.strftime("%Y-%m-%d"),
                 project_no=project_no,
                 expected_dates=_expected_dates(start, end),
+                work_hours_policy=_project_work_hours_policy(
+                    config_provider(), project_no=project_no, project_title=project_title
+                ),
             )
             selected_ids = {
                 str(item.get("report_id") or "")
@@ -5161,15 +5351,18 @@ def register_monthly_routes(
             project_title = _clean_text(manifest.get("project_title"), 500)
             records: list[dict[str, Any]] = []
             seen_hashes: set[str] = set()
-            warnings = [
+            warnings: list[Any] = [
                 "Uploaded PDF data was normalized from a Daily Report template. "
                 "Project identity, manpower, man-hours, warnings, and editable summaries must be validated before issue."
             ]
             for item in items:
                 for warning in item.get("warnings", []):
-                    warning_text = str(warning).strip()
-                    if warning_text:
-                        warnings.append(warning_text)
+                    if isinstance(warning, Mapping):
+                        warnings.append(dict(warning))
+                    else:
+                        warning_text = str(warning).strip()
+                        if warning_text:
+                            warnings.append(warning_text)
                 record = item.get("record") if isinstance(item.get("record"), dict) else None
                 if record is None:
                     continue
@@ -5211,13 +5404,14 @@ def register_monthly_routes(
 
             photo_limits = periodic_photo_limits(kind)
             warnings.extend(_bound_record_photo_candidates(records, limits=photo_limits))
+            source_issues = _source_validation_issues(warnings)
             warnings = _compact_review_warnings(warnings)
 
             source_validation = build_source_validation(
                 records,
                 selected_project_no=project_no,
                 selected_project_title=project_title,
-                issues=warnings,
+                issues=source_issues,
             )
             provisional_records = _provisional_project_records(
                 records,
@@ -5231,6 +5425,9 @@ def register_monthly_routes(
                 date_to=end.strftime("%Y-%m-%d"),
                 project_no=project_no,
                 expected_dates=_expected_dates(start, end),
+                work_hours_policy=_project_work_hours_policy(
+                    config_provider(), project_no=project_no, project_title=project_title
+                ),
             )
             selected_ids = {
                 str(item.get("report_id") or "")
@@ -5357,7 +5554,7 @@ def register_monthly_routes(
             config = config_provider()
             known_projects = config.get("projects", []) if isinstance(config, dict) else []
             records = []
-            warnings = [
+            warnings: list[Any] = [
                 "Uploaded PDF data was normalized from a Daily Report template. "
                 "Project identity, manpower, man-hours, warnings, and editable summaries must be validated before issue."
             ]
@@ -5449,12 +5646,13 @@ def register_monthly_routes(
                 records = in_window
             photo_limits = periodic_photo_limits(kind)
             warnings.extend(_bound_record_photo_candidates(records, limits=photo_limits))
+            source_issues = _source_validation_issues(warnings)
             warnings = _compact_review_warnings(warnings)
             source_validation = build_source_validation(
                 records,
                 selected_project_no=project_no,
                 selected_project_title=project_title,
-                issues=warnings,
+                issues=source_issues,
             )
             provisional_records = _provisional_project_records(
                 records,
@@ -5468,6 +5666,9 @@ def register_monthly_routes(
                 date_to=end.strftime("%Y-%m-%d"),
                 project_no=project_no,
                 expected_dates=_expected_dates(start, end),
+                work_hours_policy=_project_work_hours_policy(
+                    config, project_no=project_no, project_title=project_title
+                ),
             )
             selected_ids = {
                 str(item.get("report_id") or "")
@@ -5568,6 +5769,9 @@ def register_monthly_routes(
                 date_to=end.strftime("%Y-%m-%d"),
                 project_no=project_no,
                 expected_dates=_expected_dates(start, end),
+                work_hours_policy=_project_work_hours_policy(
+                    config_provider(), project_no=project_no, project_title=project_title
+                ),
             )
             selected_ids = {
                 str(item.get("report_id") or "")
@@ -5874,7 +6078,12 @@ def register_monthly_routes(
             _require_applied_source_validation(draft)
             if has_pending_workforce_review(draft):
                 raise ValueError("Apply or keep every timesheet/overtime preview before generating AI suggestions.")
-            _refresh_deterministic_summary(draft)
+            # Build the provider input from a refreshed deterministic snapshot,
+            # but do not mutate client-facing draft fields merely because the
+            # user requested an AI suggestion. Those fields change only after
+            # the reviewer explicitly accepts the suggestion.
+            grounded_draft = copy.deepcopy(draft)
+            _refresh_deterministic_summary(grounded_draft)
 
             remaining = _ai_cooldown_remaining(draft)
             if remaining:
@@ -5896,7 +6105,7 @@ def register_monthly_routes(
                 "attempt_id": uuid.uuid4().hex,
             }
             _update_draft(data_dir, username, draft)
-            envelope = generate_ai_summary(draft)
+            envelope = generate_ai_summary(grounded_draft)
             raw = envelope.get("suggestion") if isinstance(envelope.get("suggestion"), dict) else {}
             concerns = []
             concern_evidence = []
@@ -5933,9 +6142,11 @@ def register_monthly_routes(
                 text = _claim_text(row)
                 area = _clean_text(row.get("area"), 200)
                 workstream = _clean_text(row.get("workstream"), 200)
+                stable_id = _clean_text(row.get("stable_id"), 100)
                 if text:
                     references = _clean_ai_references(row)
                     current_activities.append({
+                        "stable_id": stable_id,
                         "area": area,
                         "workstream": workstream,
                         "text": text,
@@ -5946,10 +6157,10 @@ def register_monthly_routes(
             # Claude may polish wording, but deterministic Area + Workstream
             # grouping remains authoritative and is restored before review.
             current_activities = _align_ai_activity_rows(
-                current_activities, draft, preserve_unmatched_baseline=True
+                current_activities, grounded_draft, preserve_unmatched_baseline=True
             )
             # Preserve deterministic source status even when Claude omits it.
-            current_activities = _enrich_activity_statuses(current_activities, draft)
+            current_activities = _enrich_activity_statuses(current_activities, grounded_draft)
 
             claim_evidence = [
                 _clean_ai_references(row)
@@ -5970,13 +6181,27 @@ def register_monthly_routes(
                 "lookahead": lookahead_evidence,
                 "claims": claim_evidence,
             })
-            current_engineering = draft.get("engineering") if isinstance(draft.get("engineering"), dict) else {}
-            current_procurement = draft.get("procurement") if isinstance(draft.get("procurement"), dict) else {}
-            current_site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
+            current_engineering = (
+                grounded_draft.get("engineering")
+                if isinstance(grounded_draft.get("engineering"), dict)
+                else {}
+            )
+            current_procurement = (
+                grounded_draft.get("procurement")
+                if isinstance(grounded_draft.get("procurement"), dict)
+                else {}
+            )
+            current_site = (
+                grounded_draft.get("site")
+                if isinstance(grounded_draft.get("site"), dict)
+                else {}
+            )
             display = {
                 # A missing AI section must never make the review look worse
                 # than the deterministic draft that existed before AI.
-                "executive_summary": _executive_ai_candidate(draft, raw.get("executive_summary")),
+                "executive_summary": _executive_ai_candidate(
+                    grounded_draft, raw.get("executive_summary")
+                ),
                 "engineering_summary": _usable_ai_text(raw.get("engineering_summary"))
                 or _clean_text(current_engineering.get("summary"), 4_000),
                 "procurement_summary": _usable_ai_text(raw.get("procurement_summary"))

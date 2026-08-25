@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
+import unicodedata
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
+
+from .area_normalization import reporting_activity_area
 
 
 _TIME_RANGE = re.compile(
@@ -16,6 +20,15 @@ _TIME_RANGE = re.compile(
 )
 _ROLE_FIELDS = ("role", "position", "role_position")
 _HOURS_FIELDS = ("hours", "working_hours", "work_hours")
+_EMPLOYEE_ID_FIELDS = (
+    "employee_id",
+    "employee_no",
+    "personnel_id",
+    "personnel_no",
+    "nik",
+    "badge_no",
+)
+_MANPOWER_STATUSES = {"reported", "none_reported", "not_supplied"}
 _PROGRESS_NUMERIC_FIELDS = (
     "weight_factor",
     "cumulative_previous_plan",
@@ -178,7 +191,79 @@ def _dedupe_entries(entries: list[dict[str, Any]], *keys: str) -> list[dict[str,
     return result
 
 
-def _hours_value(value: Any) -> float | None:
+def _policy_number(value: Any, default: float) -> float:
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) and number >= 0 else default
+
+
+def _normalise_work_hours_policy(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return a bounded, permissive physical-hours policy.
+
+    The legacy elapsed/no-break calculation is deliberately the default.  A
+    project may opt into one fixed break deduction without changing explicit
+    ``man_hours`` supplied by the Daily Report.  Unsupported values fall back to
+    the legacy behavior instead of preventing compilation.
+    """
+
+    raw = value if isinstance(value, Mapping) else {}
+    requested_mode = _normalise_text(raw.get("mode") or raw.get("calculation"))
+    mode_aliases = {
+        "elapsed": "elapsed_no_break",
+        "elapsed no break": "elapsed_no_break",
+        "elapsed_no_break": "elapsed_no_break",
+        "elapsed less break": "elapsed_less_break",
+        "elapsed_less_break": "elapsed_less_break",
+        # Accept the early sandbox spelling without exposing two policies.
+        "elapsed minus break": "elapsed_less_break",
+        "elapsed_minus_break": "elapsed_less_break",
+    }
+    mode = mode_aliases.get(requested_mode, "elapsed_no_break")
+    break_minutes = _policy_number(raw.get("break_minutes"), 0.0)
+    if raw.get("break_hours") not in (None, ""):
+        break_minutes = 60.0 * _policy_number(raw.get("break_hours"), 0.0)
+    break_minutes = min(break_minutes, 240.0)
+    threshold_minutes = _policy_number(
+        raw.get("deduct_when_elapsed_gte_minutes"),
+        -1.0,
+    )
+    if threshold_minutes < 0:
+        threshold_hours = _policy_number(
+            raw.get(
+                "deduct_when_elapsed_gte",
+                raw.get("minimum_shift_hours", raw.get("break_threshold_hours")),
+            ),
+            6.0,
+        )
+        threshold_minutes = threshold_hours * 60.0
+    threshold_minutes = min(threshold_minutes, 24 * 60.0)
+    allow_overnight_raw = raw.get("allow_overnight", True)
+    allow_overnight = (
+        allow_overnight_raw
+        if isinstance(allow_overnight_raw, bool)
+        else _normalise_text(allow_overnight_raw) not in {"0", "false", "no", "off"}
+    )
+    if mode != "elapsed_less_break":
+        break_minutes = 0.0
+        threshold_minutes = 0.0
+    return {
+        "mode": mode,
+        "break_minutes": round(break_minutes, 2),
+        "deduct_when_elapsed_gte_minutes": round(threshold_minutes, 2),
+        "allow_overnight": bool(allow_overnight),
+        "version": _clean_text(raw.get("version")) or "work-hours-policy/1",
+        "configured": bool(value),
+    }
+
+
+def _hours_value(
+    value: Any,
+    work_hours_policy: Mapping[str, Any] | None = None,
+) -> float | None:
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -200,8 +285,18 @@ def _hours_value(value: Any) -> float | None:
             return None
         minutes = (end_h * 60 + end_m) - (start_h * 60 + start_m)
         if minutes < 0:
+            policy = _normalise_work_hours_policy(work_hours_policy)
+            if not policy["allow_overnight"]:
+                return None
             minutes += 24 * 60
-        return minutes / 60.0
+        elapsed = minutes / 60.0
+        policy = _normalise_work_hours_policy(work_hours_policy)
+        if (
+            policy["mode"] == "elapsed_less_break"
+            and minutes >= float(policy["deduct_when_elapsed_gte_minutes"])
+        ):
+            elapsed = max(0.0, elapsed - float(policy["break_minutes"]) / 60.0)
+        return elapsed
 
     number_text = text.replace("%", "").replace(" ", "")
     if "," in number_text and "." not in number_text:
@@ -248,7 +343,10 @@ def _person_role(row: Mapping[str, Any]) -> str:
     return ""
 
 
-def _person_hours(row: Mapping[str, Any]) -> tuple[float | None, str, str, int]:
+def _person_hours(
+    row: Mapping[str, Any],
+    work_hours_policy: Mapping[str, Any] | None = None,
+) -> tuple[float | None, str, str, int]:
     """Normalise legacy hour fields and retain their completeness state.
 
     A valid explicit ``man_hours`` value is authoritative, including zero. If
@@ -268,7 +366,7 @@ def _person_hours(row: Mapping[str, Any]) -> tuple[float | None, str, str, int]:
         if not _has_value(value):
             continue
         supplied_aliases.append(field)
-        parsed = _hours_value(value)
+        parsed = _hours_value(value, work_hours_policy)
         if parsed is not None:
             return parsed, "parsed", field, 1
 
@@ -278,15 +376,66 @@ def _person_hours(row: Mapping[str, Any]) -> tuple[float | None, str, str, int]:
     return None, "missing", "", 0
 
 
-def _person_key(row: Mapping[str, Any], category: str, index: int) -> tuple[str, str]:
+def _normalise_employee_id(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", _clean_text(value)).casefold()
+    return " ".join(text.split())
+
+
+def _person_employee_id(row: Mapping[str, Any]) -> str:
+    for field in _EMPLOYEE_ID_FIELDS:
+        employee_id = _normalise_employee_id(row.get(field))
+        if employee_id:
+            return employee_id
+    return ""
+
+
+def _known_employee_ids_by_name(
+    rows: Iterable[Mapping[str, Any]],
+) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        name = _normalise_text(row.get("name"))
+        employee_id = _person_employee_id(row)
+        if name and employee_id:
+            result[name].add(employee_id)
+    return result
+
+
+def _person_key(
+    row: Mapping[str, Any],
+    category: str,
+    index: int,
+    known_ids_by_name: Mapping[str, set[str]] | None = None,
+) -> tuple[str, str]:
+    employee_id = _person_employee_id(row)
+    if employee_id:
+        return ("employee_id", employee_id)
     name = _normalise_text(row.get("name"))
     if name:
+        # A name-only occurrence may join one unambiguous, exactly matching ID
+        # occurrence.  Multiple IDs with the same name remain distinct and the
+        # name-only row is retained for review; no fuzzy identity inference is
+        # ever performed.
+        known_ids = set((known_ids_by_name or {}).get(name, set()))
+        if len(known_ids) == 1:
+            return ("employee_id", next(iter(known_ids)))
         return ("name", name)
     # Anonymous rows cannot be proven to be the same person, so retain each one.
     return ("anonymous", f"{category}:{index}")
 
 
 def _merge_person(existing: dict[str, Any], incoming: Mapping[str, Any]) -> None:
+    existing["occurrence_count"] = int(existing.get("occurrence_count") or 1) + int(
+        incoming.get("occurrence_count") or 1
+    )
+    for list_field in ("source_names", "source_areas", "role_variants", "hours_variants"):
+        current = existing.setdefault(list_field, [])
+        for value in incoming.get(list_field, []):
+            if value not in current:
+                current.append(value)
+
     if not existing["role"] and incoming.get("role"):
         existing["role"] = incoming["role"]
 
@@ -313,23 +462,47 @@ def _merge_person(existing: dict[str, Any], incoming: Mapping[str, Any]) -> None
         existing["hours_priority"] = incoming_priority
 
 
-def _dedupe_people(rows: list[Mapping[str, Any]], category: str) -> dict[tuple[str, str], dict[str, Any]]:
+def _dedupe_people(
+    rows: list[Mapping[str, Any]],
+    category: str,
+    *,
+    known_ids_by_name: Mapping[str, set[str]] | None = None,
+    work_hours_policy: Mapping[str, Any] | None = None,
+) -> dict[tuple[str, str], dict[str, Any]]:
     people: dict[tuple[str, str], dict[str, Any]] = {}
     for index, row in enumerate(rows):
         if not isinstance(row, Mapping):
             continue
-        relevant_fields = ("name", "man_hours", *_ROLE_FIELDS, *_HOURS_FIELDS)
+        relevant_fields = (
+            "name",
+            "man_hours",
+            *_EMPLOYEE_ID_FIELDS,
+            *_ROLE_FIELDS,
+            *_HOURS_FIELDS,
+        )
         if not any(_has_value(row.get(key)) for key in relevant_fields):
             continue
-        key = _person_key(row, category, index)
-        hours, hours_state, hours_source, hours_priority = _person_hours(row)
+        key = _person_key(row, category, index, known_ids_by_name)
+        hours, hours_state, hours_source, hours_priority = _person_hours(
+            row, work_hours_policy
+        )
+        name = _clean_text(row.get("name"))
+        role = _person_role(row)
+        source_area = _clean_text(row.get("_source_area"))
         incoming = {
-            "name": _clean_text(row.get("name")),
-            "role": _person_role(row),
+            "employee_id": key[1] if key[0] == "employee_id" else "",
+            "identity_method": key[0],
+            "name": name,
+            "role": role,
             "hours": hours,
             "hours_state": hours_state,
             "hours_source": hours_source,
             "hours_priority": hours_priority,
+            "occurrence_count": 1,
+            "source_names": [name] if name else [],
+            "source_areas": [source_area] if source_area else [],
+            "role_variants": [role] if role else [],
+            "hours_variants": [hours] if hours is not None else [],
         }
         existing = people.get(key)
         if existing is None:
@@ -357,27 +530,62 @@ def _hours_completeness(people: Mapping[Any, Mapping[str, Any]]) -> dict[str, An
     }
 
 
-def _daily_manpower(payload: Mapping[str, Any], report_date: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _daily_manpower(
+    payload: Mapping[str, Any],
+    report_date: str,
+    *,
+    work_hours_policy: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     direct_rows: list[Mapping[str, Any]] = []
     indirect_rows: list[Mapping[str, Any]] = []
+
+    def sourced(row: Mapping[str, Any], area: str) -> dict[str, Any]:
+        result = dict(row)
+        result["_source_area"] = _clean_text(
+            row.get("source_area") or row.get("_source_area") or area
+        )
+        return result
+
     global_indirect = payload.get("indirect_manpower")
     if isinstance(global_indirect, list):
-        indirect_rows.extend(row for row in global_indirect if isinstance(row, Mapping))
+        indirect_rows.extend(
+            sourced(row, "General")
+            for row in global_indirect
+            if isinstance(row, Mapping)
+        )
 
     areas = payload.get("areas")
     if isinstance(areas, list):
         for area in areas:
             if not isinstance(area, Mapping):
                 continue
+            area_name = _clean_text(area.get("id")) or "General"
             direct = area.get("manpower")
             if isinstance(direct, list):
-                direct_rows.extend(row for row in direct if isinstance(row, Mapping))
+                direct_rows.extend(
+                    sourced(row, area_name) for row in direct if isinstance(row, Mapping)
+                )
             indirect = area.get("indirect_manpower")
             if isinstance(indirect, list):
-                indirect_rows.extend(row for row in indirect if isinstance(row, Mapping))
+                indirect_rows.extend(
+                    sourced(row, area_name)
+                    for row in indirect
+                    if isinstance(row, Mapping)
+                )
 
-    direct = _dedupe_people(direct_rows, "direct")
-    indirect = _dedupe_people(indirect_rows, "indirect")
+    known_ids_by_name = _known_employee_ids_by_name([*direct_rows, *indirect_rows])
+    direct = _dedupe_people(
+        direct_rows,
+        "direct",
+        known_ids_by_name=known_ids_by_name,
+        work_hours_policy=work_hours_policy,
+    )
+    indirect = _dedupe_people(
+        indirect_rows,
+        "indirect",
+        known_ids_by_name=known_ids_by_name,
+        work_hours_policy=work_hours_policy,
+    )
 
     # The same employee can appear in the global Indirect table and again in an
     # area Direct table on the same day.  Treat that as one physical person.
@@ -393,6 +601,7 @@ def _daily_manpower(payload: Mapping[str, Any], report_date: str) -> tuple[dict[
         person_name = _clean_text(direct[key].get("name")) or _clean_text(indirect_person.get("name"))
         cross_category_duplicates.append({
             "name": person_name or "Unnamed person",
+            "employee_id": _clean_text(direct[key].get("employee_id")),
             "kept_as": "direct",
         })
         indirect.pop(key, None)
@@ -407,20 +616,92 @@ def _daily_manpower(payload: Mapping[str, Any], report_date: str) -> tuple[dict[
     direct_completeness = _hours_completeness(direct)
     indirect_completeness = _hours_completeness(indirect)
     total_completeness = _hours_completeness(combined)
+    explicit_status = _normalise_text(payload.get("manpower_status"))
+    status = explicit_status if explicit_status in _MANPOWER_STATUSES else ""
+    identity_review: list[dict[str, Any]] = []
+    if combined and status in {"none_reported", "not_supplied"}:
+        identity_review.append({
+            "severity": "warning",
+            "code": "manpower_status_conflict",
+            "message": "Manpower rows were supplied although the source status did not report manpower; rows were retained.",
+        })
+        status = "reported"
+    elif not status:
+        status = "reported" if combined else "not_supplied"
+
+    for name_key, employee_ids in sorted(known_ids_by_name.items()):
+        if len(employee_ids) > 1:
+            identity_review.append({
+                "severity": "warning",
+                "code": "same_name_distinct_employee_ids",
+                "name": next(
+                    (
+                        _clean_text(row.get("name"))
+                        for row in [*direct_rows, *indirect_rows]
+                        if _normalise_text(row.get("name")) == name_key
+                    ),
+                    name_key,
+                ),
+                "employee_ids": sorted(employee_ids),
+                "message": "The same exact name is associated with multiple employee IDs; identities were kept separate.",
+            })
+
+    for person in combined.values():
+        names = list(person.get("source_names") or [])
+        roles = list(person.get("role_variants") or [])
+        areas_for_person = list(person.get("source_areas") or [])
+        hours_variants = list(person.get("hours_variants") or [])
+        if person.get("employee_id") and len({_normalise_text(name) for name in names}) > 1:
+            identity_review.append({
+                "severity": "warning",
+                "code": "employee_id_name_variation",
+                "employee_id": person["employee_id"],
+                "names": names,
+                "message": "One employee ID has multiple exact source-name variants; the ID was authoritative.",
+            })
+        if len({_normalise_text(role) for role in roles}) > 1:
+            identity_review.append({
+                "severity": "warning",
+                "code": "employee_role_variation",
+                "name": person.get("name") or "Unnamed person",
+                "roles": roles,
+                "message": "One exact employee identity has multiple source roles; the first supplied role was retained.",
+            })
+        if len(hours_variants) > 1:
+            identity_review.append({
+                "severity": "info",
+                "code": "employee_hours_variation",
+                "name": person.get("name") or "Unnamed person",
+                "hours": hours_variants,
+                "message": "One exact employee identity has multiple source hour values; the authoritative or longest value was retained.",
+            })
+        if len(areas_for_person) > 1 and person.get("identity_method") == "name":
+            identity_review.append({
+                "severity": "info",
+                "code": "exact_name_multiple_areas",
+                "name": person.get("name") or "Unnamed person",
+                "source_areas": areas_for_person,
+                "message": "An exact normalized name occurred in multiple areas and was counted once for the day.",
+            })
+
+    supplied = status != "not_supplied"
     day = {
         "date": report_date,
-        "direct_headcount": len(direct),
-        "indirect_headcount": len(indirect),
-        "total_headcount": len(combined),
-        "direct_man_hours": hours_total(direct),
-        "indirect_man_hours": hours_total(indirect),
-        "total_man_hours": hours_total(combined),
+        "manpower_status": status,
+        "supplied": supplied,
+        "direct_headcount": len(direct) if supplied else None,
+        "indirect_headcount": len(indirect) if supplied else None,
+        "total_headcount": len(combined) if supplied else None,
+        "direct_man_hours": hours_total(direct) if supplied else None,
+        "indirect_man_hours": hours_total(indirect) if supplied else None,
+        "total_man_hours": hours_total(combined) if supplied else None,
         "parsed_hours_count": total_completeness["parsed_hours_count"],
         "zero_hours_count": total_completeness["zero_hours_count"],
         "missing_hours_count": total_completeness["missing_hours_count"],
         "invalid_hours_count": total_completeness["invalid_hours_count"],
         "unparsed_hours_count": total_completeness["unparsed_hours_count"],
-        "hours_complete": total_completeness["hours_complete"],
+        "headcount_complete": supplied,
+        "hours_complete": supplied and total_completeness["hours_complete"],
         "hours_completeness": {
             "direct": direct_completeness,
             "indirect": indirect_completeness,
@@ -428,10 +709,14 @@ def _daily_manpower(payload: Mapping[str, Any], report_date: str) -> tuple[dict[
         },
         "cross_category_duplicate_count": len(cross_category_duplicates),
         "cross_category_duplicates": cross_category_duplicates,
+        "identity_review_required": any(
+            row.get("severity") == "warning" for row in identity_review
+        ),
+        "identity_review": identity_review,
     }
 
     role_rows = []
-    for person in combined.values():
+    for person in (combined.values() if supplied else []):
         role_rows.append(
             {
                 "date": report_date,
@@ -571,6 +856,144 @@ def _aggregate_progress(selected: list[tuple[str, Mapping[str, Any]]]) -> dict[s
     }
 
 
+def _iter_constraint_facts(value: Any) -> Iterable[dict[str, str]]:
+    """Yield source constraint facts without inferring action or closeout data."""
+
+    if isinstance(value, str):
+        text = _clean_text(value)
+        if text:
+            yield {"text": text}
+        return
+    if isinstance(value, Mapping):
+        text = _clean_text(
+            value.get("text")
+            or value.get("constraint")
+            or value.get("concern")
+            or value.get("description")
+        )
+        if not text:
+            return
+        yield {
+            "text": text,
+            "status": _clean_text(value.get("status")),
+            "action": _clean_text(
+                value.get("corrective_action") or value.get("action")
+            ),
+            "pic": _clean_text(value.get("pic") or value.get("owner")),
+            "target_date": _clean_text(value.get("target_date")),
+            "closed_date": _clean_text(value.get("closed_date")),
+        }
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_constraint_facts(item)
+
+
+def _is_no_constraint_text(value: Any) -> bool:
+    return _normalise_text(value) in {
+        "",
+        "-",
+        "n/a",
+        "na",
+        "nil",
+        "none",
+        "not applicable",
+        "no issue",
+        "no issues",
+        "no constraint",
+        "no constraints",
+        "no constraint reported",
+        "no constraints reported",
+        "tidak ada",
+    }
+
+
+def _constraint_register(constraints: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Consolidate only exact normalized constraint text and reporting area.
+
+    Similar wording is intentionally kept separate.  A neutral ``reported``
+    state is used when the source has no explicit status; the compiler never
+    invents an open/closed state, owner, target date, or corrective action.
+    """
+
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str]] = []
+    for raw in constraints:
+        if not isinstance(raw, Mapping):
+            continue
+        text = _clean_text(raw.get("text"))
+        if _is_no_constraint_text(text):
+            continue
+        reporting_area = _clean_text(raw.get("reporting_area") or raw.get("area")) or "General"
+        source_area = _clean_text(raw.get("source_area") or raw.get("area")) or "General"
+        key = (_normalise_text(reporting_area), _normalise_text(text))
+        if key not in grouped:
+            digest = hashlib.sha256(f"{key[0]}\0{key[1]}".encode("utf-8")).hexdigest()[:20]
+            grouped[key] = {
+                "constraint_id": f"constraint-{digest}",
+                "id": f"constraint-{digest}",
+                "area": reporting_area,
+                "source_area": source_area,
+                "source_areas": [],
+                "reporting_area": reporting_area,
+                "description": text,
+                "text": text,
+                "first_reported_date": "",
+                "last_reported_date": "",
+                "reported_dates": [],
+                "occurrence_count": 0,
+                "status": "reported",
+                "corrective_action": "",
+                "action": "",
+                "pic": "",
+                "target_date": "",
+                "closed_date": "",
+                "source_report_ids": [],
+                "source_paths": [],
+                "matching_method": "exact_normalized_area_and_text",
+            }
+            order.append(key)
+        item = grouped[key]
+        item["occurrence_count"] += 1
+        if source_area not in item["source_areas"]:
+            item["source_areas"].append(source_area)
+        report_date = _clean_text(raw.get("date"))
+        if report_date and report_date not in item["reported_dates"]:
+            item["reported_dates"].append(report_date)
+        source_report_id = _clean_text(raw.get("source_report_id"))
+        if source_report_id and source_report_id not in item["source_report_ids"]:
+            item["source_report_ids"].append(source_report_id)
+        source_path = _clean_text(raw.get("source_path"))
+        if source_path and source_path not in item["source_paths"]:
+            item["source_paths"].append(source_path)
+
+        # Only explicitly supplied management fields may replace the neutral
+        # defaults.  Because source rows are date-ordered, the latest supplied
+        # value is retained while all occurrence provenance remains available.
+        explicit_status = _clean_text(raw.get("status"))
+        action = _clean_text(raw.get("action") or raw.get("corrective_action"))
+        if explicit_status:
+            item["status"] = explicit_status
+        if action:
+            item["corrective_action"] = action
+            item["action"] = action
+        for field in ("pic", "target_date", "closed_date"):
+            value = _clean_text(raw.get(field))
+            if value:
+                item[field] = value
+
+    result = [grouped[key] for key in order]
+    for item in result:
+        item["reported_dates"].sort()
+        item["first_reported_date"] = (
+            item["reported_dates"][0] if item["reported_dates"] else ""
+        )
+        item["last_reported_date"] = (
+            item["reported_dates"][-1] if item["reported_dates"] else ""
+        )
+    return result
+
+
 def aggregate_monthly_records(
     records: Iterable[Mapping[str, Any]],
     *,
@@ -579,6 +1002,7 @@ def aggregate_monthly_records(
     project_no: str | None = None,
     project_title: str | None = None,
     expected_dates: Iterable[str] | None = None,
+    work_hours_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate canonical records for one project and inclusive date range.
 
@@ -590,6 +1014,7 @@ def aggregate_monthly_records(
     date_to = _iso_date(date_to, "date_to")
     if date_from > date_to:
         raise ValueError("date_from cannot be after date_to.")
+    effective_hours_policy = _normalise_work_hours_policy(work_hours_policy)
 
     wanted_no = _normalise_text(project_no) if project_no is not None else None
     wanted_title = _normalise_text(project_title) if project_title is not None else None
@@ -669,10 +1094,7 @@ def aggregate_monthly_records(
             weather_item["source_report_id"] = source_report_id
             weather_item["source_path"] = "$.weather"
             weather_daily.append(weather_item)
-        constraint_state = _clean_text(payload.get("constraint_status"))
-        if constraint_state not in {"none_reported", "reported", "not_supplied"}:
-            constraint_state = "not_supplied"
-        constraint_daily.append({"date": report_date, "status": constraint_state})
+        constraint_count_before = len(constraints)
         areas = payload.get("areas")
         if not isinstance(areas, list):
             areas = []
@@ -685,9 +1107,15 @@ def aggregate_monthly_records(
                 description = _clean_period_text(description)
                 if not description:
                     continue
+                area_meta = reporting_activity_area(area_name, description)
                 item = {
                     "date": report_date,
                     "area": area_name,
+                    "source_area": area_meta["source_area"],
+                    "reporting_area": area_meta["reporting_area"],
+                    "area_mapping_method": area_meta["method"],
+                    "area_mapping_confidence": area_meta["confidence"],
+                    "area_review_required": bool(area_meta["review_required"]),
                     "description": description,
                     "source_report_id": source_report_id,
                     "source_path": f"$.areas[{area_index}].activities_today[{activity_index}]",
@@ -696,21 +1124,38 @@ def aggregate_monthly_records(
                 if status:
                     item["status"] = status
                 activities.append(item)
-            for constraint_index, text in enumerate(_iter_text_values(area.get("constraints"))):
-                text = _clean_period_text(text)
+            constraint_area_meta = reporting_activity_area(area_name, "")
+            for constraint_index, fact in enumerate(
+                _iter_constraint_facts(area.get("constraints"))
+            ):
+                text = _clean_period_text(fact.get("text"))
                 if not text:
                     continue
-                constraints.append({
-                    "date": report_date, "area": area_name, "text": text,
+                constraint = {
+                    "date": report_date,
+                    "area": area_name,
+                    "source_area": constraint_area_meta["source_area"],
+                    "reporting_area": constraint_area_meta["reporting_area"],
+                    "area_mapping_method": constraint_area_meta["method"],
+                    "text": text,
                     "source_report_id": source_report_id,
                     "source_path": f"$.areas[{area_index}].constraints[{constraint_index}]",
-                })
+                }
+                for field in ("status", "action", "pic", "target_date", "closed_date"):
+                    if fact.get(field):
+                        constraint[field] = fact[field]
+                constraints.append(constraint)
             for remark_index, text in enumerate(_iter_text_values(area.get("remarks"))):
                 text = _clean_period_text(text)
                 if not text:
                     continue
                 remarks.append({
-                    "date": report_date, "area": area_name, "text": text,
+                    "date": report_date,
+                    "area": area_name,
+                    "source_area": constraint_area_meta["source_area"],
+                    "reporting_area": constraint_area_meta["reporting_area"],
+                    "area_mapping_method": constraint_area_meta["method"],
+                    "text": text,
                     "source_report_id": source_report_id,
                     "source_path": f"$.areas[{area_index}].remarks[{remark_index}]",
                 })
@@ -720,25 +1165,101 @@ def aggregate_monthly_records(
             for key, target in (("planned_next_week", planned_next_week), ("next_week_activities", planned_next_week),
                                 ("planned_next_month", planned_next_month), ("next_month_activities", planned_next_month)):
                 for plan_index, description in enumerate(_iter_text_values(area.get(key))):
+                    lookahead_area_meta = reporting_activity_area(area_name, description)
                     target.append({
-                        "source_date": report_date, "area": area_name, "description": description,
+                        "source_date": report_date,
+                        "area": area_name,
+                        "source_area": lookahead_area_meta["source_area"],
+                        "reporting_area": lookahead_area_meta["reporting_area"],
+                        "area_mapping_method": lookahead_area_meta["method"],
+                        "description": description,
                         "source_report_id": source_report_id,
                         "source_path": f"$.areas[{area_index}].{key}[{plan_index}]",
                     })
-        day, day_roles = _daily_manpower(payload, report_date)
+        for field in ("global_constraints", "constraints"):
+            for constraint_index, fact in enumerate(
+                _iter_constraint_facts(payload.get(field))
+            ):
+                text = _clean_period_text(fact.get("text"))
+                if not text:
+                    continue
+                constraint = {
+                    "date": report_date,
+                    "area": "General",
+                    "source_area": "General",
+                    "reporting_area": "General",
+                    "area_mapping_method": "source_fallback",
+                    "text": text,
+                    "source_report_id": source_report_id,
+                    "source_path": f"$.{field}[{constraint_index}]",
+                }
+                for fact_field in ("status", "action", "pic", "target_date", "closed_date"):
+                    if fact.get(fact_field):
+                        constraint[fact_field] = fact[fact_field]
+                constraints.append(constraint)
+        for field in ("global_remarks", "remarks"):
+            for remark_index, text in enumerate(_iter_text_values(payload.get(field))):
+                text = _clean_period_text(text)
+                if not text:
+                    continue
+                remarks.append({
+                    "date": report_date,
+                    "area": "General",
+                    "source_area": "General",
+                    "reporting_area": "General",
+                    "area_mapping_method": "source_fallback",
+                    "text": text,
+                    "source_report_id": source_report_id,
+                    "source_path": f"$.{field}[{remark_index}]",
+                })
+
+        constraint_state = _normalise_text(payload.get("constraint_status"))
+        day_constraint_rows = [
+            row
+            for row in constraints[constraint_count_before:]
+            if isinstance(row, Mapping)
+        ]
+        real_constraints_supplied = any(
+            not _is_no_constraint_text(row.get("text"))
+            for row in day_constraint_rows
+        )
+        explicit_none_reported = any(
+            _clean_text(row.get("text")) and _is_no_constraint_text(row.get("text"))
+            for row in day_constraint_rows
+        )
+        if real_constraints_supplied:
+            constraint_state = "reported"
+        elif constraint_state not in {"none_reported", "reported", "not_supplied"}:
+            constraint_state = "none_reported" if explicit_none_reported else "not_supplied"
+        constraint_daily.append({"date": report_date, "status": constraint_state})
+
+        day, day_roles = _daily_manpower(
+            payload,
+            report_date,
+            work_hours_policy=effective_hours_policy,
+        )
         daily_manpower.append(day)
         role_rows.extend(day_roles)
 
+    constraint_register_source = list(constraints)
     activities = _dedupe_entries(activities, "date", "area", "description")
-    constraints = _dedupe_entries(constraints, "date", "area", "text")
+    constraints = [
+        row
+        for row in _dedupe_entries(constraints, "date", "area", "text")
+        if not _is_no_constraint_text(row.get("text"))
+    ]
     remarks = _dedupe_entries(remarks, "date", "area", "text")
 
     activities_by_area: dict[str, list[dict[str, str]]] = defaultdict(list)
+    activities_by_reporting_area: dict[str, list[dict[str, str]]] = defaultdict(list)
     for item in activities:
         row = {"date": item["date"], "description": item["description"]}
         if item.get("status"):
             row["status"] = item["status"]
         activities_by_area[item["area"]].append(row)
+        activities_by_reporting_area[
+            _clean_text(item.get("reporting_area")) or item["area"]
+        ].append(dict(row))
 
     # Top-level explicit period look-ahead fields are also accepted when present.
     for report_date, record in selected:
@@ -748,7 +1269,12 @@ def aggregate_monthly_records(
                             ("planned_next_month", planned_next_month), ("next_month_activities", planned_next_month)):
             for plan_index, description in enumerate(_iter_text_values(payload.get(key))):
                 target.append({
-                    "source_date": report_date, "area": "", "description": description,
+                    "source_date": report_date,
+                    "area": "",
+                    "source_area": "",
+                    "reporting_area": "",
+                    "area_mapping_method": "source_fallback",
+                    "description": description,
                     "source_report_id": source_report_id,
                     "source_path": f"$.{key}[{plan_index}]",
                 })
@@ -766,8 +1292,14 @@ def aggregate_monthly_records(
                     continue
                 area_name = _clean_text(area.get("id")) or "Unspecified"
                 for description in _iter_text_values(area.get("activities_tomorrow")):
+                    area_meta = reporting_activity_area(area_name, description)
                     tomorrow_activities.append({
-                        "source_date": last_date, "area": area_name, "description": description,
+                        "source_date": last_date,
+                        "area": area_name,
+                        "source_area": area_meta["source_area"],
+                        "reporting_area": area_meta["reporting_area"],
+                        "area_mapping_method": area_meta["method"],
+                        "description": description,
                         "source_report_id": str(last_record.get("report_id") or ""),
                         "source_path": f"$.areas[{areas.index(area)}].activities_tomorrow",
                     })
@@ -817,23 +1349,98 @@ def aggregate_monthly_records(
     for row in roles:
         row["man_hours"] = round(row["man_hours"], 2)
 
+    supplied_manpower_days = [day for day in daily_manpower if day.get("supplied")]
+    manpower_supplied_dates = [day["date"] for day in supplied_manpower_days]
+    manpower_not_supplied_dates = [
+        day["date"] for day in daily_manpower if not day.get("supplied")
+    ]
+
+    def supplied_sum(field: str) -> float | None:
+        if not supplied_manpower_days:
+            return None
+        return round(
+            sum(float(day[field]) for day in supplied_manpower_days if day.get(field) is not None),
+            2,
+        )
+
+    def supplied_average(field: str) -> float | None:
+        total = supplied_sum(field)
+        if total is None or not supplied_manpower_days:
+            return None
+        return round(total / len(supplied_manpower_days), 2)
+
+    headcount_complete = (
+        bool(expected)
+        and not missing
+        and len(supplied_manpower_days) == len(daily_manpower)
+    )
+    hours_complete = (
+        headcount_complete
+        and bool(supplied_manpower_days)
+        and all(day["hours_complete"] for day in supplied_manpower_days)
+    )
+    peak_values = [
+        int(day["total_headcount"])
+        for day in supplied_manpower_days
+        if day.get("total_headcount") is not None
+    ]
+    manpower_identity_review = [
+        {"date": day["date"], **row}
+        for day in daily_manpower
+        for row in day.get("identity_review", [])
+        if isinstance(row, Mapping)
+    ]
     manpower_totals = {
-        "direct_person_days": sum(day["direct_headcount"] for day in daily_manpower),
-        "indirect_person_days": sum(day["indirect_headcount"] for day in daily_manpower),
-        "total_person_days": sum(day["total_headcount"] for day in daily_manpower),
-        "direct_man_hours": round(sum(day["direct_man_hours"] for day in daily_manpower), 2),
-        "indirect_man_hours": round(sum(day["indirect_man_hours"] for day in daily_manpower), 2),
-        "total_man_hours": round(sum(day["total_man_hours"] for day in daily_manpower), 2),
-        "peak_headcount": max((day["total_headcount"] for day in daily_manpower), default=0),
+        "direct_person_days": supplied_sum("direct_headcount"),
+        "indirect_person_days": supplied_sum("indirect_headcount"),
+        "total_person_days": supplied_sum("total_headcount"),
+        "direct_man_hours": supplied_sum("direct_man_hours"),
+        "indirect_man_hours": supplied_sum("indirect_man_hours"),
+        "total_man_hours": supplied_sum("total_man_hours"),
+        "known_direct_man_hours": supplied_sum("direct_man_hours"),
+        "known_indirect_man_hours": supplied_sum("indirect_man_hours"),
+        "known_total_man_hours": supplied_sum("total_man_hours"),
+        "peak_headcount": max(peak_values) if peak_values else None,
+        "average_daily_direct_headcount": supplied_average("direct_headcount"),
+        "average_daily_indirect_headcount": supplied_average("indirect_headcount"),
+        "average_daily_headcount": supplied_average("total_headcount"),
+        "average_headcount_denominator": "manpower_supplied_days",
+        "manpower_supplied_day_count": len(supplied_manpower_days),
+        "manpower_not_supplied_day_count": len(manpower_not_supplied_dates),
+        "covered_daily_report_count": len(daily_manpower),
+        "expected_day_count": len(expected),
+        "headcount_complete": headcount_complete,
         "parsed_hours_count": sum(day["parsed_hours_count"] for day in daily_manpower),
         "zero_hours_count": sum(day["zero_hours_count"] for day in daily_manpower),
         "missing_hours_count": sum(day["missing_hours_count"] for day in daily_manpower),
         "invalid_hours_count": sum(day["invalid_hours_count"] for day in daily_manpower),
         "unparsed_hours_count": sum(day["unparsed_hours_count"] for day in daily_manpower),
-        "hours_complete": all(day["hours_complete"] for day in daily_manpower),
+        "hours_complete": hours_complete,
+        "man_hours_partial": not hours_complete,
         "cross_category_duplicate_count": sum(
             int(day.get("cross_category_duplicate_count") or 0) for day in daily_manpower
         ),
+        "identity_review_required": any(
+            row.get("severity") == "warning" for row in manpower_identity_review
+        ),
+    }
+    manpower_coverage = {
+        "expected_dates": list(expected),
+        "daily_report_covered_dates": list(covered),
+        "missing_daily_report_dates": list(missing),
+        "supplied_dates": manpower_supplied_dates,
+        "reported_dates": [
+            day["date"] for day in daily_manpower if day.get("manpower_status") == "reported"
+        ],
+        "none_reported_dates": [
+            day["date"]
+            for day in daily_manpower
+            if day.get("manpower_status") == "none_reported"
+        ],
+        "not_supplied_dates": manpower_not_supplied_dates,
+        "supplied_day_count": len(supplied_manpower_days),
+        "headcount_complete": headcount_complete,
+        "hours_complete": hours_complete,
     }
 
     if selected:
@@ -856,6 +1463,21 @@ def aggregate_monthly_records(
         }
         for report_date, record in selected
     ]
+    constraints_register = _constraint_register(constraint_register_source)
+    if effective_hours_policy["mode"] == "elapsed_less_break":
+        hours_method = (
+            "explicit man_hours takes precedence; otherwise use elapsed shift range minus "
+            f"{effective_hours_policy['break_minutes']:g} break minute(s) when elapsed time is at least "
+            f"{effective_hours_policy['deduct_when_elapsed_gte_minutes']:g} minute(s); exact employee IDs take identity "
+            "precedence, followed only by exact normalized names; no fuzzy identity merge is used"
+        )
+    else:
+        hours_method = (
+            "explicit man_hours takes precedence; otherwise use elapsed shift range without "
+            "break deduction; exact employee IDs take identity precedence, followed only by exact "
+            "normalized names; same-day direct/area assignment takes category precedence and the "
+            "authoritative or longest supplied shift is retained; no fuzzy identity merge is used"
+        )
 
     return {
         "schema_version": 1,
@@ -881,10 +1503,18 @@ def aggregate_monthly_records(
             {"area": area, "activities": values}
             for area, values in sorted(activities_by_area.items(), key=lambda item: _normalise_text(item[0]))
         ],
+        "activities_by_reporting_area": [
+            {"reporting_area": area, "area": area, "activities": values}
+            for area, values in sorted(
+                activities_by_reporting_area.items(),
+                key=lambda item: _normalise_text(item[0]),
+            )
+        ],
         "tomorrow_activities": tomorrow_activities,
         "planned_next_week": planned_next_week,
         "planned_next_month": planned_next_month,
         "constraints": constraints,
+        "constraint_register": constraints_register,
         "remarks": remarks,
         "weather": weather_daily,
         "constraint_reporting": constraint_reporting,
@@ -892,11 +1522,10 @@ def aggregate_monthly_records(
             "daily": daily_manpower,
             "totals": manpower_totals,
             "roles": roles,
-            "hours_method": (
-                "explicit man_hours takes precedence; otherwise use elapsed shift range without "
-                "break deduction; same-day duplicate names are reconciled once, with direct/area assignment "
-                "taking category precedence and the authoritative or longest supplied shift retained"
-            ),
+            "coverage": manpower_coverage,
+            "identity_review": manpower_identity_review,
+            "work_hours_policy": effective_hours_policy,
+            "hours_method": hours_method,
         },
         "overall_progress": _aggregate_progress(selected),
     }

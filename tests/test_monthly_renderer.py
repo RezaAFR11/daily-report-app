@@ -19,15 +19,15 @@ def _pdf_text(pdf_bytes: bytes) -> str:
 
 
 class MonthlyReportRendererTests(unittest.TestCase):
-    def test_minimal_report_returns_rewound_seven_page_pdf(self):
+    def test_minimal_report_returns_rewound_six_page_pdf(self):
         result = render_monthly_report({})
 
         self.assertIsInstance(result, io.BytesIO)
         self.assertEqual(result.tell(), 0)
         self.assertTrue(result.getvalue().startswith(b"%PDF-"))
-        # Cover, TOC, executive/safety, engineering, procurement, site,
-        # appendices.  The blank eighth source-template page is not emitted.
-        self.assertEqual(_page_count(result.getvalue()), 7)
+        # Cover, TOC, executive/safety, engineering, procurement and site.
+        # Empty appendices and the blank source-template page are not emitted.
+        self.assertEqual(_page_count(result.getvalue()), 6)
 
     def test_review_schema_progress_adds_generated_s_curve_page(self):
         report = {
@@ -121,7 +121,7 @@ class MonthlyReportRendererTests(unittest.TestCase):
 
         result = render_monthly_report(report)
 
-        self.assertEqual(_page_count(result.getvalue()), 7)
+        self.assertEqual(_page_count(result.getvalue()), 6)
 
     def test_long_runtime_text_and_tables_split_without_layout_error(self):
         long_text = "Wrapped runtime text with XML chars & < > " * 350
@@ -190,7 +190,7 @@ class MonthlyReportRendererTests(unittest.TestCase):
         self.assertTrue(result.getvalue().startswith(b"%PDF-"))
         self.assertGreater(fallback.call_count, 0)
 
-    def test_progress_normalization_calculates_missing_fields(self):
+    def test_progress_normalization_does_not_invent_missing_source_fields(self):
         rows = renderer._normalise_progress({
             "rows": [
                 {
@@ -202,8 +202,8 @@ class MonthlyReportRendererTests(unittest.TestCase):
             ]
         })
 
-        self.assertEqual(rows[0]["to_date"], 45.0)
-        self.assertEqual(rows[0]["variance"], -1.0)
+        self.assertIsNone(rows[0]["to_date"])
+        self.assertIsNone(rows[0]["variance"])
 
     def test_status_is_safe_and_explicit(self):
         self.assertEqual(renderer._normalise_status("month-to-date"), "MTD")

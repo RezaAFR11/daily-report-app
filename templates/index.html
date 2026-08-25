@@ -681,19 +681,31 @@
             <div class="d-flex justify-content-between align-items-center mb-2">
               <div>
                 <h6 class="mb-1 text-primary">Master Projects</h6>
-                <div class="text-muted" style="font-size:.75rem;">Each title is paired with a project number. The same title may use different numbers.</div>
+                <div class="text-muted" style="font-size:.75rem;">
+                  Each title is paired with a project number. Approved Daily Report title aliases are optional;
+                  work hours default to elapsed time with no unpaid-break deduction.
+                </div>
               </div>
               <button type="button" class="btn btn-sm btn-primary" onclick="addProjectEntry()">+ Add Project</button>
             </div>
             <div class="table-responsive" style="max-height:420px;overflow-y:auto;">
               <table class="table table-sm table-bordered align-middle mb-0" style="font-size:.8rem;">
                 <thead style="position:sticky;top:0;background:var(--light-bg);z-index:1;">
-                  <tr><th style="min-width:330px;">Project Title / Name</th><th style="min-width:240px;">Project No.</th><th style="width:42px;"></th></tr>
+                  <tr>
+                    <th style="min-width:300px;">Project Title / Name</th>
+                    <th style="min-width:220px;">Project No.</th>
+                    <th style="min-width:320px;">Approved Daily Title Aliases</th>
+                    <th style="min-width:430px;">Work-hours Policy</th>
+                    <th style="width:42px;"></th>
+                  </tr>
                 </thead>
                 <tbody id="projectTableBody"></tbody>
               </table>
             </div>
-            <p class="text-muted mt-2 mb-0" style="font-size:.75rem;">Saved projects appear in the Project Title dropdown on the main form.</p>
+            <p class="text-muted mt-2 mb-0" style="font-size:.75rem;">
+              Separate multiple approved aliases with semicolons. Unpaid breaks are deducted only when that policy is explicitly selected.
+              Saved projects appear in the Project Title dropdown on the main form.
+            </p>
           </div>
           {% endif %}
 
@@ -894,7 +906,51 @@ function normalizeProjectList(items) {
     const key = `${title.toLocaleLowerCase()}\u0000${projectNo.toLocaleLowerCase()}`;
     if (seen.has(key)) return;
     seen.add(key);
-    result.push({title, project_no: projectNo});
+    const rawAliases = Array.isArray(item.title_aliases)
+      ? item.title_aliases
+      : (typeof item.title_aliases === 'string' ? item.title_aliases.split(';') : []);
+    const aliasSeen = new Set();
+    const titleAliases = [];
+    rawAliases.forEach(rawAlias => {
+      if (typeof rawAlias !== 'string' || titleAliases.length >= 20) return;
+      const alias = rawAlias.trim();
+      const aliasKey = alias.toLocaleLowerCase();
+      if (!alias || alias.length > 300 || aliasKey === title.toLocaleLowerCase() || aliasSeen.has(aliasKey)) return;
+      aliasSeen.add(aliasKey);
+      titleAliases.push(alias);
+    });
+
+    const rawPolicy = item.work_hours_policy && typeof item.work_hours_policy === 'object'
+      ? item.work_hours_policy
+      : {};
+    const rawBreakMinutes = Number(rawPolicy.break_minutes);
+    const rawThreshold = Number(rawPolicy.deduct_when_elapsed_gte_minutes);
+    const breakMinutes = Number.isInteger(rawBreakMinutes) && rawBreakMinutes >= 0 && rawBreakMinutes <= 240
+      ? rawBreakMinutes
+      : 0;
+    const threshold = Number.isInteger(rawThreshold) && rawThreshold >= 0 && rawThreshold <= 1440
+      ? rawThreshold
+      : 360;
+    const requestedMode = rawPolicy.mode === 'elapsed_less_break'
+      ? 'elapsed_less_break'
+      : 'elapsed_no_break';
+    const workHoursPolicy = {
+      mode: requestedMode === 'elapsed_less_break' && breakMinutes > 0
+        ? 'elapsed_less_break'
+        : 'elapsed_no_break',
+      break_minutes: requestedMode === 'elapsed_less_break' ? breakMinutes : 0,
+      deduct_when_elapsed_gte_minutes: threshold,
+      allow_overnight: rawPolicy.allow_overnight !== false,
+      version: typeof rawPolicy.version === 'string' && rawPolicy.version.trim()
+        ? rawPolicy.version.trim().slice(0, 80)
+        : 'work-hours-policy/1',
+    };
+    result.push({
+      title,
+      project_no: projectNo,
+      title_aliases: titleAliases,
+      work_hours_policy: workHoursPolicy,
+    });
   });
   return result;
 }
@@ -1003,6 +1059,19 @@ function renderProjectTable() {
   localProjects.forEach(project => addProjectEntry(project));
 }
 
+function syncProjectWorkHoursRow(row) {
+  if (!row) return;
+  const modeInput = row.querySelector('.project-work-mode-entry');
+  const breakInput = row.querySelector('.project-break-minutes-entry');
+  const thresholdInput = row.querySelector('.project-break-threshold-entry');
+  const deductBreak = modeInput && modeInput.value === 'elapsed_less_break';
+  if (breakInput) {
+    breakInput.disabled = !deductBreak;
+    if (!deductBreak) breakInput.value = '0';
+  }
+  if (thresholdInput) thresholdInput.disabled = !deductBreak;
+}
+
 function addProjectEntry(project={}) {
   const body = document.getElementById('projectTableBody');
   if (!body) return;
@@ -1026,6 +1095,102 @@ function addProjectEntry(project={}) {
   numberInput.value = project.project_no || '';
   numberCell.appendChild(numberInput);
 
+  const aliasesCell = document.createElement('td');
+  const aliasesInput = document.createElement('textarea');
+  aliasesInput.className = 'form-control form-control-sm project-aliases-entry';
+  aliasesInput.rows = 2;
+  aliasesInput.maxLength = 6020;
+  aliasesInput.placeholder = 'Old or alternate Daily title; another approved title';
+  aliasesInput.title = 'Optional approved Daily Report project-title aliases, separated by semicolons';
+  aliasesInput.setAttribute('aria-label', 'Approved Daily Report title aliases');
+  const rawAliases = Array.isArray(project.title_aliases)
+    ? project.title_aliases
+    : (typeof project.title_aliases === 'string' ? project.title_aliases.split(';') : []);
+  aliasesInput.value = rawAliases.map(value => String(value || '').trim()).filter(Boolean).join('; ');
+  aliasesCell.appendChild(aliasesInput);
+
+  const policyCell = document.createElement('td');
+  const policy = project.work_hours_policy && typeof project.work_hours_policy === 'object'
+    ? project.work_hours_policy
+    : {};
+  row.dataset.workHoursPolicyVersion = typeof policy.version === 'string' && policy.version.trim()
+    ? policy.version.trim().slice(0, 80)
+    : 'work-hours-policy/1';
+
+  const policyGrid = document.createElement('div');
+  policyGrid.className = 'row g-1 align-items-end';
+
+  const modeWrap = document.createElement('div');
+  modeWrap.className = 'col-12';
+  const modeInput = document.createElement('select');
+  modeInput.className = 'form-select form-select-sm project-work-mode-entry';
+  modeInput.setAttribute('aria-label', 'Work-hours calculation policy');
+  modeInput.innerHTML = [
+    '<option value="elapsed_no_break">Elapsed hours (no break deduction)</option>',
+    '<option value="elapsed_less_break">Elapsed hours less unpaid break</option>',
+  ].join('');
+  const configuredBreak = Number(policy.break_minutes);
+  modeInput.value = policy.mode === 'elapsed_less_break' && Number.isFinite(configuredBreak) && configuredBreak > 0
+    ? 'elapsed_less_break'
+    : 'elapsed_no_break';
+  modeWrap.appendChild(modeInput);
+
+  const breakWrap = document.createElement('div');
+  breakWrap.className = 'col-4';
+  const breakLabel = document.createElement('label');
+  breakLabel.className = 'form-label mb-0 text-muted';
+  breakLabel.style.fontSize = '.68rem';
+  breakLabel.textContent = 'Unpaid break (min)';
+  const breakInput = document.createElement('input');
+  breakInput.type = 'number';
+  breakInput.className = 'form-control form-control-sm project-break-minutes-entry';
+  breakInput.min = '0';
+  breakInput.max = '240';
+  breakInput.step = '1';
+  breakInput.value = Number.isInteger(configuredBreak) && configuredBreak >= 0 && configuredBreak <= 240
+    ? String(configuredBreak)
+    : '0';
+  breakInput.setAttribute('aria-label', 'Unpaid break minutes');
+  breakWrap.append(breakLabel, breakInput);
+
+  const thresholdWrap = document.createElement('div');
+  thresholdWrap.className = 'col-5';
+  const thresholdLabel = document.createElement('label');
+  thresholdLabel.className = 'form-label mb-0 text-muted';
+  thresholdLabel.style.fontSize = '.68rem';
+  thresholdLabel.textContent = 'Deduct if elapsed >= (min)';
+  const thresholdInput = document.createElement('input');
+  thresholdInput.type = 'number';
+  thresholdInput.className = 'form-control form-control-sm project-break-threshold-entry';
+  thresholdInput.min = '0';
+  thresholdInput.max = '1440';
+  thresholdInput.step = '1';
+  const configuredThreshold = Number(policy.deduct_when_elapsed_gte_minutes);
+  thresholdInput.value = Number.isInteger(configuredThreshold) && configuredThreshold >= 0 && configuredThreshold <= 1440
+    ? String(configuredThreshold)
+    : '360';
+  thresholdInput.setAttribute('aria-label', 'Minimum elapsed minutes before break deduction');
+  thresholdWrap.append(thresholdLabel, thresholdInput);
+
+  const overnightWrap = document.createElement('div');
+  overnightWrap.className = 'col-3 pb-1';
+  const overnightCheckWrap = document.createElement('div');
+  overnightCheckWrap.className = 'form-check form-switch mb-0';
+  const overnightInput = document.createElement('input');
+  overnightInput.type = 'checkbox';
+  overnightInput.className = 'form-check-input project-allow-overnight-entry';
+  overnightInput.checked = policy.allow_overnight !== false;
+  overnightInput.setAttribute('aria-label', 'Allow shifts crossing midnight');
+  const overnightLabel = document.createElement('label');
+  overnightLabel.className = 'form-check-label text-muted';
+  overnightLabel.style.fontSize = '.68rem';
+  overnightLabel.textContent = 'Overnight';
+  overnightCheckWrap.append(overnightInput, overnightLabel);
+  overnightWrap.appendChild(overnightCheckWrap);
+
+  policyGrid.append(modeWrap, breakWrap, thresholdWrap, overnightWrap);
+  policyCell.appendChild(policyGrid);
+
   const actionCell = document.createElement('td');
   actionCell.className = 'text-center';
   const removeButton = document.createElement('button');
@@ -1036,8 +1201,10 @@ function addProjectEntry(project={}) {
   removeButton.addEventListener('click', () => row.remove());
   actionCell.appendChild(removeButton);
 
-  row.append(titleCell, numberCell, actionCell);
+  row.append(titleCell, numberCell, aliasesCell, policyCell, actionCell);
   body.appendChild(row);
+  modeInput.addEventListener('change', () => syncProjectWorkHoursRow(row));
+  syncProjectWorkHoursRow(row);
   if (!project.title && !project.project_no) titleInput.focus();
 }
 
@@ -1058,7 +1225,54 @@ function collectProjectRows() {
       return {projects: [], error: `Duplicate project pair on row ${index + 1}.`};
     }
     seen.add(key);
-    projects.push({title, project_no: projectNo});
+
+    const aliasesText = (row.querySelector('.project-aliases-entry') || {}).value || '';
+    const aliasSeen = new Set();
+    const titleAliases = [];
+    for (const rawAlias of aliasesText.split(';')) {
+      const alias = rawAlias.trim();
+      if (!alias || alias.toLocaleLowerCase() === title.toLocaleLowerCase()) continue;
+      if (alias.length > 300) {
+        return {projects: [], error: `Project row ${index + 1} contains an alias longer than 300 characters.`};
+      }
+      const aliasKey = alias.toLocaleLowerCase();
+      if (!aliasSeen.has(aliasKey)) {
+        aliasSeen.add(aliasKey);
+        titleAliases.push(alias);
+      }
+    }
+    if (titleAliases.length > 20) {
+      return {projects: [], error: `Project row ${index + 1} may contain at most 20 approved aliases.`};
+    }
+
+    const mode = (row.querySelector('.project-work-mode-entry') || {}).value === 'elapsed_less_break'
+      ? 'elapsed_less_break'
+      : 'elapsed_no_break';
+    const rawBreakMinutes = Number((row.querySelector('.project-break-minutes-entry') || {}).value || 0);
+    const rawThreshold = Number((row.querySelector('.project-break-threshold-entry') || {}).value || 360);
+    if (!Number.isInteger(rawBreakMinutes) || rawBreakMinutes < 0 || rawBreakMinutes > 240) {
+      return {projects: [], error: `Project row ${index + 1} unpaid break must be a whole number from 0 to 240 minutes.`};
+    }
+    if (!Number.isInteger(rawThreshold) || rawThreshold < 0 || rawThreshold > 1440) {
+      return {projects: [], error: `Project row ${index + 1} break threshold must be a whole number from 0 to 1440 minutes.`};
+    }
+    if (mode === 'elapsed_less_break' && rawBreakMinutes === 0) {
+      return {projects: [], error: `Project row ${index + 1} needs unpaid break minutes greater than zero when break deduction is enabled.`};
+    }
+
+    const projectEntry = {
+      title,
+      project_no: projectNo,
+      work_hours_policy: {
+        mode,
+        break_minutes: mode === 'elapsed_less_break' ? rawBreakMinutes : 0,
+        deduct_when_elapsed_gte_minutes: rawThreshold,
+        allow_overnight: (row.querySelector('.project-allow-overnight-entry') || {}).checked !== false,
+        version: row.dataset.workHoursPolicyVersion || 'work-hours-policy/1',
+      },
+    };
+    if (titleAliases.length) projectEntry.title_aliases = titleAliases;
+    projects.push(projectEntry);
   }
   return {projects, error: ''};
 }

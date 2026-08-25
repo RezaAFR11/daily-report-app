@@ -441,7 +441,8 @@
                 <span class="workflow-kicker">Stage 4</span>
                 <div class="review-stage-title mb-1">Source Data Validation</div>
                 <div class="muted-note">
-                  Verify the reporting period, project identity, parser warnings, and editable totals before Preview or Generate.
+                  Draft Preview remains available while you review warnings. Resolve only material project identity,
+                  duplicate-source, workforce arithmetic, or progress conflicts before Final issue.
                 </div>
               </div>
             </div>
@@ -2371,21 +2372,12 @@ function markSourceValidationDirty() {
   updateValidationStatus();
 }
 
-function validateSourceReview() {
+function validateSourceReview({forFinal=false}={}) {
+  if (!forFinal) return;
   const projectTitle = document.getElementById('review-project-title').value.trim();
   const projectNo = document.getElementById('review-project-no').value.trim();
-  if (!projectTitle || !projectNo) throw new Error('Complete the Report Project Title and Project No. in Source Data Validation.');
-  if (collectProjectResolutions().some(item => !item.decision)) {
-    throw new Error('Choose Merge or Keep separate for every detected project identity.');
-  }
-  if (collectDuplicateResolutions().some(item => !item.selected_record_id)) {
-    throw new Error('Choose which Daily Report to use for every duplicate date.');
-  }
-  if (!document.getElementById('review-confirm-validation').checked) {
-    throw new Error('Confirm Source Data Validation before Preview or Generate.');
-  }
-  if (!monthlySourceValidationApplied) {
-    throw new Error('Click Apply Validation & Recompile before Preview or Generate.');
+  if (!projectTitle || !projectNo) {
+    throw new Error('Complete the Report Project Title and Project No. before Final issue.');
   }
 }
 
@@ -2627,7 +2619,8 @@ function addMonthlyReportToHistory(report, downloadUrl='') {
 async function postMonthlyPdf(endpoint, save) {
   if (!monthlyDraftId) { showMonthlyAlert(`Compile a ${reportType} draft first.`, 'warning'); return; }
   const typeName = reportType === 'weekly' ? 'Weekly' : 'Monthly';
-  try { validateSourceReview(); }
+  const finalRequested = save && document.getElementById('monthly-report-mode').value === 'final';
+  try { validateSourceReview({forFinal:finalRequested}); }
   catch (err) { showMonthlyAlert(err.message, 'warning'); return; }
   const previewWindow = save ? null : window.open('about:blank', '_blank');
   if (previewWindow) previewWindow.document.title = `Preparing ${typeName} Report Preview...`;

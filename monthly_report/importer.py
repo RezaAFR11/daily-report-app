@@ -24,9 +24,11 @@ from datetime import date as date_type
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Mapping, Sequence
 
+from .identity import project_title_match
+
 
 SCHEMA_VERSION = "daily-report-import/1"
-PARSER_VERSION = "monthly-pdf-importer/1.6"
+PARSER_VERSION = "monthly-pdf-importer/1.7"
 
 # Supported Daily Report layout families.  These are parser profiles only; they
 # do not change the canonical output shape consumed by weekly/monthly reports.
@@ -858,16 +860,46 @@ def _fuzzy_section_key(label: str) -> tuple[str, float, float] | None:
     return choices[int(best_index)][0], float(best_score), margin
 
 
+def _document_context_key(value: Any) -> str:
+    return " ".join(
+        re.sub(
+            r"[^a-z0-9]+",
+            " ",
+            unicodedata.normalize("NFKC", _compact(str(value or ""))).casefold(),
+        ).split()
+    )
+
+
 def _collect_sections(
     pages: Sequence[str],
-) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    *,
+    document_context: Iterable[Any] = (),
+) -> tuple[dict[str, str], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Collect supported sections and discard only proven document chrome.
+
+    Current split-layout PDFs repeat the exact project title at the start of
+    every page.  When a table continues over that page boundary, pypdf may place
+    the repeated title inside the active section and the activity parser can
+    mistake it for wrapped prose.  Exact context matching removes that chrome
+    without hard-coding a project title or changing genuine activity wording.
+    """
+
     sections: dict[str, list[str]] = {}
     matches: list[dict[str, Any]] = []
+    ignored_chrome: list[dict[str, Any]] = []
     active_key: str | None = None
+    context_keys = {
+        _document_context_key(value)
+        for value in document_context
+        if _document_context_key(value)
+    }
 
     for page_number, page in enumerate(pages, start=1):
         for line in page.splitlines():
             compact_line = _compact(line)
+            if active_key is not None and not compact_line:
+                # Whitespace is layout noise, not a normalization event.
+                continue
             heading = _SECTION_HEADING.match(compact_line)
             if heading:
                 number, label = heading.groups()
@@ -905,6 +937,24 @@ def _collect_sections(
                     continue
                 # Unknown numbered lines may be activity-list items, so they
                 # do not terminate a recognized section.
+            if active_key is not None and not _AREA_MARKER.match(line) and (
+                _is_document_boilerplate_note(compact_line)
+                or (
+                    _document_context_key(compact_line) in context_keys
+                    and len(_document_context_key(compact_line).split()) >= 2
+                )
+            ):
+                ignored_chrome.append({
+                    "page": page_number,
+                    "section": active_key,
+                    "raw": compact_line[:500],
+                    "reason": (
+                        "known_document_chrome"
+                        if _is_document_boilerplate_note(compact_line)
+                        else "exact_document_context"
+                    ),
+                })
+                continue
             if active_key is not None:
                 sections[active_key].append(line.rstrip())
 
@@ -912,7 +962,7 @@ def _collect_sections(
         key: "\n".join(lines).strip()
         for key, lines in sections.items()
         if any(line.strip() for line in lines)
-    }, matches
+    }, matches, ignored_chrome
 
 
 def _activity_items_from_segment(segment: str) -> tuple[list[str], list[str]]:
@@ -1007,13 +1057,13 @@ def _area_segments(section: str) -> list[tuple[str, list[str]]]:
         marker = _AREA_MARKER.match(line)
         if marker:
             if current_id is not None or current_lines:
-                segments.append((current_id or "Imported PDF", current_lines))
+                segments.append((current_id or "", current_lines))
             current_id = _compact(marker.group(1))[:120]
             current_lines = []
         else:
             current_lines.append(line)
     if current_id is not None or current_lines:
-        segments.append((current_id or "Imported PDF", current_lines))
+        segments.append((current_id or "", current_lines))
     return segments
 
 
@@ -1361,7 +1411,7 @@ def _section_area_notes(
         note = _note_text(note)
         if not note:
             continue
-        result.append((matched_area or "Imported PDF", note))
+        result.append((matched_area, note))
     return result
 
 
@@ -1511,24 +1561,6 @@ def _extract_overall_progress(section: str) -> tuple[list[dict[str, Any]], list[
             field="overall_progress",
         ))
     return rows, warnings
-
-
-def _project_title_alias_equivalent(source_title: Any, master_title: Any) -> bool:
-    """Accept a conservative long-title/short-title alias under an exact project no.
-
-    The raw Daily title is still retained.  This only suppresses repetitive
-    non-critical mismatch warnings when, for example, the master title prepends a
-    project/program phrase to the exact meaningful Daily title.
-    """
-
-    left = re.sub(r"[^a-z0-9]+", " ", _normalized_identifier(str(source_title or ""))).strip()
-    right = re.sub(r"[^a-z0-9]+", " ", _normalized_identifier(str(master_title or ""))).strip()
-    if not left or not right:
-        return False
-    if left == right:
-        return True
-    shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
-    return len(shorter.split()) >= 4 and re.search(rf"(?:^|\s){re.escape(shorter)}(?:$|\s)", longer) is not None
 
 
 def _constraint_section_status(section: str) -> str:
@@ -1690,15 +1722,20 @@ def _extract_daily_content(
         provenance_rows.extend(metadata.pop("row_provenance"))
         warnings.extend(row_warnings)
 
+    unmapped_notes: list[dict[str, str]] = []
+
     # Some Daily Report templates repeat area constraints in a dedicated section.
-    # Map those rows back to the already discovered area labels; unknown/global
-    # notes remain visible under a neutral Imported PDF area instead of being lost.
+    # Map only exact known area prefixes. Global notes remain top-level source
+    # facts; they must never create a synthetic ``Imported PDF`` work area.
     for area_id, note in _section_area_notes(
         sections.get("constraints", ""),
         area_ids=[area.get("id", "") for area in areas],
         kind="constraints",
     ):
-        _merge_area_note(ensure_area(area_id), "constraints", note)
+        if area_id:
+            _merge_area_note(ensure_area(area_id), "constraints", note)
+        else:
+            unmapped_notes.append({"kind": "constraint", "text": note})
 
     # Dedicated Remarks sections use the same conservative area mapping.
     for area_id, note in _section_area_notes(
@@ -1706,7 +1743,10 @@ def _extract_daily_content(
         area_ids=[area.get("id", "") for area in areas],
         kind="remarks",
     ):
-        _merge_area_note(ensure_area(area_id), "remarks", note)
+        if area_id:
+            _merge_area_note(ensure_area(area_id), "remarks", note)
+        else:
+            unmapped_notes.append({"kind": "remark", "text": note})
 
     global_section = sections.get("indirect_manpower", "")
     global_rows, global_metadata, global_warnings = _parse_manpower_lines(
@@ -1749,6 +1789,7 @@ def _extract_daily_content(
         "profile": profile,
         "rows": provenance_rows,
         "tables": manpower_metadata,
+        "unmapped_notes": unmapped_notes,
         "completeness": {
             "global_indirect": {
                 "section_found": bool(global_section),
@@ -1787,11 +1828,18 @@ def _project_candidates(known_projects: Iterable[Mapping[str, Any]]) -> list[dic
         project_no = _compact(str(project.get("project_no") or ""))
         if not title and not project_no:
             continue
+        raw_aliases = project.get("title_aliases", project.get("aliases", []))
+        aliases = [
+            _compact(str(alias))[:300]
+            for alias in (raw_aliases if isinstance(raw_aliases, (list, tuple)) else [])
+            if _compact(str(alias))
+        ]
         candidates.append(
             {
                 "project_id": project.get("project_id", project.get("id")),
                 "title": title,
                 "project_no": project_no,
+                "title_aliases": aliases,
             }
         )
     return candidates
@@ -1821,11 +1869,24 @@ def _match_project(
         ]
         if len(exact) == 1:
             candidate = exact[0]
+            title_match = (
+                project_title_match(
+                    project_title,
+                    candidate.get("title"),
+                    approved_aliases=candidate.get("title_aliases", []),
+                )
+                if project_title and candidate.get("title")
+                else None
+            )
             return candidate["project_id"], {
                 "method": "exact_project_no",
                 "score": 100.0,
                 "accepted": True,
                 "candidate": candidate,
+                # Keep the title decision nested so exact-number provenance is
+                # not overwritten.  In particular, retain the configured alias
+                # text when an arbitrary legacy title was explicitly approved.
+                "title_match": title_match,
             }, warnings
         if len(exact) > 1:
             warnings.append(
@@ -1839,6 +1900,67 @@ def _match_project(
             return None, None, warnings
 
     if not project_title:
+        return None, None, warnings
+
+    deterministic_title_matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    structural_title_suggestions: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for candidate in candidates:
+        if not candidate.get("title"):
+            continue
+        match = project_title_match(
+            project_title,
+            candidate["title"],
+            approved_aliases=candidate.get("title_aliases", []),
+        )
+        if match.get("matched"):
+            deterministic_title_matches.append((candidate, match))
+        elif match.get("suggested"):
+            structural_title_suggestions.append((candidate, match))
+    if len(deterministic_title_matches) == 1:
+        candidate, match = deterministic_title_matches[0]
+        return candidate["project_id"], {
+            "method": str(match.get("method") or "deterministic_title_alias"),
+            "score": float(match.get("score") or 0),
+            "accepted": True,
+            "canonical_title_match": True,
+            "candidate": candidate,
+            "title_match": match,
+        }, []
+    if len(deterministic_title_matches) > 1:
+        warnings.append(
+            _warning(
+                "ambiguous_project_title_alias",
+                "Project title matches more than one configured project alias",
+                field="project_title",
+            )
+        )
+        return None, None, warnings
+    if len(structural_title_suggestions) == 1:
+        candidate, match = structural_title_suggestions[0]
+        return None, {
+            "method": str(match.get("method") or "project_title_subset_suggestion"),
+            "score": float(match.get("score") or 0),
+            "accepted": False,
+            "suggestion_only": True,
+            "high_confidence_suggestion": False,
+            "candidate": candidate,
+            "title_match": match,
+        }, [
+            _warning(
+                "project_title_subset_suggestion",
+                "A project title is a subset of a project master; confirmation or an approved alias is required",
+                severity="info",
+                field="project_title",
+            )
+        ]
+    if len(structural_title_suggestions) > 1:
+        warnings.append(
+            _warning(
+                "ambiguous_project_title_subset",
+                "Project title is a subset of more than one project master",
+                field="project_title",
+            )
+        )
         return None, None, warnings
     dependency = _load_rapidfuzz()
     if dependency is None:
@@ -1982,6 +2104,11 @@ def parse_daily_report_pages(
 
     if project_match and project_match.get("method") == "exact_project_no":
         candidate = project_match["candidate"]
+        title_match = (
+            project_match.get("title_match")
+            if isinstance(project_match.get("title_match"), Mapping)
+            else {}
+        )
         if not extracted["project_title"] and candidate.get("title"):
             extracted["project_title"] = candidate["title"]
             provenance["project_title"] = {
@@ -1991,11 +2118,7 @@ def parse_daily_report_pages(
         elif (
             extracted["project_title"]
             and candidate.get("title")
-            and _normalized_identifier(extracted["project_title"])
-            != _normalized_identifier(candidate["title"])
-            and not _project_title_alias_equivalent(
-                extracted["project_title"], candidate["title"]
-            )
+            and not title_match.get("matched")
         ):
             warnings.append(
                 _warning(
@@ -2005,12 +2128,22 @@ def parse_daily_report_pages(
                 )
             )
 
-    sections, section_matches = _collect_sections(normalized_pages)
+    sections, section_matches, ignored_chrome = _collect_sections(
+        normalized_pages,
+        document_context=(
+            extracted.get("project_title"),
+            extracted.get("project_no"),
+            extracted.get("customer"),
+        ),
+    )
     layout_profile = _detect_layout_profile(sections, section_matches)
     areas, indirect_manpower, manpower_extraction, manpower_warnings = (
         _extract_daily_content(sections)
     )
-    manpower_extraction["profile"] = layout_profile
+    # Keep the table-shape profile distinct from the overall layout profile.
+    # Older callers already consume ``profile`` as the manpower parser shape.
+    manpower_extraction["manpower_profile"] = manpower_extraction.get("profile")
+    manpower_extraction["layout_profile"] = layout_profile
     if layout_profile == LAYOUT_PROFILE_UNKNOWN:
         warnings.append(
             _warning(
@@ -2027,6 +2160,15 @@ def parse_daily_report_pages(
     constraint_status = _constraint_section_status(sections.get("constraints", ""))
     warnings.extend(manpower_warnings)
     warnings.extend(progress_warnings)
+    if ignored_chrome:
+        warnings.append(
+            _warning(
+                "document_chrome_removed",
+                f"{len(ignored_chrome)} repeated header/footer line(s) were removed from parsed sections",
+                severity="info",
+                field="layout",
+            )
+        )
     if sections.get("daily_activities") and not areas:
         warnings.append(
             _warning(
@@ -2068,6 +2210,39 @@ def parse_daily_report_pages(
 
     warnings = _deduplicate_warnings(warnings)
     has_error = any(warning.get("severity") == "error" for warning in warnings)
+    manpower_completeness = manpower_extraction.get("completeness", {})
+    direct_meta = manpower_completeness.get("direct_by_area", {})
+    indirect_meta = manpower_completeness.get("global_indirect", {})
+    manpower_row_count = sum(
+        len(area.get("manpower", [])) + len(area.get("indirect_manpower", []))
+        for area in areas
+        if isinstance(area, Mapping)
+    ) + len(indirect_manpower)
+    manpower_table_found = bool(
+        direct_meta.get("table_found") or indirect_meta.get("table_found")
+    )
+    manpower_status = (
+        "reported"
+        if manpower_row_count
+        else "none_reported"
+        if manpower_table_found
+        else "not_supplied"
+    )
+    unmapped_notes = manpower_extraction.get("unmapped_notes", [])
+    global_remarks = "; ".join(dict.fromkeys(
+        _note_text(item.get("text"))
+        for item in unmapped_notes
+        if isinstance(item, Mapping)
+        and item.get("kind") == "remark"
+        and _note_text(item.get("text"))
+    ))
+    global_constraints = "; ".join(dict.fromkeys(
+        _note_text(item.get("text"))
+        for item in unmapped_notes
+        if isinstance(item, Mapping)
+        and item.get("kind") == "constraint"
+        and _note_text(item.get("text"))
+    ))
     data = {
         "date": report_date or "",
         "day_no": day_no or "",
@@ -2081,10 +2256,12 @@ def parse_daily_report_pages(
         "prepared_by": "",
         "checked_by": "",
         "approved_by": "",
-        "global_remarks": _global_section_notes(sections.get("remarks", ""), kind="remarks"),
+        "global_remarks": global_remarks,
+        "global_constraints": global_constraints,
         "weather": weather,
         "constraint_status": constraint_status,
         "indirect_manpower": indirect_manpower,
+        "manpower_status": manpower_status,
         "show_overall_progress": bool(overall_progress),
         "overall_progress": overall_progress,
         "areas": areas,
@@ -2115,6 +2292,10 @@ def parse_daily_report_pages(
             "field_provenance": provenance,
             "sections": sections,
             "section_matches": section_matches,
+            "normalization": {
+                "ignored_document_chrome": ignored_chrome,
+                "unmapped_notes": manpower_extraction.get("unmapped_notes", []),
+            },
             "project_match": project_match,
             "manpower": manpower_extraction,
             "completeness": {

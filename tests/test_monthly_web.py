@@ -13,10 +13,12 @@ from pypdf import PdfReader
 
 from monthly_report.importer import DEFAULT_LIMITS, PDFImportError
 from monthly_report.web import (
+    _append_runtime_preflight_blockers,
     _normalize_progress,
     _prepare_draft,
     register_monthly_routes,
 )
+from monthly_report.report_quality import build_report_preflight
 
 
 PROJECT_NO = "001/KN-GPA/EPC-2F-P2/IV/2025"
@@ -79,6 +81,63 @@ def _canonical_record(report_date, report_id, *, tomorrow, progress_actual):
 
 
 class MonthlyWebUnitTests(unittest.TestCase):
+    def test_required_missing_photo_recomputes_all_preflight_readiness_fields(self):
+        report = {
+            "project_no": PROJECT_NO,
+            "project_title": PROJECT_TITLE,
+            "source_validation": {
+                "selected_project_no": PROJECT_NO,
+                "selected_project_title": PROJECT_TITLE,
+                "applied": True,
+                "confirmed": True,
+                "project_groups": [],
+                "duplicate_groups": [],
+                "issues": [],
+            },
+            "coverage": {"missing_dates": []},
+            "photo_documentation": [{
+                "asset_id": "a" * 64,
+                "caption": "Required inspection evidence",
+                "required": True,
+            }],
+        }
+        with tempfile.TemporaryDirectory() as data_dir:
+            final = _append_runtime_preflight_blockers(
+                build_report_preflight(report, for_final=True),
+                data_dir=data_dir,
+                username="reza",
+                draft_id="f" * 32,
+                report=report,
+                for_final=True,
+            )
+            preview = _append_runtime_preflight_blockers(
+                build_report_preflight(report, for_final=False),
+                data_dir=data_dir,
+                username="reza",
+                draft_id="f" * 32,
+                report=report,
+                for_final=False,
+            )
+
+        self.assertFalse(final["ready"])
+        self.assertEqual(final["readiness"]["status"], "blocked")
+        self.assertFalse(final["readiness"]["final_ready"])
+        self.assertEqual(final["readiness"]["final_blocker_count"], 1)
+        self.assertEqual(final["risk_tiers"]["highest"], "critical")
+        self.assertEqual(final["risk_tiers"]["critical"]["count"], 1)
+        self.assertIn(
+            "photo_asset_unavailable",
+            final["risk_tiers"]["critical"]["codes"],
+        )
+
+        self.assertTrue(preview["ready"])
+        self.assertEqual(preview["blockers"], [])
+        self.assertFalse(preview["readiness"]["final_ready"])
+        self.assertIn(
+            "photo_asset_unavailable",
+            preview["risk_tiers"]["critical"]["codes"],
+        )
+
     def test_normalize_progress_uses_weight_contribution_formula(self):
         result = _normalize_progress(
             {
@@ -178,12 +237,21 @@ class MonthlyWebUnitTests(unittest.TestCase):
                     "to_date": 35,
                     "plan": 38,
                     "variance": -3,
+                    "is_total": False,
+                    "source_date": None,
                 }
             ],
         )
-        self.assertEqual(draft["site"]["this_month_activities"], aggregate["activities"])
-        self.assertEqual(draft["site"]["next_month_activities"], aggregate["tomorrow_activities"])
-        self.assertEqual(draft["site"]["concerns"], aggregate["constraints"])
+        self.assertEqual(len(draft["site"]["this_month_activities"]), 1)
+        activity = draft["site"]["this_month_activities"][0]
+        self.assertEqual(activity["area"], "Unit 2")
+        self.assertEqual(activity["source_dates"], ["2026-07-01"])
+        self.assertEqual(activity["occurrence_count"], 1)
+        self.assertTrue(activity["stable_id"].startswith("activity-"))
+        # A Daily "tomorrow" row is not silently promoted into a monthly plan.
+        self.assertEqual(draft["site"]["next_month_activities"], [])
+        self.assertEqual(len(draft["site"]["concerns"]), 1)
+        self.assertIn("Waiting permit", draft["site"]["concerns"][0]["concern"])
         self.assertEqual(draft["safety"]["total_manpower"], 12)
         self.assertEqual(draft["safety"]["total_man_hours"], 224.5)
 
@@ -378,15 +446,10 @@ class MonthlyWebRouteTests(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertEqual(body["draft"]["coverage"]["included_count"], 2)
         self.assertEqual(body["draft"]["coverage"]["missing_dates"], [])
+        self.assertEqual(body["draft"]["site"]["next_month_activities"], [])
         self.assertEqual(
-            body["draft"]["site"]["next_month_activities"],
-            [
-                {
-                    "area": "Turbine Unit 2",
-                    "description": "Start loop test",
-                    "source_date": "2026-07-02",
-                }
-            ],
+            body["draft"]["site"]["tomorrow_activities"][0]["description"],
+            "Start loop test",
         )
         draft_path = (
             self.data_dir
@@ -398,7 +461,7 @@ class MonthlyWebRouteTests(unittest.TestCase):
         self.assertTrue(draft_path.is_file())
         self.assertEqual(json.loads(draft_path.read_text(encoding="utf-8"))["owner"], "reza")
 
-    def test_stored_json_photo_is_reviewable_and_rendered_in_appendix_66(self):
+    def test_stored_json_photo_is_reviewable_and_rendered_in_dynamic_appendix(self):
         self._attach_canonical_photo(self.records[0])
 
         response = self._compile_stored()
@@ -439,7 +502,7 @@ class MonthlyWebRouteTests(unittest.TestCase):
         self.assertEqual(preview.status_code, 200)
         reader = PdfReader(io.BytesIO(preview.data))
         text = "\n".join(page.extract_text() or "" for page in reader.pages)
-        self.assertIn("Appendix 6.6 - Photographs Activity", text)
+        self.assertIn("Appendix 6.3 - Photo Documentation", text)
         self.assertIn("Stored valve inspection", text)
         preview.close()
 
@@ -479,18 +542,18 @@ class MonthlyWebRouteTests(unittest.TestCase):
         self.assertTrue(body["draft"]["source_validation"]["required"])
         self.assertEqual(body["draft"]["coverage"]["included_count"], 1)
 
-        blocked = self.client.post(
+        preview = self.client.post(
             f"/monthly/preview/{body['draft_id']}",
             json={"report_mode": "mtd"},
         )
-        self.assertEqual(blocked.status_code, 400)
-        self.assertIn("Source Data Validation", blocked.get_json()["error"])
+        self.assertEqual(preview.status_code, 200)
+        preview.close()
 
         decisions = []
         for group in body["draft"]["source_validation"]["project_groups"]:
             decisions.append({
                 "group_key": group["key"],
-                "decision": "separate" if group["project_no"] == "LEGACY-PC-DAR" else "merge",
+                "decision": "separate" if group["requires_confirmation"] else "merge",
             })
         validated = self._apply_source_validation(body, decisions=decisions)
         self.assertEqual(validated["draft"]["coverage"]["included_count"], 1)
@@ -712,6 +775,60 @@ class MonthlyWebRouteTests(unittest.TestCase):
         self.assertTrue((upload_dir / "result.json").is_file())
         self.assertFalse((upload_dir / "items").exists())
         self.assertEqual(list(upload_dir.rglob("*.pdf")), [])
+
+    def test_staged_parser_severity_reaches_source_validation_and_final_preflight(self):
+        file_id = "9" * 32
+        upload_session_id = self._start_staged_upload([file_id])
+        imported = self._imported_pdf("2026-07-01", "9" * 64)
+        imported["warnings"] = [
+            {
+                "code": "parser_low_confidence",
+                "severity": "warning",
+                "field": "manpower",
+                "message": "One manpower row needs review.",
+            },
+            {
+                "code": "parser_source_corrupt",
+                "severity": "error",
+                "field": "activities",
+                "message": "The activity source table is structurally invalid.",
+            },
+        ]
+
+        with patch("monthly_report.web.import_daily_report_pdf", return_value=imported):
+            uploaded = self._upload_staged_file(upload_session_id, file_id, "severity.pdf")
+        self.assertEqual(uploaded.status_code, 200, uploaded.get_data(as_text=True))
+        self.assertTrue(any(
+            "ERROR: The activity source table is structurally invalid." in warning
+            for warning in uploaded.get_json()["item"]["warnings"]
+        ))
+
+        compiled = self.client.post(f"/monthly/upload-session/{upload_session_id}/compile")
+        self.assertEqual(compiled.status_code, 200, compiled.get_data(as_text=True))
+        body = compiled.get_json()
+        issues = {
+            issue.get("code"): issue
+            for issue in body["draft"]["source_validation"]["issues"]
+        }
+        self.assertEqual(issues["parser_low_confidence"]["severity"], "warning")
+        self.assertEqual(issues["parser_source_corrupt"]["severity"], "error")
+        self.assertEqual(issues["parser_source_corrupt"]["filename"], "severity.pdf")
+
+        preflight_response = self.client.get(
+            f"/monthly/preflight/{body['draft_id']}?final=true"
+        )
+        self.assertEqual(
+            preflight_response.status_code,
+            200,
+            preflight_response.get_data(as_text=True),
+        )
+        preflight = preflight_response.get_json()["preflight"]
+        blocker_codes = {issue["code"] for issue in preflight["blockers"]}
+        warning_codes = {issue["code"] for issue in preflight["warnings"]}
+        self.assertIn("parser_source_corrupt", blocker_codes)
+        self.assertNotIn("parser_low_confidence", blocker_codes)
+        self.assertIn("parser_low_confidence", warning_codes)
+        self.assertFalse(preflight["ready"])
 
     def test_staged_weekly_compile_anchors_to_earliest_valid_pdf_date(self):
         file_ids = ["a" * 32, "b" * 32, "c" * 32]

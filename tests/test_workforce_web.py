@@ -263,11 +263,16 @@ class WorkforceWebTests(unittest.TestCase):
     def test_ai_suggestion_is_review_only_until_accepted(self):
         envelope = _ai_envelope()
         before = copy.deepcopy(_load_draft(str(self.data_dir), "reza", self.draft_id))
-        with patch("monthly_report.web.generate_ai_summary", return_value=envelope):
+        with patch("monthly_report.web.generate_ai_summary", return_value=envelope) as generate:
             response = self.client.post(f"/monthly/ai-summary/{self.draft_id}")
         self.assertEqual(response.status_code, 200, response.get_json())
         suggested = response.get_json()["draft"]
         self.assertEqual(suggested.get("executive_summary"), before.get("executive_summary"))
+        grounded_input = generate.call_args.args[0]
+        self.assertEqual(
+            grounded_input["executive_summary"],
+            grounded_input["deterministic_summary"]["executive_summary"]["text"],
+        )
         self.assertEqual(suggested["ai_summary"]["status"], "suggested")
         suggestion = suggested["ai_summary"]["suggestion"]
         self.assertEqual(

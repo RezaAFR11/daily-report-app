@@ -238,6 +238,7 @@ def _activity_claim_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
+            "stable_id": {"type": "string"},
             "area": {"type": "string"},
             "workstream": {"type": "string"},
             "text": {"type": "string"},
@@ -362,8 +363,9 @@ Reporting rules:
    is supplied. Return at most ONE bullet for each area + workstream combination;
    merge same-family activities within the same area instead of returning repetitive
    bullets. Keep ``area`` populated whenever a source area exists. When
-   deterministic_summary.current_activities is supplied, copy its exact ``area`` and
-   exact ``workstream`` into those response fields for every returned row. Preserve
+   deterministic_summary.current_activities is supplied, copy its exact ``stable_id``,
+   exact ``area``, and exact ``workstream`` into those response fields for every
+   returned row. Preserve
    labels such as Turbine Unit 2, Generator Unit 1, or MA-81 and preserve row order;
    never replace a known area with generic values such as
    "Site" or "General". Put ONLY the narrative activity body in ``text``: do not
@@ -1053,10 +1055,18 @@ def _reject_numeric_prose(text: str, *, path: str) -> None:
 
 
 
-def _strict_keys(value: Mapping[str, Any], expected: set[str], path: str) -> None:
+def _strict_keys(
+    value: Mapping[str, Any],
+    expected: set[str],
+    path: str,
+    *,
+    optional: set[str] | None = None,
+) -> None:
     actual = set(value)
-    if actual != expected:
-        missing = sorted(expected - actual)
+    optional_keys = optional or set()
+    required = expected - optional_keys
+    if not required.issubset(actual) or not actual.issubset(expected):
+        missing = sorted(required - actual)
         extra = sorted(actual - expected)
         detail = []
         if missing:
@@ -1079,6 +1089,56 @@ def _source_index(manifest: Sequence[Mapping[str, Any]]) -> dict[str, set[str]]:
 
 
 _NUMERIC_TOKEN_RE = re.compile(r"(?<![A-Za-z])\d+(?:[.,]\d+)?")
+_NUMBER_WORD_VALUES = {
+    "zero": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "ten": "10",
+    "eleven": "11",
+    "twelve": "12",
+    "thirteen": "13",
+    "fourteen": "14",
+    "fifteen": "15",
+    "sixteen": "16",
+    "seventeen": "17",
+    "eighteen": "18",
+    "nineteen": "19",
+    "twenty": "20",
+    "first": "1",
+    "second": "2",
+    "third": "3",
+    "fourth": "4",
+    "fifth": "5",
+    "sixth": "6",
+    "seventh": "7",
+    "eighth": "8",
+    "ninth": "9",
+    "tenth": "10",
+}
+_NUMBER_WORD_RE = re.compile(
+    r"\b(?:" + "|".join(sorted(_NUMBER_WORD_VALUES, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
+_ISO_DATE_TOKEN_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+_NUMERIC_EVIDENCE_SKIP_KEYS = {
+    "filename",
+    "parser_version",
+    "report_id",
+    "schema_version",
+    "sha256",
+    "source_id",
+    "source_ids",
+    "source_path",
+    "source_report_id",
+    "source_report_ids",
+}
 _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}")
 _EVIDENCE_SKIP_KEYS = {"source_manifest", "source_validation"}
 _EVIDENCE_GENERIC_WORDS = {
@@ -1089,8 +1149,31 @@ _EVIDENCE_GENERIC_WORDS = {
 
 
 def _normalised_number_tokens(value: Any) -> set[str]:
-    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-    return {token.replace(",", ".") for token in _NUMERIC_TOKEN_RE.findall(raw)}
+    if isinstance(value, Mapping):
+        tokens: set[str] = set()
+        for key, item in value.items():
+            if str(key).casefold() in _NUMERIC_EVIDENCE_SKIP_KEYS:
+                continue
+            tokens.update(_normalised_number_tokens(item))
+        return tokens
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        tokens: set[str] = set()
+        for item in value:
+            tokens.update(_normalised_number_tokens(item))
+        return tokens
+
+    raw = str(value or "")
+    dates = _ISO_DATE_TOKEN_RE.findall(raw)
+    without_dates = _ISO_DATE_TOKEN_RE.sub(" ", raw)
+    tokens = {f"date:{item}" for item in dates}
+    tokens.update(
+        token.replace(",", ".") for token in _NUMERIC_TOKEN_RE.findall(without_dates)
+    )
+    tokens.update(
+        _NUMBER_WORD_VALUES[match.group(0).casefold()]
+        for match in _NUMBER_WORD_RE.finditer(without_dates)
+    )
+    return tokens
 
 
 def _word_tokens(value: Any) -> set[str]:
@@ -1225,7 +1308,7 @@ def _infer_evidence_paths(
     application still records exact compact-draft fields for audit/review.
     """
 
-    claim_numbers = {token.replace(",", ".") for token in _NUMERIC_TOKEN_RE.findall(text)}
+    claim_numbers = _normalised_number_tokens(text)
     all_numbers = _normalised_number_tokens(compact_draft)
     unsupported = sorted(claim_numbers - all_numbers)
     if unsupported:
@@ -1358,7 +1441,29 @@ def _validate_activity_claim(
 ) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise AIMalformedResponseError(f"{path} must be an object.")
-    _strict_keys(raw, {"area", "workstream", "text", "source_ids", "dates"}, path)
+    _strict_keys(
+        raw,
+        {"stable_id", "area", "workstream", "text", "source_ids", "dates"},
+        path,
+        optional={"stable_id"},
+    )
+    stable_id = " ".join(str(raw.get("stable_id") or "").split())
+    if len(stable_id) > 100:
+        raise AIMalformedResponseError(f"{path}.stable_id exceeds 100 characters.")
+    deterministic = compact_draft.get("deterministic_summary")
+    baseline_rows = (
+        deterministic.get("current_activities")
+        if isinstance(deterministic, Mapping)
+        and isinstance(deterministic.get("current_activities"), list)
+        else []
+    )
+    known_ids = {
+        str(row.get("stable_id") or "").strip()
+        for row in baseline_rows
+        if isinstance(row, Mapping) and str(row.get("stable_id") or "").strip()
+    }
+    if stable_id and known_ids and stable_id not in known_ids:
+        raise AIUnsupportedClaimsError(f"{path}.stable_id is not present in the deterministic baseline.")
     area = " ".join(str(raw.get("area") or "").split())
     if not area:
         raise AIMalformedResponseError(f"{path}.area must be a non-empty string.")
@@ -1384,7 +1489,10 @@ def _validate_activity_claim(
         raise AIUnsupportedClaimsError(
             f"{path} must be omitted instead of using Not supplied."
         )
-    return {"area": area, "workstream": workstream, **claim}
+    result = {"area": area, "workstream": workstream, **claim}
+    if stable_id:
+        result["stable_id"] = stable_id
+    return result
 
 
 def _validate_concern_action(
@@ -1431,7 +1539,11 @@ def _validate_concern_action(
         "corrective_action": corrective_action["text"],
         "source_ids": concern["source_ids"],
         "dates": concern["dates"],
-        "evidence_paths": concern["evidence_paths"],
+        "evidence_paths": list(
+            dict.fromkeys(
+                [*concern["evidence_paths"], *corrective_action["evidence_paths"]]
+            )
+        )[:MAX_REFERENCES_PER_CLAIM],
     }
 
 

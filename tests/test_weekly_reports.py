@@ -176,11 +176,22 @@ class WeeklyDraftTests(unittest.TestCase):
         self.assertEqual(draft["report_title"], "Weekly Progress Report")
         self.assertEqual(draft["report_mode"], "wtd")
         self.assertEqual(draft["status"], "wtd")
-        self.assertEqual(draft["site"]["current_period_activities"], activities)
-        self.assertEqual(draft["site"]["this_week_activities"], activities)
-        self.assertEqual(draft["site"]["next_period_activities"], plans)
-        self.assertEqual(draft["site"]["next_week_activities"], plans)
-        self.assertIn("week-to-date draft", draft["executive_summary"])
+        current = draft["site"]["current_period_activities"]
+        self.assertEqual(len(current), 1)
+        self.assertEqual(current[0]["area"], "Unit 2")
+        self.assertEqual(current[0]["workstream"], "Testing & Commissioning")
+        self.assertEqual(current[0]["source_dates"], ["2026-08-03"])
+        self.assertTrue(current[0]["stable_id"].startswith("activity-"))
+        self.assertEqual(draft["site"]["this_week_activities"], current)
+        lookahead = draft["site"]["next_period_activities"]
+        self.assertEqual(len(lookahead), 1)
+        self.assertEqual(lookahead[0]["area"], "Unit 2")
+        self.assertEqual(lookahead[0]["description"], "Continue loop test")
+        self.assertEqual(lookahead[0]["source_date"], "2026-08-04")
+        self.assertEqual(lookahead[0]["source_type"], "period_end_activity_tomorrow")
+        self.assertEqual(draft["site"]["next_week_activities"], lookahead)
+        self.assertIn("reporting week (03-04 August 2026)", draft["executive_summary"])
+        self.assertIn("Unit 2", draft["executive_summary"])
 
 
 class WeeklyRouteTests(unittest.TestCase):

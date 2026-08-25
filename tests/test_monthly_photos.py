@@ -69,11 +69,19 @@ class PeriodicPhotoExtractionTests(unittest.TestCase):
         )
         self.assertTrue(any("header/logo" in warning for warning in warnings))
 
-    def test_cross_report_exact_duplicate_is_retained_only_once(self):
+    def test_cross_report_exact_reuse_keeps_each_source_date_reference(self):
         asset_id = "a" * 64
         records = [
-            {"_photo_candidates": [{"asset_id": asset_id, "size_bytes": 100}]},
-            {"_photo_candidates": [{"asset_id": asset_id, "size_bytes": 100}]},
+            {
+                "report_id": "day-1",
+                "report_date": "2026-08-17",
+                "_photo_candidates": [{"asset_id": asset_id, "size_bytes": 100}],
+            },
+            {
+                "report_id": "day-2",
+                "report_date": "2026-08-18",
+                "_photo_candidates": [{"asset_id": asset_id, "size_bytes": 100}],
+            },
         ]
 
         warnings = _bound_record_photo_candidates(records)
@@ -82,8 +90,13 @@ class PeriodicPhotoExtractionTests(unittest.TestCase):
         # The later source keeps its reference so selecting that source during
         # validation still works; the final photo list deduplicates by hash.
         self.assertEqual(len(records[1]["_photo_candidates"]), 1)
-        self.assertEqual(len(_photo_references_for_records(records)), 1)
-        self.assertTrue(any("duplicate" in warning for warning in warnings))
+        references = _photo_references_for_records(records)
+        self.assertEqual(len(references), 2)
+        self.assertEqual(
+            [item["source_date"] for item in references],
+            ["2026-08-17", "2026-08-18"],
+        )
+        self.assertTrue(any("reuse" in warning for warning in warnings))
 
     def test_content_addressed_storage_keeps_binary_out_of_json_metadata(self):
         photos, _ = extract_pdf_photo_candidates(_photo_pdf())
@@ -118,7 +131,7 @@ class PeriodicPhotoExtractionTests(unittest.TestCase):
 
 
 class PeriodicPhotoRendererTests(unittest.TestCase):
-    def test_reviewed_photo_is_rendered_in_appendix_66(self):
+    def test_reviewed_photo_is_rendered_in_dynamic_appendix(self):
         photo = _jpeg("#2563eb")
         asset_id = hashlib.sha256(photo).hexdigest()
         with tempfile.TemporaryDirectory() as temporary:
@@ -137,7 +150,7 @@ class PeriodicPhotoRendererTests(unittest.TestCase):
 
         reader = PdfReader(io.BytesIO(result.getvalue()))
         text = "\n".join(page.extract_text() or "" for page in reader.pages)
-        self.assertIn("Appendix 6.6 - Photographs Activity", text)
+        self.assertIn("Appendix 6.1 - Photo Documentation", text)
         self.assertIn("Switchgear inspection", text)
         self.assertGreaterEqual(len(reader.pages), 8)
 

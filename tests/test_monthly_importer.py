@@ -220,6 +220,7 @@ class MonthlyPDFImporterTests(unittest.TestCase):
                     "indirect_manpower": [],
                     "constraints": "",
                     "remarks": "",
+                    "activity_statuses": [],
                     "photos": [],
                 }
             ],
@@ -331,6 +332,24 @@ class MonthlyPDFImporterTests(unittest.TestCase):
         self.assertTrue(completeness["global_indirect"]["complete"])
         self.assertEqual(completeness["global_indirect"]["rows_extracted"], 0)
         self.assertEqual(completeness["direct_by_area"]["rows_extracted"], 2)
+
+    def test_repeated_exact_project_title_is_removed_as_page_chrome(self):
+        result = parse_daily_report_pages([
+            CURRENT_SPLIT_PAGE_1,
+            "Current Split Project\n" + CURRENT_SPLIT_PAGE_2,
+        ])
+
+        self.assertEqual(
+            [(area["id"], area["activities_today"]) for area in result["data"]["areas"]],
+            [("MA-42", ["Install support"]), ("MA-39", ["Pull cable"])],
+        )
+        ignored = result["extraction"]["normalization"]["ignored_document_chrome"]
+        self.assertTrue(any(
+            row["raw"] == "Current Split Project"
+            and row["reason"] == "exact_document_context"
+            for row in ignored
+        ))
+        self.assertNotIn("Imported PDF", {area["id"] for area in result["data"]["areas"]})
 
     def test_invalid_magic_header_is_rejected_before_pdf_reader(self):
         with patch("monthly_report.importer._load_pdf_reader") as loader:
@@ -519,6 +538,60 @@ class MonthlyPDFImporterTests(unittest.TestCase):
         self.assertFalse(match["accepted"])
         self.assertIn("missing_project_no", _warning_codes(result))
         self.assertIn("date_inferred_without_label", _warning_codes(result))
+
+    def test_structural_title_subset_is_suggestion_only(self):
+        page = "\n".join(
+            [
+                "Project No. PC-TEST-404-DAR",
+                "Project Name Turbine Generator Reactivation Scope",
+                "Date 2026-08-04",
+                "Working Day Day 404",
+            ]
+        )
+        projects = [{
+            "project_id": "master-project",
+            "title": "Turbine Generator Reactivation Scope for Kertas Nusantara",
+            "project_no": "MASTER-001",
+        }]
+
+        result = parse_daily_report_pages([page], known_projects=projects)
+
+        self.assertIsNone(result["project_id"])
+        match = result["extraction"]["project_match"]
+        self.assertEqual(match["method"], "ordered_title_subset")
+        self.assertTrue(match["suggestion_only"])
+        self.assertFalse(match["accepted"])
+        self.assertFalse(match["high_confidence_suggestion"])
+        self.assertIn("project_title_subset_suggestion", _warning_codes(result))
+
+    def test_exact_project_number_accepts_configured_alias_with_provenance(self):
+        page = "\n".join(
+            [
+                "Project No. MASTER-ALIAS-001",
+                "Project Name Arbitrary Legacy Commissioning Name",
+                "Date 2026-08-04",
+                "Working Day Day 404",
+            ]
+        )
+        projects = [{
+            "project_id": "master-project",
+            "title": "Canonical Turbine Reactivation Contract",
+            "project_no": "MASTER-ALIAS-001",
+            "title_aliases": ["Arbitrary Legacy Commissioning Name"],
+        }]
+
+        result = parse_daily_report_pages([page], known_projects=projects)
+
+        self.assertEqual(result["project_id"], "master-project")
+        self.assertNotIn("project_title_master_mismatch", _warning_codes(result))
+        match = result["extraction"]["project_match"]
+        self.assertEqual(match["method"], "exact_project_no")
+        self.assertTrue(match["accepted"])
+        self.assertEqual(match["title_match"]["method"], "approved_alias")
+        self.assertEqual(
+            match["title_match"]["alias"],
+            "Arbitrary Legacy Commissioning Name",
+        )
 
     def test_exact_project_number_can_fill_noncritical_missing_title(self):
         page = "\n".join(

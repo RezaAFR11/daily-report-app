@@ -1279,6 +1279,9 @@ DEFAULT_PROJECTS = [
     {
         "title": "Electrical Construction and Installation - Manpower Supply",
         "project_no": "002/KN-GPA/EPC-2K-P2/XI/2025",
+        "title_aliases": [
+            "Electrical Installation and Construction - Manpower Supply",
+        ],
     },
     {
         "title": "Repair & Services Control Valve & ON OFF Valve",
@@ -1287,6 +1290,10 @@ DEFAULT_PROJECTS = [
     {
         "title": "PROJECT REVAMPING PT KERTAS NUSANTARA - REACTIVATION FOR TURBINES AND GENERATORS",
         "project_no": "001/KN-GPA/EPC-2F-P2/IV/2025",
+        "title_aliases": [
+            "RE-ACTIVATION TURBINES AND GENERATORS",
+            "REACTIVATION FOR TURBINES AND GENERATORS",
+        ],
     },
 ]
 
@@ -1570,7 +1577,11 @@ def _anthropic_ai_allowed():
     return bool(session.get('is_admin', False)) or not _anthropic_admin_only()
 
 def normalize_projects(value, strict=False):
-    """Return safe title/number pairs while allowing a title to have many numbers."""
+    """Return safe, backward-compatible project reporting configuration.
+
+    Optional title aliases and work-hour policies let old/new Daily templates
+    converge on one periodic project without changing archived report data.
+    """
     if not isinstance(value, list):
         if strict:
             raise ValueError('Projects must be a list.')
@@ -1603,14 +1614,113 @@ def normalize_projects(value, strict=False):
             if strict:
                 raise ValueError('Project title or number is too long.')
             continue
+        raw_aliases = entry.get('title_aliases', entry.get('aliases', []))
+        if isinstance(raw_aliases, str):
+            raw_aliases = [item.strip() for item in raw_aliases.split(';')]
+        if not isinstance(raw_aliases, list):
+            if strict:
+                raise ValueError('Project title aliases must be a list or semicolon-separated text.')
+            raw_aliases = []
+        title_aliases = []
+        alias_seen = set()
+        for alias in raw_aliases[:20]:
+            if not isinstance(alias, str):
+                if strict:
+                    raise ValueError('Every project title alias must be text.')
+                continue
+            alias = alias.strip()
+            if not alias or alias.casefold() == title.casefold():
+                continue
+            if len(alias) > 300:
+                if strict:
+                    raise ValueError('Project title aliases cannot exceed 300 characters.')
+                continue
+            if alias.casefold() not in alias_seen:
+                alias_seen.add(alias.casefold())
+                title_aliases.append(alias)
+
+        raw_policy = entry.get('work_hours_policy')
+        work_hours_policy = None
+        if raw_policy not in (None, ''):
+            if not isinstance(raw_policy, dict):
+                if strict:
+                    raise ValueError('Project work-hours policy must be an object.')
+            else:
+                mode = str(raw_policy.get('mode') or 'elapsed_no_break').strip().lower()
+                if mode not in {'elapsed_no_break', 'elapsed_less_break'}:
+                    if strict:
+                        raise ValueError('Unsupported project work-hours policy mode.')
+                    mode = 'elapsed_no_break'
+                try:
+                    break_minutes = int(raw_policy.get('break_minutes') or 0)
+                    threshold = int(raw_policy.get('deduct_when_elapsed_gte_minutes') or 360)
+                except (TypeError, ValueError):
+                    if strict:
+                        raise ValueError('Work-hours break values must be whole minutes.')
+                    break_minutes, threshold = 0, 360
+                if not (0 <= break_minutes <= 240 and 0 <= threshold <= 1440):
+                    if strict:
+                        raise ValueError('Work-hours break values are outside the supported range.')
+                    break_minutes, threshold = 0, 360
+                work_hours_policy = {
+                    'mode': mode if break_minutes else 'elapsed_no_break',
+                    'break_minutes': break_minutes,
+                    'deduct_when_elapsed_gte_minutes': threshold,
+                    'allow_overnight': bool(raw_policy.get('allow_overnight', True)),
+                    'version': str(raw_policy.get('version') or 'work-hours-policy/1')[:80],
+                }
+
         pair_key = (title.casefold(), project_no.casefold())
         if pair_key in seen:
             if strict:
                 raise ValueError('Duplicate project title and number pair.')
             continue
         seen.add(pair_key)
-        normalized.append({'title': title, 'project_no': project_no})
+        normalized_entry = {'title': title, 'project_no': project_no}
+        if title_aliases:
+            normalized_entry['title_aliases'] = title_aliases
+        if work_hours_policy:
+            normalized_entry['work_hours_policy'] = work_hours_policy
+        normalized.append(normalized_entry)
     return normalized
+
+def merge_default_project_metadata(projects):
+    """Backfill compatibility metadata for unchanged built-in project pairs.
+
+    Older ``app_config.json`` files predate title aliases.  Adding aliases only
+    to ``DEFAULT_PROJECTS`` would therefore help new installations but make
+    existing installations stricter after an upgrade.  Merge only metadata for
+    an exact title/number pair; user-created projects and identifiers remain
+    untouched.
+    """
+
+    default_by_pair = {
+        (entry['title'].casefold(), entry['project_no'].casefold()): entry
+        for entry in normalize_projects(DEFAULT_PROJECTS)
+    }
+    merged = []
+    for project in normalize_projects(projects):
+        row = copy.deepcopy(project)
+        default = default_by_pair.get(
+            (row['title'].casefold(), row['project_no'].casefold())
+        )
+        if default:
+            aliases = []
+            seen_aliases = set()
+            for alias in [
+                *row.get('title_aliases', []),
+                *default.get('title_aliases', []),
+            ]:
+                key = alias.casefold()
+                if key not in seen_aliases:
+                    seen_aliases.add(key)
+                    aliases.append(alias)
+            if aliases:
+                row['title_aliases'] = aliases
+            if 'work_hours_policy' not in row and default.get('work_hours_policy'):
+                row['work_hours_policy'] = copy.deepcopy(default['work_hours_policy'])
+        merged.append(row)
+    return merged
 
 def load_config():
     defaults = copy.deepcopy(DEFAULT_CONFIG)
@@ -1634,7 +1744,9 @@ def load_config():
                     else:
                         for kk,vv in v.items():
                             if kk not in c[k]: c[k][kk]=copy.deepcopy(vv)
-            c['projects'] = normalize_projects(c.get('projects', defaults['projects']))
+            c['projects'] = merge_default_project_metadata(
+                c.get('projects', defaults['projects'])
+            )
             if had_legacy_ai_key:
                 try:
                     save_config(c)
