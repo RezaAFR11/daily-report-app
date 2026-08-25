@@ -362,11 +362,11 @@ def _append_runtime_preflight_blockers(
     report: Mapping[str, Any],
     for_final: bool,
 ) -> dict[str, Any]:
-    """Add filesystem checks without making optional evidence a hard blocker.
+    """Add filesystem checks required for complete Final photo evidence.
 
-    A missing draft-local photo must be visible to the reviewer, but it should
-    not prevent a report from being issued when the Daily source is otherwise
-    valid.  Photos explicitly marked ``required`` remain a Final blocker.
+    Draft/Preview remains available with warnings. Final issue is blocked when
+    any selected/retained photo asset is unavailable, because metadata-only photo
+    rows would otherwise produce incomplete client-facing evidence.
     """
 
     runtime_final_blockers: list[dict[str, str]] = []
@@ -375,11 +375,12 @@ def _append_runtime_preflight_blockers(
             "code": "photo_asset_unavailable",
             "message": str(issue.get("message") or "Photo asset is unavailable."),
         }
-        target = preflight.setdefault("warnings", [])
-        if issue.get("required"):
-            runtime_final_blockers.append(row)
-            if for_final:
-                target = preflight.setdefault("blockers", [])
+        runtime_final_blockers.append(row)
+        target = (
+            preflight.setdefault("blockers", [])
+            if for_final
+            else preflight.setdefault("warnings", [])
+        )
         target.append(row)
     return refresh_preflight_readiness(
         preflight,
@@ -4247,6 +4248,10 @@ def _usable_ai_text(value: Any) -> str:
     return "" if text.casefold() == "not supplied" else text
 
 
+def _word_count(value: Any) -> int:
+    return len(re.findall(r"\b[\w#./&+-]+\b", str(value or ""), flags=re.UNICODE))
+
+
 def _executive_ai_candidate(draft: Mapping[str, Any], value: Any) -> str:
     """Keep Claude from downgrading a richer deterministic executive baseline.
 
@@ -4260,7 +4265,13 @@ def _executive_ai_candidate(draft: Mapping[str, Any], value: Any) -> str:
     if not candidate:
         return baseline
     if not baseline:
-        return candidate
+        return candidate if _word_count(candidate) <= 180 else ""
+
+    # Weekly Executive Summary is intentionally concise. Claude is instructed to
+    # target 130-160 words; a response above 180 words falls back to the grounded
+    # deterministic baseline instead of expanding into a second activity section.
+    if _report_type(draft.get("report_type")) == "weekly" and _word_count(candidate) > 180:
+        return baseline
 
     # A very short rewrite is usually a regression when the baseline deliberately
     # carries several area highlights. This is a presentation guard, not a content
@@ -4655,14 +4666,59 @@ def _issued_report_copy(report: dict[str, Any]) -> dict[str, Any]:
 
 
 
+def _clean_revision_row(raw: Mapping[str, Any] | None, revision: int) -> dict[str, str]:
+    row = raw if isinstance(raw, Mapping) else {}
+    return {
+        "rev": _clean_text(row.get("rev") or row.get("revision") or f"R{revision}", 20),
+        "description": _clean_text(row.get("description") or row.get("status"), 500),
+        "date": _clean_text(row.get("date") or row.get("issued_date") or row.get("issue_date"), 20)[:10],
+        "prepared": _clean_text(row.get("prepared") or row.get("prepared_by"), 200),
+        "checked": _clean_text(row.get("checked") or row.get("checked_by"), 200),
+        "vendor_approved": _clean_text(
+            row.get("vendor_approved") or row.get("approved") or row.get("approved_by"), 200
+        ),
+        "kn_approved": _clean_text(row.get("kn_approved") or row.get("client_approved") or row.get("kn_approved_by"), 200),
+    }
+
+
+def _stored_revision_row(detail: Mapping[str, Any], revision: int) -> dict[str, str] | None:
+    expected = f"R{revision}".casefold()
+    for raw in detail.get("revision_rows", []) if isinstance(detail.get("revision_rows"), list) else []:
+        if not isinstance(raw, Mapping):
+            continue
+        candidate = _clean_revision_row(raw, revision)
+        if candidate.get("rev", "").casefold() == expected:
+            return candidate
+    return None
+
+
 def _revision_history_rows(
     reports_dir: Path,
     prior_entries: list[dict[str, Any]],
     current: Mapping[str, Any],
     revision: int,
 ) -> list[dict[str, str]]:
+    """Build an immutable revision table from issued-revision snapshots.
+
+    A newer issue must never rewrite the issue date or sign-off metadata of an
+    earlier revision. Prefer the snapshot stored in the report index, then the
+    matching row embedded in the prior issued JSON, and only then fall back to
+    legacy top-level fields for old records created before snapshot support.
+    """
+
     rows: list[dict[str, str]] = []
     for entry in sorted(prior_entries, key=lambda row: int(row.get("revision", 0) or 0)):
+        prior_revision = int(entry.get("revision", 0) or 0)
+        if prior_revision <= 0:
+            continue
+
+        snapshot = entry.get("revision_row") if isinstance(entry.get("revision_row"), Mapping) else None
+        if snapshot is not None:
+            row = _clean_revision_row(snapshot, prior_revision)
+            row["rev"] = f"R{prior_revision}"
+            rows.append(row)
+            continue
+
         detail: dict[str, Any] = {}
         json_name = str(entry.get("json_filename") or "")
         if json_name and os.path.basename(json_name) == json_name:
@@ -4674,30 +4730,37 @@ def _revision_history_rows(
                     detail = loaded
             except (OSError, ValueError, TypeError):
                 detail = {}
-        rows.append({
-            "rev": f"R{int(entry.get('revision', 0) or 0)}",
-            "description": _clean_text(
-                detail.get("revision_description")
-                or _periodic_revision_description(detail or current), 500
-            ),
-            "date": _clean_text(detail.get("issued_date") or entry.get("generated_at"), 20)[:10],
-            "prepared": _clean_text(detail.get("prepared_by"), 200),
-            "checked": _clean_text(detail.get("checked_by"), 200),
-            "vendor_approved": _clean_text(detail.get("approved_by"), 200),
-            "kn_approved": _clean_text(detail.get("kn_approved_by"), 200),
-        })
-    rows.append({
+
+        stored = _stored_revision_row(detail, prior_revision) if detail else None
+        if stored is not None:
+            rows.append(stored)
+            continue
+
+        fallback = _clean_revision_row({
+            "rev": f"R{prior_revision}",
+            "description": detail.get("revision_description")
+            or _periodic_revision_description(detail or current),
+            "date": detail.get("issued_date")
+            or entry.get("issued_date")
+            or entry.get("generated_at"),
+            "prepared": detail.get("prepared_by"),
+            "checked": detail.get("checked_by"),
+            "vendor_approved": detail.get("approved_by"),
+            "kn_approved": detail.get("kn_approved_by"),
+        }, prior_revision)
+        rows.append(fallback)
+
+    current_row = _clean_revision_row({
         "rev": f"R{revision}",
-        "description": _clean_text(
-            current.get("revision_description")
-            or _periodic_revision_description(current), 500
-        ),
-        "date": _clean_text(current.get("issued_date"), 20)[:10],
-        "prepared": _clean_text(current.get("prepared_by"), 200),
-        "checked": _clean_text(current.get("checked_by"), 200),
-        "vendor_approved": _clean_text(current.get("approved_by"), 200),
-        "kn_approved": _clean_text(current.get("kn_approved_by"), 200),
-    })
+        "description": current.get("revision_description")
+        or _periodic_revision_description(current),
+        "date": current.get("issued_date"),
+        "prepared": current.get("prepared_by"),
+        "checked": current.get("checked_by"),
+        "vendor_approved": current.get("approved_by"),
+        "kn_approved": current.get("kn_approved_by"),
+    }, revision)
+    rows.append(current_row)
     return rows[-3:]
 
 
@@ -6621,6 +6684,10 @@ def register_monthly_routes(
                 "source_method": reviewed.get("source_method", ""),
                 "revision": revision,
                 "revision_reason": revision_reason,
+                "issued_date": _clean_text(reviewed.get("issued_date"), 20)[:10],
+                "revision_row": copy.deepcopy(reviewed.get("revision_rows", [{}])[-1])
+                if isinstance(reviewed.get("revision_rows"), list) and reviewed.get("revision_rows")
+                else {},
                 "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "size_kb": round(len(pdf_bytes) / 1024, 1),
                 "lifecycle_status": "active",
