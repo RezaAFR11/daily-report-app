@@ -6431,6 +6431,7 @@ def register_monthly_routes(
                 "ok": True,
                 "filename": filename,
                 "download_url": url_for("download_monthly_report", filename=filename),
+                "report": entry,
             })
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400

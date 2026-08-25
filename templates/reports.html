@@ -24,6 +24,10 @@
   .report-meta { flex:1; min-width:220px; }
   .report-meta .fname { font-weight:650; font-size:.88rem; word-break:break-word; }
   .report-meta .info { font-size:.78rem; color:#667085; margin-top:.25rem; }
+  .report-type-icon {
+    width:34px; height:34px; flex:0 0 34px; border-radius:8px; display:grid;
+    place-items:center; background:#eaf1f8; color:var(--primary); font-size:.7rem; font-weight:800;
+  }
   .empty { text-align:center; color:#98a2b3; padding:3.5rem 0; }
   .badge-day, .badge-status {
     background:var(--accent); color:#fff; border-radius:4px;
@@ -33,11 +37,76 @@
   .badge-report-type.weekly { background:#0f766e; }
   .badge-report-type.monthly { background:#52606d; }
   .report-tabs { border-bottom:1px solid #d9e1ea; }
-  .report-tabs .nav-link { color:#52606d; font-weight:650; border:0; border-bottom:3px solid transparent; }
+  .report-tabs .nav-link {
+    color:#52606d; font-weight:650; border:0; border-bottom:3px solid transparent;
+    display:inline-flex; align-items:center; gap:.42rem;
+  }
   .report-tabs .nav-link.active { color:var(--primary); background:transparent; border-bottom-color:var(--accent); }
+  .tab-icon { width:17px; height:17px; display:inline-flex; flex:0 0 17px; }
+  .tab-icon svg { width:100%; height:100%; }
   .panel {
     background:#fff; border:1px solid #dfe6ee; border-radius:10px;
     box-shadow:0 1px 5px rgba(0,0,0,.05); padding:1.15rem;
+  }
+  .builder-panel { padding:1.25rem; }
+  .builder-heading { padding-bottom:1rem; border-bottom:1px solid #e6ebf1; }
+  .workflow-kicker {
+    display:block; color:#667085; font-size:.68rem; font-weight:750;
+    letter-spacing:.08em; text-transform:uppercase; margin-bottom:.2rem;
+  }
+  .workflow-stack { display:grid; gap:1rem; margin-top:1.1rem; }
+  .workflow-stage {
+    position:relative; border:1px solid #dfe6ee; border-radius:10px;
+    background:#fff; padding:1rem 1.05rem 1rem 3.65rem;
+    box-shadow:0 1px 3px rgba(16,24,40,.035);
+  }
+  .workflow-stage:not(:last-child)::after {
+    content:""; position:absolute; left:1.64rem; top:2.85rem; bottom:-1.1rem;
+    width:1px; background:#d7e0ea;
+  }
+  .workflow-marker {
+    position:absolute; top:.95rem; left:.62rem; width:34px; height:34px;
+    border-radius:50%; display:grid; place-items:center; z-index:1;
+    background:#eaf1f8; color:var(--primary); border:1px solid #cbd8e6;
+    font-size:.78rem; font-weight:800;
+  }
+  .workflow-stage-title { color:var(--primary); font-size:.92rem; font-weight:750; margin-bottom:.75rem; }
+  .workflow-stage .row:last-child { margin-bottom:0 !important; }
+  .review-workflow-panel { padding:1.2rem; }
+  .review-overview { border-bottom:1px solid #e6ebf1; margin-bottom:1rem; padding-bottom:.2rem; }
+  .workflow-review-stage {
+    border:1px solid #dfe6ee !important; border-left:3px solid #8ca4bb !important;
+    border-radius:10px !important; background:#fff; padding:1rem 1.05rem !important;
+    box-shadow:0 1px 4px rgba(16,24,40,.04);
+  }
+  .stage-source { border-left-color:#2e8b57 !important; }
+  .stage-workforce { border-left-color:#2563eb !important; background:#fbfdff !important; }
+  .stage-ai { border-left-color:#7357d8 !important; background:#fcfbff !important; }
+  .stage-photo { border-left-color:#0f8f8f !important; background:#fbfefe !important; }
+  .stage-final { border-left-color:var(--accent) !important; background:#fffdf8 !important; }
+  .review-stage-heading { display:flex; align-items:flex-start; gap:.72rem; min-width:0; }
+  .review-stage-icon {
+    width:32px; height:32px; flex:0 0 32px; border-radius:8px;
+    display:grid; place-items:center; color:var(--primary); background:#eaf1f8;
+  }
+  .review-stage-icon svg { width:17px; height:17px; }
+  .stage-source .review-stage-icon { color:#217a45; background:#e8f6ed; }
+  .stage-workforce .review-stage-icon { color:#1f5fc5; background:#eaf2ff; }
+  .stage-ai .review-stage-icon { color:#6545cf; background:#eee9ff; }
+  .stage-photo .review-stage-icon { color:#087f7f; background:#e7f7f7; }
+  .stage-final .review-stage-icon { color:#956b05; background:#fff2cf; }
+  .review-stage-title { color:var(--primary); font-size:.92rem; font-weight:750; line-height:1.25; }
+  .stage-ai .review-stage-title { color:#5037a7; }
+  .stage-photo .review-stage-title { color:#087272; }
+  .compact-icon-btn { display:inline-flex; align-items:center; justify-content:center; gap:.38rem; }
+  .compact-icon-btn svg { width:15px; height:15px; flex:0 0 15px; }
+  .btn-ai { color:#5d3fc0; border-color:#8d78d8; }
+  .btn-ai:hover { color:#fff; background:#6545cf; border-color:#6545cf; }
+  .btn-photo { color:#087777; border-color:#48a9a9; }
+  .btn-photo:hover { color:#fff; background:#087f7f; border-color:#087f7f; }
+  .monthly-history {
+    border:1px solid #dfe6ee; border-radius:10px; background:#fff;
+    padding:1rem 1.1rem; box-shadow:0 1px 4px rgba(16,24,40,.04);
   }
   .source-card {
     border:1px solid #cfd8e3; border-radius:8px; padding:.85rem 1rem;
@@ -67,7 +136,37 @@
   .type-card input { margin-right:.4rem; }
   .type-card .title { font-weight:700; color:var(--primary); }
   .type-card .hint { color:#667085; font-size:.8rem; margin-top:.25rem; }
-  #monthly-alert { white-space:pre-line; }
+  .report-toast {
+    position:fixed; right:1.15rem; bottom:1.15rem; z-index:1090;
+    width:min(420px, calc(100vw - 2rem)); display:flex; align-items:flex-start;
+    gap:.7rem; padding:.78rem .85rem; border:1px solid transparent;
+    border-radius:10px; background:#fff; color:#24303d;
+    box-shadow:0 12px 32px rgba(16,24,40,.2);
+    opacity:0; visibility:hidden; transform:translateY(12px);
+    pointer-events:none; transition:opacity .18s ease, transform .18s ease, visibility .18s;
+  }
+  .report-toast.is-visible { opacity:1; visibility:visible; transform:translateY(0); pointer-events:auto; }
+  .report-toast-success { border-color:#8fd3aa; background:#f1fbf5; }
+  .report-toast-info { border-color:#9cc5e7; background:#f3f8fd; }
+  .report-toast-warning { border-color:#e5c46d; background:#fff9e9; }
+  .report-toast-danger { border-color:#e6a4a4; background:#fff5f5; }
+  .report-toast-icon {
+    width:25px; height:25px; flex:0 0 25px; border-radius:50%; display:grid;
+    place-items:center; font-size:.76rem; font-weight:800; color:#fff; margin-top:.05rem;
+  }
+  .report-toast-success .report-toast-icon { background:#24804a; }
+  .report-toast-info .report-toast-icon { background:#23689b; }
+  .report-toast-warning .report-toast-icon { background:#9a6d00; }
+  .report-toast-danger .report-toast-icon { background:#b42318; }
+  .report-toast-content { flex:1; min-width:0; }
+  .report-toast-title { font-size:.79rem; font-weight:750; color:#172b3f; }
+  .report-toast-message { margin-top:.12rem; font-size:.78rem; line-height:1.42; white-space:pre-line; overflow-wrap:anywhere; }
+  .report-toast-action { display:inline-flex; margin-top:.45rem; font-size:.75rem; font-weight:700; }
+  .report-toast-close {
+    border:0; background:transparent; color:#667085; padding:0 .1rem; line-height:1;
+    font-size:1rem; opacity:.8;
+  }
+  .report-toast-close:hover { color:#17202a; opacity:1; }
   .upload-progress-panel { border:1px solid #d9e2ec; border-radius:8px; background:#f8fafc; padding:.8rem; }
   .upload-file-list { display:grid; gap:.45rem; margin-top:.65rem; }
   .upload-file-row {
@@ -88,10 +187,17 @@
     .topbar { align-items:flex-start; }
     .top-actions { width:100%; }
     .top-actions .btn { flex:1 1 auto; }
+    .builder-panel, .review-workflow-panel { padding:.85rem; }
+    .workflow-stage { padding:.9rem .85rem .9rem 3.25rem; }
+    .workflow-marker { left:.5rem; width:31px; height:31px; }
+    .workflow-stage:not(:last-child)::after { left:1.45rem; }
+    .workflow-review-stage { padding:.9rem !important; }
+    .report-toast { right:1rem; bottom:1rem; width:calc(100vw - 2rem); }
   }
 </style>
 </head>
 <body>
+<div id="monthly-alert" class="report-toast" role="status" aria-live="polite" aria-atomic="true"></div>
 <div class="topbar">
   <h6>📄 Reports <span style="font-size:.78rem;opacity:.72;">{{ username }}</span></h6>
   <div class="top-actions">
@@ -108,11 +214,17 @@
   <ul class="nav report-tabs mb-4" role="tablist">
     <li class="nav-item" role="presentation">
       <button class="nav-link active" id="daily-tab" data-bs-toggle="tab"
-        data-bs-target="#daily-pane" type="button" role="tab">Daily Reports</button>
+        data-bs-target="#daily-pane" type="button" role="tab">
+        <span class="tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5M9.5 12h5M9.5 16h5"/></svg></span>
+        Daily Reports
+      </button>
     </li>
     <li class="nav-item" role="presentation">
       <button class="nav-link" id="monthly-tab" data-bs-toggle="tab"
-        data-bs-target="#monthly-pane" type="button" role="tab">Weekly / Monthly Reports</button>
+        data-bs-target="#monthly-pane" type="button" role="tab">
+        <span class="tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18M8 14h3M13 14h3M8 17h3"/></svg></span>
+        Weekly / Monthly Reports
+      </button>
     </li>
   </ul>
 
@@ -182,19 +294,21 @@
     </section>
 
     <section class="tab-pane fade" id="monthly-pane" role="tabpanel">
-      <div class="panel mb-4">
-        <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap mb-3">
+      <div class="panel builder-panel mb-4">
+        <div class="builder-heading d-flex justify-content-between align-items-start gap-3 flex-wrap">
           <div>
+            <span class="workflow-kicker">Periodic report workflow</span>
             <h5 class="mb-1" id="create-report-title" style="color:var(--primary);">Create Monthly Report</h5>
             <div class="muted-note" id="create-report-hint">Compile a full month or Month-to-Date report from final JSON or uploaded legacy PDFs.</div>
           </div>
           <span class="badge text-bg-warning">Draft workflow</span>
         </div>
 
-        <div id="monthly-alert" class="alert d-none" role="alert"></div>
-
-        <div class="section-label">1. Choose report type</div>
-        <div class="row g-3 mb-4">
+        <div class="workflow-stack">
+        <div class="workflow-stage">
+        <span class="workflow-marker" aria-hidden="true">1</span>
+        <div class="workflow-stage-title">Choose report type</div>
+        <div class="row g-3 mb-0">
           <div class="col-md-6">
             <label class="type-card d-block" id="type-weekly-card">
               <input type="radio" name="report-type" value="weekly" onchange="setReportType(this.value)">
@@ -210,9 +324,12 @@
             </label>
           </div>
         </div>
+        </div>
 
-        <div class="section-label">2. Choose data source</div>
-        <div class="row g-3 mb-4">
+        <div class="workflow-stage">
+        <span class="workflow-marker" aria-hidden="true">2</span>
+        <div class="workflow-stage-title">Choose data source</div>
+        <div class="row g-3 mb-0">
           <div class="col-md-6">
             <label class="source-card active d-block" id="source-json-card">
               <input type="radio" name="monthly-source" value="stored_json" checked onchange="setMonthlySource(this.value)">
@@ -228,8 +345,11 @@
             </label>
           </div>
         </div>
+        </div>
 
-        <div class="section-label">3. Project and reporting period</div>
+        <div class="workflow-stage">
+        <span class="workflow-marker" aria-hidden="true">3</span>
+        <div class="workflow-stage-title">Project and reporting period</div>
         <div class="row g-3 mb-3">
           <div class="col-lg-5">
             <label class="form-label small">Project</label>
@@ -288,14 +408,17 @@
         </div>
         {% endif %}
 
-        <button class="btn btn-primary" id="compile-monthly-btn" onclick="compileMonthly()">
+        <button type="button" class="btn btn-primary" id="compile-monthly-btn" onclick="compileMonthly()">
           Compile Monthly & Review
         </button>
+        </div>
+        </div>
       </div>
 
-      <div class="panel mb-4 d-none" id="monthly-review-panel">
-        <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap mb-3">
+      <div class="panel review-workflow-panel mb-4 d-none" id="monthly-review-panel">
+        <div class="review-overview d-flex align-items-center justify-content-between gap-2 flex-wrap mb-3">
           <div>
+            <span class="workflow-kicker">Compiled report review</span>
             <h5 class="mb-1" id="review-report-title" style="color:var(--primary);">Review Monthly Draft</h5>
             <div class="muted-note" id="review-report-hint">Check missing dates and edit monthly-only fields before generating the PDF.</div>
           </div>
@@ -310,12 +433,16 @@
         </div>
         <div class="alert alert-warning py-2 small d-none" id="coverage-detail"></div>
 
-        <div class="border rounded-3 p-3 mb-4" id="source-validation-panel">
+        <div class="workflow-review-stage stage-source mb-4" id="source-validation-panel">
           <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap mb-3">
-            <div>
-              <div class="section-label mb-1">Source Data Validation</div>
-              <div class="muted-note">
-                Verify the reporting period, project identity, parser warnings, and editable totals before Preview or Generate.
+            <div class="review-stage-heading">
+              <span class="review-stage-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 3 5 6v5c0 4.5 2.9 8.3 7 10 4.1-1.7 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/></svg></span>
+              <div>
+                <span class="workflow-kicker">Stage 4</span>
+                <div class="review-stage-title mb-1">Source Data Validation</div>
+                <div class="muted-note">
+                  Verify the reporting period, project identity, parser warnings, and editable totals before Preview or Generate.
+                </div>
               </div>
             </div>
             <span class="badge text-bg-secondary" id="validation-status-badge">Pending review</span>
@@ -391,13 +518,17 @@
           </div>
         </div>
 
-        <div class="border rounded-3 p-3 mb-4 d-none" id="workforce-review-card" style="background:#f8fafc;">
+        <div class="workflow-review-stage stage-workforce mb-4 d-none" id="workforce-review-card">
           <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap mb-3">
-            <div>
-              <div class="section-label mb-1">Timesheet &amp; Overtime Validation</div>
-              <div class="muted-note">
-                Daily Report totals remain the baseline until you explicitly apply a reviewed Excel result.
-                Regular man-hours use 10 hours per present day; overtime uses the confirmed elapsed clock range.
+            <div class="review-stage-heading">
+              <span class="review-stage-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 18.5V20"/><circle cx="10" cy="8" r="3"/><circle cx="17.5" cy="15.5" r="3.5"/><path d="M17.5 13.5v2.2l1.4.8"/></svg></span>
+              <div>
+                <span class="workflow-kicker">Stage 5</span>
+                <div class="review-stage-title mb-1">Manpower &amp; Man-hour Review</div>
+                <div class="muted-note">
+                  Daily Report totals remain the baseline until you explicitly apply a reviewed Excel result.
+                  Regular man-hours use 10 hours per present day; overtime uses the confirmed elapsed clock range.
+                </div>
               </div>
             </div>
             <span class="badge text-bg-secondary" id="workforce-status-badge">Daily Report baseline</span>
@@ -490,18 +621,23 @@
           </div>
         </div>
 
-        <div class="border rounded-3 p-3 mb-4 d-none" id="ai-summary-card">
+        <div class="workflow-review-stage stage-ai mb-4 d-none" id="ai-summary-card">
           <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap">
-            <div>
-              <div class="section-label mb-1">Claude AI Narrative Suggestions</div>
-              <div class="muted-note">
-                Claude can group activities and improve narrative wording. Verified numbers and source facts stay locked.
+            <div class="review-stage-heading">
+              <span class="review-stage-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 3 .8 2.2L11 6l-2.2.8L8 9l-.8-2.2L5 6l2.2-.8zM17 4l.6 1.4L19 6l-1.4.6L17 9l-.6-1.4L15 7l1.4-.6z"/><path d="M5 11h14v8H9l-4 2z"/><path d="M9 15h6"/></svg></span>
+              <div>
+                <span class="workflow-kicker">Stage 6</span>
+                <div class="review-stage-title mb-1">Claude AI Summary</div>
+                <div class="muted-note">
+                  Group activities and improve narrative wording using verified Daily Report facts. Numbers and source facts stay locked.
+                </div>
               </div>
             </div>
-            <button type="button" class="btn btn-sm btn-outline-primary" id="generate-ai-summary-btn"
+            <button type="button" class="btn btn-sm btn-ai compact-icon-btn" id="generate-ai-summary-btn"
               onclick="generateAiSummary()"
               {% if not anthropic_configured or not ai_summary_allowed %}disabled
               title="{% if not anthropic_configured %}Configure ANTHROPIC_API_KEY in Railway first.{% else %}AI summaries are restricted to administrators.{% endif %}"{% endif %}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m8 3 .8 2.2L11 6l-2.2.8L8 9l-.8-2.2L5 6l2.2-.8zM17 8l1.1 2.9L21 12l-2.9 1.1L17 16l-1.1-2.9L13 12l2.9-1.1z"/></svg>
               Generate AI Summary
             </button>
           </div>
@@ -530,22 +666,40 @@
           </div>
         </div>
 
-        <div class="border rounded-3 p-3 mb-4 d-none" id="photo-review-card" style="background:#f8fafc;">
+        <div class="workflow-review-stage stage-photo mb-4 d-none" id="photo-review-card">
           <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
-            <div>
-              <div class="section-label mb-1">Photo Documentation</div>
-              <div class="muted-note">
-                Review extracted Daily Report photos before they are added to Appendix 6.6.
-                Repeated logos and exact duplicates are filtered automatically.
+            <div class="review-stage-heading">
+              <span class="review-stage-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m5 17 4.5-4 3 2.5 2.5-2 4 3.5"/></svg></span>
+              <div>
+                <span class="workflow-kicker">Stage 7</span>
+                <div class="review-stage-title mb-1">Photo Review</div>
+                <div class="muted-note">
+                  Review extracted Daily Report photos and captions before they are added to Appendix 6.6.
+                  Repeated logos and exact duplicates are filtered automatically.
+                </div>
               </div>
             </div>
             <div class="d-flex align-items-center gap-2">
               <span class="badge text-bg-secondary" id="photo-count-badge">0 photos</span>
-              <button type="button" class="btn btn-sm btn-outline-primary" onclick="openPhotoReview()">
-                Review Photos
+              <button type="button" class="btn btn-sm btn-photo compact-icon-btn" onclick="openPhotoReview()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m5 17 4.5-4 3 2.5 2.5-2 4 3.5"/></svg>
+                Review Photos &amp; Captions
               </button>
             </div>
           </div>
+        </div>
+
+        <div class="workflow-review-stage stage-final mb-0" id="final-review-stage">
+        <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap mb-3">
+        <div class="review-stage-heading">
+          <span class="review-stage-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg></span>
+          <div>
+            <span class="workflow-kicker">Stage 8</span>
+            <div class="review-stage-title mb-1">Final Review &amp; Generate</div>
+            <div class="muted-note">Review the compiled narrative, progress, safety, and site information before previewing or saving the final PDF.</div>
+          </div>
+        </div>
+        <span class="badge text-bg-secondary d-none" id="final-generate-status"></span>
         </div>
 
         <div class="section-label">Executive Summary</div>
@@ -607,9 +761,10 @@
         </div>
 
         <div class="d-flex gap-2 mt-4 flex-wrap">
-          <button class="btn btn-outline-primary" id="preview-monthly-btn" onclick="previewMonthly()">👁 Preview Monthly PDF</button>
-          <button class="btn btn-success" id="generate-monthly-btn" onclick="generateMonthly()">Generate & Save Monthly PDF</button>
-          <button class="btn btn-outline-secondary" onclick="document.getElementById('monthly-review-panel').classList.add('d-none')">Close Review</button>
+          <button type="button" class="btn btn-outline-primary" id="preview-monthly-btn" onclick="previewMonthly()">👁 Preview Monthly PDF</button>
+          <button type="button" class="btn btn-success" id="generate-monthly-btn" onclick="generateMonthly()">Generate & Save Monthly PDF</button>
+          <button type="button" class="btn btn-outline-secondary" onclick="document.getElementById('monthly-review-panel').classList.add('d-none')">Close Review</button>
+        </div>
         </div>
       </div>
 
@@ -689,6 +844,7 @@ let monthlySourceValidationApplied = false;
 let monthlyPhotos = [];
 let monthlyWorkforce = {};
 let monthlyAiSuggestion = null;
+let monthlyAlertTimer = null;
 const MAX_MONTHLY_UPLOAD_FILES = 35;
 const MAX_MONTHLY_PDF_BYTES = {{ pdf_upload_max_bytes|default(52428800)|int }};
 const MONTHLY_UPLOAD_CLEANUP_KEY = 'gpa-report-upload-cleanup';
@@ -1015,16 +1171,63 @@ function setLoading(buttonId, loading, label) {
   }
 }
 
-function showMonthlyAlert(message, type='danger') {
+function showMonthlyAlert(message, type='danger', options={}) {
   const el = document.getElementById('monthly-alert');
-  el.className = `alert alert-${type}`;
-  el.textContent = message;
-  el.classList.remove('d-none');
-  el.scrollIntoView({behavior:'smooth', block:'center'});
+  if (!el) return;
+  if (monthlyAlertTimer) clearTimeout(monthlyAlertTimer);
+  monthlyAlertTimer = null;
+
+  const normalizedType = ['success', 'info', 'warning', 'danger'].includes(type) ? type : 'danger';
+  const labels = {
+    success:['Success', '✓'], info:['Information', 'i'],
+    warning:['Review required', '!'], danger:['Action required', '!'],
+  };
+  el.replaceChildren();
+  el.className = `report-toast report-toast-${normalizedType}`;
+  el.setAttribute('role', ['warning', 'danger'].includes(normalizedType) ? 'alert' : 'status');
+  el.setAttribute('aria-live', ['warning', 'danger'].includes(normalizedType) ? 'assertive' : 'polite');
+
+  const icon = document.createElement('span');
+  icon.className = 'report-toast-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = labels[normalizedType][1];
+
+  const content = document.createElement('div');
+  content.className = 'report-toast-content';
+  const title = document.createElement('div');
+  title.className = 'report-toast-title';
+  title.textContent = options.title || labels[normalizedType][0];
+  const body = document.createElement('div');
+  body.className = 'report-toast-message';
+  body.textContent = message;
+  content.append(title, body);
+
+  if (options.actionUrl) {
+    const action = document.createElement('a');
+    action.className = 'report-toast-action';
+    action.href = options.actionUrl;
+    action.textContent = options.actionLabel || 'Open';
+    if (options.download === true) action.setAttribute('download', '');
+    content.appendChild(action);
+  }
+
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'report-toast-close';
+  close.setAttribute('aria-label', 'Dismiss notification');
+  close.textContent = '×';
+  close.addEventListener('click', hideMonthlyAlert);
+  el.append(icon, content, close);
+  requestAnimationFrame(() => el.classList.add('is-visible'));
+
+  const duration = options.duration ?? ({success:5000, info:6500, warning:9000, danger:10000}[normalizedType]);
+  if (duration > 0) monthlyAlertTimer = setTimeout(hideMonthlyAlert, duration);
 }
 
 function hideMonthlyAlert() {
-  document.getElementById('monthly-alert').classList.add('d-none');
+  if (monthlyAlertTimer) clearTimeout(monthlyAlertTimer);
+  monthlyAlertTimer = null;
+  document.getElementById('monthly-alert')?.classList.remove('is-visible');
 }
 
 function setMonthlySource(value) {
@@ -1082,11 +1285,13 @@ function validateMonthlyUploadQueue() {
   }
 }
 
-function applyCompiledMonthlyDraft(data) {
+function applyCompiledMonthlyDraft(data, {scrollToReview=true}={}) {
   monthlyDraftId = data.draft_id;
   populateMonthlyReview(data.draft);
   document.getElementById('monthly-review-panel').classList.remove('d-none');
-  document.getElementById('monthly-review-panel').scrollIntoView({behavior:'smooth'});
+  if (scrollToReview) {
+    document.getElementById('monthly-review-panel').scrollIntoView({behavior:'smooth'});
+  }
 }
 
 const REPORT_NARRATIVE_REVIEW_FIELD_IDS = [
@@ -1174,7 +1379,7 @@ function restoreNonWorkforceReview(snapshot) {
 
 function applyWorkforceDraftPreservingReview(data) {
   const snapshot = snapshotNonWorkforceReview();
-  applyCompiledMonthlyDraft(data);
+  applyCompiledMonthlyDraft(data, {scrollToReview:false});
   restoreNonWorkforceReview(snapshot);
 }
 
@@ -1201,7 +1406,7 @@ function snapshotAiActionReview({preserveNarratives=true}={}) {
 
 function applyAiDraftPreservingReview(data, {preserveNarratives=true}={}) {
   const snapshot = snapshotAiActionReview({preserveNarratives});
-  applyCompiledMonthlyDraft(data);
+  applyCompiledMonthlyDraft(data, {scrollToReview:false});
   restoreNonWorkforceReview(snapshot);
 }
 
@@ -2226,7 +2431,7 @@ async function applySourceValidation() {
     });
     const data = await responsePayload(response, 'Source validation could not be applied.');
     if (!data.ok) throw new Error(data.error || 'Source validation could not be applied.');
-    applyCompiledMonthlyDraft(data);
+    applyCompiledMonthlyDraft(data, {scrollToReview:false});
     showMonthlyAlert('Source validation applied. Review the refreshed totals before Preview or Generate.', 'success');
   } catch (err) {
     showMonthlyAlert(err.message || 'Source validation could not be applied.');
@@ -2352,6 +2557,73 @@ function collectMonthlyReview() {
   };
 }
 
+function setFinalGenerateStatus(message='', type='secondary') {
+  const badge = document.getElementById('final-generate-status');
+  if (!badge) return;
+  badge.textContent = message;
+  badge.className = `badge text-bg-${type}${message ? '' : ' d-none'}`;
+}
+
+function addMonthlyReportToHistory(report, downloadUrl='') {
+  if (!report?.filename) return;
+  const list = document.getElementById('monthly-report-list');
+  if (!list) return;
+  document.getElementById('monthly-empty')?.remove();
+  Array.from(list.querySelectorAll('.monthly-report-card')).forEach(card => {
+    if (card.dataset.filename === report.filename) card.remove();
+  });
+
+  const kind = String(report.report_type || reportType || 'monthly').toLowerCase() === 'weekly'
+    ? 'weekly' : 'monthly';
+  const card = document.createElement('div');
+  card.className = 'report-card monthly-report-card';
+  card.dataset.filename = report.filename;
+
+  const icon = document.createElement('div');
+  icon.className = 'report-type-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = kind === 'weekly' ? 'W' : 'M';
+
+  const meta = document.createElement('div');
+  meta.className = 'report-meta';
+  const filename = document.createElement('div');
+  filename.className = 'fname';
+  filename.textContent = report.filename;
+  const info = document.createElement('div');
+  info.className = 'info';
+  const typeBadge = document.createElement('span');
+  typeBadge.className = `badge-status badge-report-type ${kind}`;
+  typeBadge.textContent = kind.toUpperCase();
+  const statusBadge = document.createElement('span');
+  statusBadge.className = 'badge-status';
+  statusBadge.textContent = String(report.status || 'draft').toUpperCase();
+  info.append(typeBadge, document.createTextNode('  '), statusBadge);
+  const details = [
+    [report.period_start, report.period_end].filter(Boolean).join(' → '),
+    report.project_no || '',
+    `Generated ${report.generated_at || 'just now'}`,
+    report.size_kb !== undefined && report.size_kb !== null ? `${report.size_kb} KB` : '',
+  ].filter(Boolean);
+  if (details.length) info.appendChild(document.createTextNode(`  ${details.join(' · ')}`));
+  meta.append(filename, info);
+
+  const actions = document.createElement('div');
+  actions.className = 'd-flex gap-2 flex-shrink-0';
+  const download = document.createElement('a');
+  download.className = 'btn btn-sm btn-outline-primary';
+  download.href = downloadUrl || `/monthly/download/${encodeURIComponent(report.filename)}`;
+  download.textContent = 'Download';
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'btn btn-sm btn-outline-danger';
+  remove.textContent = 'Delete';
+  remove.addEventListener('click', () => deleteMonthlyReport(report.filename, remove));
+  actions.append(download, remove);
+  card.append(icon, meta, actions);
+  list.prepend(card);
+  updateMonthlyCount();
+}
+
 async function postMonthlyPdf(endpoint, save) {
   if (!monthlyDraftId) { showMonthlyAlert(`Compile a ${reportType} draft first.`, 'warning'); return; }
   const typeName = reportType === 'weekly' ? 'Weekly' : 'Monthly';
@@ -2360,6 +2632,7 @@ async function postMonthlyPdf(endpoint, save) {
   const previewWindow = save ? null : window.open('about:blank', '_blank');
   if (previewWindow) previewWindow.document.title = `Preparing ${typeName} Report Preview...`;
   const btnId = save ? 'generate-monthly-btn' : 'preview-monthly-btn';
+  setFinalGenerateStatus(save ? 'Generating PDF...' : 'Preparing preview...', 'warning');
   setLoading(btnId, true, save ? 'Generating...' : 'Preparing preview...');
   try {
     const response = await fetch(`${endpoint}/${encodeURIComponent(monthlyDraftId)}`, {
@@ -2372,17 +2645,30 @@ async function postMonthlyPdf(endpoint, save) {
     }
     if (save) {
       const data = await response.json();
-      showMonthlyAlert(`${typeName} Report generated and saved successfully.`, 'success');
-      setTimeout(() => window.location.reload(), 800);
+      addMonthlyReportToHistory(data.report || {
+        filename:data.filename,
+        report_type:reportType,
+        status:document.getElementById('monthly-report-mode').value,
+        project_no:document.getElementById('review-project-no').value.trim(),
+        period_start:document.getElementById('monthly-date-from').value,
+        period_end:document.getElementById('monthly-date-to').value,
+      }, data.download_url);
+      setFinalGenerateStatus('PDF saved', 'success');
+      showMonthlyAlert(`${typeName} Report generated and saved successfully.`, 'success', {
+        actionLabel:'Download PDF', actionUrl:data.download_url, download:true,
+      });
     } else {
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       if (previewWindow) previewWindow.location.href = url;
       else window.open(url, '_blank');
       setTimeout(() => URL.revokeObjectURL(url), 60000);
+      setFinalGenerateStatus('Preview ready', 'success');
+      showMonthlyAlert(`${typeName} PDF preview opened in a new tab.`, 'success');
     }
   } catch (err) {
     if (previewWindow) previewWindow.close();
+    setFinalGenerateStatus('Review required', 'danger');
     showMonthlyAlert(err.message);
   } finally {
     setLoading(btnId, false);
