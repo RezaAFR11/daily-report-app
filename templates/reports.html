@@ -2486,6 +2486,12 @@ function updateMonthlyCount() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('[data-bs-toggle="tab"]').forEach(tab => {
+    tab.addEventListener('shown.bs.tab', event => {
+      const activeHash = event.target.id === 'monthly-tab' ? '#monthly' : '#daily';
+      if (location.hash !== activeHash) history.replaceState(null, '', activeHash);
+    });
+  });
   rememberedUploadSessions().forEach(uploadSessionId => requestUploadSessionCleanup(uploadSessionId));
   setReportType('monthly');
   document.getElementById('monthly-report-mode').addEventListener('change', handleReportModeChange);
