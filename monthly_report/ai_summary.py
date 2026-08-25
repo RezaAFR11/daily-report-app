@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SUGGESTION_VERSION = "periodic-ai-suggestion/26"
-PROMPT_VERSION = "periodic-narrative-grounding/27"
+SUGGESTION_VERSION = "periodic-ai-suggestion/27"
+PROMPT_VERSION = "periodic-narrative-grounding/28"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 MAX_INPUT_BYTES = 200_000
@@ -334,8 +334,12 @@ Reporting rules:
     If Daily Report coverage is partial, state the available Daily Report dates
     separately; never redefine the official weekly/monthly period as only the
     dates currently supplied.
-   Prefer useful project narrative over administrative boilerplate. Do not mention
-   parsers, normalization, uploads, source validation, application warnings, manual
+   Prefer useful project narrative over administrative boilerplate. For Weekly
+   executive summaries, target approximately 130-160 words and never exceed 180
+   words. Prioritize major work fronts, progress, workforce, formal constraint
+   status, material findings, and missing safety metrics; leave lower-priority
+   technical detail in the activity/findings sections. Do not mention parsers,
+   normalization, uploads, source validation, application warnings, manual
    entry/input requirements, or instructions to review the report. If engineering
    or procurement evidence is absent, omit it from the executive summary rather
    than describing an internal workflow requirement.
@@ -378,7 +382,11 @@ Reporting rules:
    related activities were recorded during the period"; write only the useful
    representative work summary.
    Preserve technical terms, quantities, durations, dates, unit/equipment
-   identifiers, and explicit activity status when source-backed. Do not expand
+   identifiers, and explicit activity status when source-backed. Keep scope exact:
+   when a sentence applies an equipment scope such as ``both units`` and then lists
+   several subactivities, every listed subactivity must be explicitly supported for
+   that same scope. If only some subactivities are supported for both units, split
+   the sentence so narrower-scope work is not accidentally generalized. Do not expand
    abbreviations into a different equipment concept unless the deterministic baseline
    explicitly supplies that expansion (for example, keep ``MSV`` as ``MSV``; do not
    rewrite a generic solenoid check as ``multi-way valve`` work). Do not call a DCS
@@ -442,7 +450,7 @@ Reporting rules:
     unless every stated detail is present in the supplied source/deterministic
     baseline.
     The response must fit comfortably inside the output budget:
-    - executive_summary: normally 4-6 sentences and preferably <= 1,400 characters when the deterministic baseline contains multiple area highlights.
+    - executive_summary: normally 4-6 sentences; for Weekly reports target 130-160 words, hard maximum 180 words, and preferably <= 1,200 characters.
     - site_summary: normally 2-4 sentences and preferably <= 900 characters.
     - engineering_summary/procurement_summary: preferably <= 500 characters each.
     - each current_activities, lookahead, claim, concern, or corrective_action
