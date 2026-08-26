@@ -1544,10 +1544,12 @@ def _photo_grid_flowables(
     *,
     photo_base_dir: str | os.PathLike[str] | None,
 ) -> list[Flowable]:
-    """Render reviewed photos grouped by source date, up to nine cards per page.
+    """Render reviewed photos grouped by source date in an adaptive 3-column grid.
 
-    Weekly/Monthly reports are easier to audit when each Daily Report date has a
-    visible photo block. Exact duplicates within the same Daily source are removed,
+    The normal layout targets 12 cards per page (3 x 4) to keep large Weekly/Monthly
+    photo appendices compact without dropping evidence.  A page falls back to nine
+    cards (3 x 3) when the next group contains several long captions, preserving
+    caption readability. Exact duplicates within the same Daily source are removed,
     while an identical asset reused by a different Daily Report date is retained as
     a separate dated reference for source traceability.
     """
@@ -1609,16 +1611,47 @@ def _photo_grid_flowables(
         ).strip()
         return text
 
-    def build_grid(items: list[Mapping[str, Any]]) -> Table | None:
+    def _page_capacity(items: list[Mapping[str, Any]], start: int) -> int:
+        """Choose 12 cards normally, or 9 when captions need more vertical room."""
+
+        probe = items[start:start + 12]
+        captions = [
+            clean_caption(row.get("caption"))
+            for row in probe
+            if isinstance(row, Mapping)
+        ]
+        non_empty = [caption for caption in captions if caption]
+        long_count = sum(len(caption) > 120 for caption in non_empty)
+        very_long_count = sum(len(caption) > 180 for caption in non_empty)
+        # Three columns leave roughly 45-50 characters per caption line at the
+        # compact photo font.  Several long captions on one 3 x 4 page can make
+        # the fourth row too dense, so use the roomier legacy 3 x 3 layout.
+        if very_long_count >= 2 or long_count >= 5:
+            return 9
+        return 12
+
+    def build_grid(items: list[Mapping[str, Any]], *, compact: bool) -> Table | None:
         columns = 3
         cell_width = BODY_WIDTH / columns
-        image_width = cell_width - 8
-        image_height = 122.0
+        image_width = cell_width - (6 if compact else 8)
+        image_height = 88.0 if compact else 122.0
+        photo_text_style = (
+            ParagraphStyle(
+                "MonthlyPhotoCompact",
+                parent=styles["small"],
+                fontSize=7.8,
+                leading=9.2,
+                spaceAfter=1,
+                splitLongWords=1,
+            )
+            if compact
+            else styles["small"]
+        )
         rows: list[list[Any]] = []
         current: list[Any] = []
 
         # Keep every photo, but avoid printing the same activity caption on all
-        # nine cards of a page.  The first card in each repeated Area+Caption group
+        # cards of a page. The first card in each repeated Area+Caption group
         # carries the full caption; subsequent cards keep the area label and image.
         # The group heading naturally repeats on a continuation page because each
         # page chunk is built independently.
@@ -1674,19 +1707,20 @@ def _photo_grid_flowables(
 
             card_rows: list[list[Any]] = []
             if area:
-                card_rows.append([Paragraph(f"<b>{_xml(area)}</b>", styles["small"])])
+                card_rows.append([Paragraph(f"<b>{_xml(area)}</b>", photo_text_style)])
             if caption:
                 caption_markup = f"<i>{_xml(show_caption)}</i>" if show_caption else "&#160;"
-                card_rows.append([Paragraph(caption_markup, styles["small"])])
+                card_rows.append([Paragraph(caption_markup, photo_text_style)])
             card_rows.append([rendered_image])
             card = Table(card_rows, colWidths=[cell_width - 4])
+            card_padding = 2 if compact else 3
             card_style = [
                 ("BOX", (0, 0), (-1, -1), 0.55, CYAN),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 3),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("LEFTPADDING", (0, 0), (-1, -1), card_padding),
+                ("RIGHTPADDING", (0, 0), (-1, -1), card_padding),
+                ("TOPPADDING", (0, 0), (-1, -1), card_padding),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), card_padding),
             ]
             if area:
                 card_style.extend([
@@ -1708,21 +1742,25 @@ def _photo_grid_flowables(
             rows.append(current)
         if not rows:
             return None
+        grid_padding_x = 1 if compact else 2
+        grid_padding_y = 2 if compact else 4
         grid = Table(rows, colWidths=[cell_width] * columns, hAlign="LEFT", splitByRow=1)
         grid.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 2),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-            ("TOPPADDING", (0, 0), (-1, -1), 4),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), grid_padding_x),
+            ("RIGHTPADDING", (0, 0), (-1, -1), grid_padding_x),
+            ("TOPPADDING", (0, 0), (-1, -1), grid_padding_y),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), grid_padding_y),
         ]))
         return grid
 
     result: list[Flowable] = []
     for date_index, source_date in enumerate(group_order):
         items = grouped[source_date]
-        for chunk_index in range(0, len(items), 9):
-            chunk = items[chunk_index:chunk_index + 9]
+        chunk_index = 0
+        while chunk_index < len(items):
+            capacity = _page_capacity(items, chunk_index)
+            chunk = items[chunk_index:chunk_index + capacity]
             if result:
                 result.append(PageBreak())
             continuation = " (continued)" if chunk_index else ""
@@ -1730,9 +1768,10 @@ def _photo_grid_flowables(
                 f"Photo Documentation: {source_date}{continuation}",
                 styles["h2"],
             ))
-            grid = build_grid(chunk)
+            grid = build_grid(chunk, compact=(capacity == 12))
             if grid is not None:
                 result.append(grid)
+            chunk_index += capacity
 
     if not result:
         return [Paragraph("No selected photo assets are available.", styles["placeholder"])]
