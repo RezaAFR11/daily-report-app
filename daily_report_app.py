@@ -1119,6 +1119,302 @@ def _build_photo_documentation_flowables(
     return flowables
 
 
+def _build_report_information_flowables(
+    report,
+    config,
+    styles,
+    grey_line,
+    grey_background,
+    white,
+    section_gap,
+    section_marker,
+):
+    """Build the project and report identity table shown in the first section."""
+    project_title = report.get('project_title') or config.get(
+        'project_title',
+        'Electrical Installation &amp; Construction',
+    )
+    rows = [
+        ('Project No.', _esc(report.get('project_no', ''))),
+        ('Project Name', _esc(project_title)),
+        ('Customer', _esc(report.get('customer', ''))),
+        ('Location', _esc(report.get('location', ''))),
+        ('Equipment', _esc(report.get('equipment', '-'))),
+        ('Date', _esc(report.get('date', ''))),
+        ('Working Day', f"Day {_esc(report.get('day_no', ''))}"),
+        ('Working Hours', '07:00 — 17:00 (Regular) | OT as noted'),
+        (
+            'Active Areas',
+            '  '.join(_esc(area.get('id', '')) for area in report.get('areas', [])),
+        ),
+    ]
+    table = Table(
+        [
+            [
+                Paragraph(label, S('Normal', fontSize=8, fontName='Helvetica-Bold')),
+                Paragraph(value, styles['body_s']),
+            ]
+            for label, value in rows
+        ],
+        colWidths=[35*mm, CW - 35*mm],
+    )
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (0, -1), styles['LB']),
+        ('GRID', (0, 0), (-1, -1), 0.4, grey_line),
+        ('FONTSIZE', (0, 0), (-1, -1), 8),
+        ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+        ('LEFTPADDING', (0, 0), (-1, -1), 4),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('ROWBACKGROUNDS', (0, 0), (-1, -1), [white, grey_background]),
+    ]))
+    return [*section_marker('report_information'), table, Spacer(1, section_gap)]
+
+
+def _build_weather_flowables(
+    report,
+    styles,
+    grey_line,
+    white,
+    section_gap,
+    section_marker,
+    table_cell,
+):
+    """Build the weather table while preserving arbitrary legacy column names."""
+    flowables = list(section_marker('weather'))
+    weather = report.get('weather', {})
+    if weather:
+        keys = list(weather.keys())
+        values = [table_cell(weather[key], centered=True) for key in keys]
+        headings = [Paragraph(_esc(key), styles['wx_h_s']) for key in keys]
+        table = Table(
+            [headings, values],
+            colWidths=[CW / len(keys)] * len(keys),
+        )
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), styles['SEC']),
+            ('TEXTCOLOR', (0, 0), (-1, 0), white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 7),
+            ('GRID', (0, 0), (-1, -1), 0.4, grey_line),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('TOPPADDING', (0, 0), (-1, -1), 2),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+        ]))
+        flowables.append(table)
+    flowables.append(Spacer(1, section_gap))
+    return flowables
+
+
+def _build_indirect_manpower_flowables(
+    report,
+    section_gap,
+    section_marker,
+    table_cell,
+):
+    """Build the global indirect-manpower table, including its empty state."""
+    rows = [['No.', 'Name', 'Role / Position', 'Working Hours']]
+    for index, person in enumerate(report.get('indirect_manpower', []), 1):
+        rows.append([
+            str(index),
+            table_cell(person.get('name', '')),
+            table_cell(person.get('role', '')),
+            table_cell(person.get('hours', ''), centered=True),
+        ])
+    table = Table(rows, colWidths=[9*mm, 70*mm, 55*mm, CW - 134*mm])
+    table.setStyle(base_ts([
+        ('ALIGN', (0, 0), (0, -1), 'CENTER'),
+        ('ALIGN', (3, 0), (3, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+    return [*section_marker('indirect_manpower'), table, Spacer(1, section_gap)]
+
+
+def _build_area_activity_flowables(
+    areas,
+    styles,
+    grey_line,
+    grey_background,
+    section_gap,
+    section_marker,
+    area_heading,
+    activity_cell,
+):
+    """Build paired today/tomorrow activity cards for every active area."""
+    flowables = list(section_marker('area_activities', [CondPageBreak(32*mm)]))
+    for area_index, area in enumerate(areas):
+        area_id = area.get('id', '')
+        blocks = list(area_heading(area_id))
+        if area.get('activities_swapped'):
+            columns = [
+                activity_cell(
+                    area.get('activities_tomorrow', []),
+                    'Activity Tomorrow',
+                ),
+                activity_cell(area.get('activities_today', []), 'Activity Today'),
+            ]
+        else:
+            columns = [
+                activity_cell(area.get('activities_today', []), 'Activity Today'),
+                activity_cell(
+                    area.get('activities_tomorrow', []),
+                    'Activity Tomorrow',
+                ),
+            ]
+        table = Table([columns], colWidths=[CW * 0.55, CW * 0.45])
+        table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('BOX', (0, 0), (-1, -1), 0.5, grey_line),
+            ('INNERGRID', (0, 0), (-1, -1), 0.4, grey_line),
+            ('BACKGROUND', (0, 0), (-1, -1), grey_background),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('LEFTPADDING', (0, 0), (-1, -1), 4),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        blocks.extend([table, Spacer(1, 1*mm)])
+        if blocks and isinstance(blocks[-1], Spacer):
+            blocks.pop()
+        flowables.append(KeepTogether(blocks[:4]))
+        flowables.extend(blocks[4:])
+        if area_index < len(areas) - 1:
+            flowables.append(Spacer(1, 2.5*mm))
+    flowables.append(Spacer(1, section_gap))
+    return flowables
+
+
+def _build_area_manpower_flowables(
+    areas,
+    styles,
+    section_gap,
+    section_marker,
+    area_heading,
+    table_cell,
+):
+    """Build direct and area-specific indirect manpower tables by work area."""
+    flowables = list(section_marker('area_manpower', [CondPageBreak(32*mm)]))
+    column_widths = [9*mm, 70*mm, 55*mm, CW - 134*mm]
+    table_style = [
+        ('ALIGN', (0, 0), (0, -1), 'CENTER'),
+        ('ALIGN', (3, 0), (3, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+    ]
+
+    for area_index, area in enumerate(areas):
+        area_id = area.get('id', '')
+        blocks = list(area_heading(area_id))
+        direct_manpower = area.get('manpower', [])
+        if direct_manpower:
+            rows = [['No.', 'Name', 'Role / Position', 'Working Hours']]
+            for index, person in enumerate(direct_manpower, 1):
+                rows.append([
+                    str(index),
+                    table_cell(person.get('name', '')),
+                    table_cell(person.get('role', '')),
+                    table_cell(person.get('hours', ''), centered=True),
+                ])
+            table = Table(rows, colWidths=column_widths)
+            table.setStyle(base_ts(table_style))
+            blocks.extend([table, Spacer(1, 1*mm)])
+
+        indirect_manpower = area.get('indirect_manpower', [])
+        if indirect_manpower:
+            blocks.append(
+                Paragraph(f'Indirect Manpower — {_esc(area_id)}', styles['sub_s'])
+            )
+            rows = [['No.', 'Name', 'Role / Position', 'Working Hours']]
+            for index, person in enumerate(indirect_manpower, 1):
+                rows.append([
+                    str(index),
+                    table_cell(person.get('name', '')),
+                    table_cell(person.get('role', '')),
+                    table_cell(person.get('hours', ''), centered=True),
+                ])
+            table = Table(rows, colWidths=column_widths)
+            table.setStyle(base_ts(table_style))
+            blocks.extend([table, Spacer(1, 1*mm)])
+
+        if blocks and isinstance(blocks[-1], Spacer):
+            blocks.pop()
+        flowables.append(KeepTogether(blocks[:4]))
+        flowables.extend(blocks[4:])
+        if area_index < len(areas) - 1:
+            flowables.append(Spacer(1, 2.5*mm))
+    flowables.append(Spacer(1, section_gap))
+    return flowables
+
+
+def _build_constraints_flowables(
+    report,
+    styles,
+    section_gap,
+    section_marker,
+    table_cell,
+):
+    """Build area constraints while keeping the compact pagination threshold."""
+    flowables = list(
+        section_marker('constraints', [CondPageBreak(25*mm)])
+    )
+    areas = report.get('areas', [])
+    if areas:
+        rows = [['Area', 'Constraint / Issue']]
+        for area in areas:
+            constraint = area.get('constraints', '').strip()
+            rows.append([
+                table_cell(area.get('id', '')),
+                table_cell(constraint or '-'),
+            ])
+        table = Table(rows, colWidths=[20*mm, CW - 20*mm])
+        table.setStyle(base_ts([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
+        flowables.append(table)
+    else:
+        flowables.append(Paragraph('No constraints reported.', styles['ital_s']))
+    flowables.append(Spacer(1, section_gap))
+    return flowables
+
+
+def _build_remarks_flowables(
+    report,
+    styles,
+    section_gap,
+    section_marker,
+    table_cell,
+):
+    """Build area remarks followed by the optional global report remark."""
+    flowables = list(section_marker('remarks'))
+    area_remarks = []
+    for area in report.get('areas', []):
+        remark = area.get('remarks', '').strip()
+        area_remarks.append([
+            table_cell(area.get('id', '')),
+            table_cell(remark or '-'),
+        ])
+
+    global_remark = report.get('global_remarks', '').strip()
+    if area_remarks:
+        table = Table(
+            [['Area', 'Remarks']] + area_remarks,
+            colWidths=[20*mm, CW - 20*mm],
+        )
+        table.setStyle(base_ts([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
+        flowables.append(table)
+        if global_remark:
+            flowables.extend([
+                Spacer(1, 1.5*mm),
+                Paragraph(_esc(global_remark), styles['body_s']),
+            ])
+    else:
+        flowables.append(
+            Paragraph(
+                _esc(global_remark) if global_remark else '—',
+                styles['body_s'],
+            )
+        )
+    flowables.append(Spacer(1, section_gap))
+    return flowables
+
+
 def generate_pdf(d, output_path, cfg):
     """Render one Daily Report payload to a PDF byte stream and optional file."""
     st = make_styles(cfg)
@@ -1201,58 +1497,31 @@ def generate_pdf(d, output_path, cfg):
             heading_builder=SH,
         )
 
-    # S1 info
-    story += SECTION('report_information')
-    proj_title_val = d.get('project_title') or cfg.get('project_title', 'Electrical Installation &amp; Construction')
-    info_rows = [
-        ('Project No.',  _esc(proj)),
-        ('Project Name', _esc(proj_title_val)),
-        ('Customer',     _esc(cust)), ('Location', _esc(loc)), ('Equipment', _esc(equip)),
-        ('Date', _esc(date)), ('Working Day', f'Day {_esc(day)}'),
-        ('Working Hours','07:00 — 17:00 (Regular) | OT as noted'),
-        ('Active Areas', '  '.join(_esc(a.get('id','')) for a in d.get('areas',[]))),
-    ]
-    itbl = Table([[Paragraph(k,S('Normal',fontSize=8,fontName='Helvetica-Bold')),Paragraph(v,st['body_s'])]
-                  for k,v in info_rows], colWidths=[35*mm,CW-35*mm])
-    itbl.setStyle(TableStyle([
-        ('BACKGROUND',(0,0),(0,-1),st['LB']),('GRID',(0,0),(-1,-1),0.4,GREY_LINE),
-        ('FONTSIZE',(0,0),(-1,-1),8),('TOPPADDING',(0,0),(-1,-1),2),
-        ('BOTTOMPADDING',(0,0),(-1,-1),2),('LEFTPADDING',(0,0),(-1,-1),4),
-        ('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ROWBACKGROUNDS',(0,0),(-1,-1),[WHITE,GREY_BG])]))
-    story += [itbl, Spacer(1,SECTION_GAP)]
-
-    # S2 weather
-    story += SECTION('weather')
-    wx = d.get('weather',{})
-    if wx:
-        keys = list(wx.keys())
-        vals = [TC(wx[k], centered=True) for k in keys]
-        keys = [Paragraph(_esc(k), st['wx_h_s']) for k in keys]
-        wt = Table([keys,vals], colWidths=[CW/len(keys)]*len(keys))
-        wt.setStyle(TableStyle([
-            ('BACKGROUND',(0,0),(-1,0),st['SEC']),('TEXTCOLOR',(0,0),(-1,0),WHITE),
-            ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),
-            ('GRID',(0,0),(-1,-1),0.4,GREY_LINE),('ALIGN',(0,0),(-1,-1),'CENTER'),
-            ('VALIGN',(0,0),(-1,-1),'MIDDLE'),('TOPPADDING',(0,0),(-1,-1),2),
-            ('BOTTOMPADDING',(0,0),(-1,-1),2)]))
-        story.append(wt)
-    story.append(Spacer(1,SECTION_GAP))
-
-    # S3 indirect
-    story += SECTION('indirect_manpower')
-    ind = d.get('indirect_manpower',[])
-    irows = [['No.','Name','Role / Position','Working Hours']]
-    for i,p in enumerate(ind,1):
-        irows.append([
-            str(i), TC(p.get('name','')), TC(p.get('role','')),
-            TC(p.get('hours',''), centered=True),
-        ])
-    itbl2 = Table(irows, colWidths=[9*mm,70*mm,55*mm,CW-134*mm])
-    itbl2.setStyle(base_ts([
-        ('ALIGN',(0,0),(0,-1),'CENTER'),('ALIGN',(3,0),(3,-1),'CENTER'),
-        ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
-    ]))
-    story += [itbl2, Spacer(1,SECTION_GAP)]
+    story += _build_report_information_flowables(
+        d,
+        cfg,
+        st,
+        GREY_LINE,
+        GREY_BG,
+        WHITE,
+        SECTION_GAP,
+        SECTION,
+    )
+    story += _build_weather_flowables(
+        d,
+        st,
+        GREY_LINE,
+        WHITE,
+        SECTION_GAP,
+        SECTION,
+        TC,
+    )
+    story += _build_indirect_manpower_flowables(
+        d,
+        SECTION_GAP,
+        SECTION,
+        TC,
+    )
 
     show_overall_progress = _coerce_bool(d.get('show_overall_progress'), False)
 
@@ -1271,111 +1540,38 @@ def generate_pdf(d, output_path, cfg):
         return _pdf_activity_cell(lines, label, st)
 
     areas = d.get('areas', [])
-
-    # Section: Daily Activities by Area
-    story += SECTION('area_activities', [CondPageBreak(32*mm)])
-    for area_index, area in enumerate(areas):
-        aid = area.get('id', '')
-        blocks = list(AH(aid))
-        if area.get('activities_swapped'):
-            cols = [act_cell(area.get('activities_tomorrow', []), 'Activity Tomorrow'),
-                    act_cell(area.get('activities_today', []), 'Activity Today')]
-        else:
-            cols = [act_cell(area.get('activities_today', []), 'Activity Today'),
-                    act_cell(area.get('activities_tomorrow', []), 'Activity Tomorrow')]
-        at = Table([cols], colWidths=[CW * 0.55, CW * 0.45])
-        at.setStyle(TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'), ('BOX', (0, 0), (-1, -1), 0.5, GREY_LINE),
-            ('INNERGRID', (0, 0), (-1, -1), 0.4, GREY_LINE), ('BACKGROUND', (0, 0), (-1, -1), GREY_BG),
-            ('TOPPADDING', (0, 0), (-1, -1), 3), ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-            ('LEFTPADDING', (0, 0), (-1, -1), 4), ('RIGHTPADDING', (0, 0), (-1, -1), 4)]))
-        blocks += [at, Spacer(1, 1 * mm)]
-        if blocks and isinstance(blocks[-1], Spacer):
-            blocks.pop()
-        story.append(KeepTogether(blocks[:4]))
-        for b in blocks[4:]: story.append(b)
-        if area_index < len(areas) - 1:
-            story.append(Spacer(1, 2.5 * mm))
-    story.append(Spacer(1, SECTION_GAP))
-
-    # Section: Direct Manpower by Area
-    story += SECTION('area_manpower', [CondPageBreak(32*mm)])
-    for area_index, area in enumerate(areas):
-        aid = area.get('id', '')
-        blocks = list(AH(aid))
-        mp = area.get('manpower', [])
-        if mp:
-            mrows = [['No.', 'Name', 'Role / Position', 'Working Hours']]
-            for j, p in enumerate(mp, 1):
-                mrows.append([
-                    str(j), TC(p.get('name', '')), TC(p.get('role', '')),
-                    TC(p.get('hours', ''), centered=True),
-                ])
-            mt = Table(mrows, colWidths=[9*mm, 70*mm, 55*mm, CW - 134*mm])
-            mt.setStyle(base_ts([
-                ('ALIGN', (0, 0), (0, -1), 'CENTER'),
-                ('ALIGN', (3, 0), (3, -1), 'CENTER'),
-                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ]))
-            blocks += [mt, Spacer(1, 1 * mm)]
-        area_ind = area.get('indirect_manpower', [])
-        if area_ind:
-            blocks.append(Paragraph(f'Indirect Manpower — {_esc(aid)}', st['sub_s']))
-            irows_a = [['No.', 'Name', 'Role / Position', 'Working Hours']]
-            for j, p in enumerate(area_ind, 1):
-                irows_a.append([
-                    str(j), TC(p.get('name', '')), TC(p.get('role', '')),
-                    TC(p.get('hours', ''), centered=True),
-                ])
-            it_a = Table(irows_a, colWidths=[9*mm, 70*mm, 55*mm, CW - 134*mm])
-            it_a.setStyle(base_ts([('ALIGN', (0, 0), (0, -1), 'CENTER'),
-                                    ('ALIGN', (3, 0), (3, -1), 'CENTER'),
-                                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
-            blocks += [it_a, Spacer(1, 1 * mm)]
-        if blocks and isinstance(blocks[-1], Spacer):
-            blocks.pop()
-        story.append(KeepTogether(blocks[:4]))
-        for b in blocks[4:]: story.append(b)
-        if area_index < len(areas) - 1:
-            story.append(Spacer(1, 2.5 * mm))
-    story.append(Spacer(1, SECTION_GAP))
-    # The compact constraints/remarks pair needs about 25 mm. Keeping this
-    # threshold precise prevents a taller page header from wasting the rest
-    # of page one and pushing the final photo row onto a third page.
-    # Constraints and issues
-    story += SECTION('constraints', [CondPageBreak(25*mm)])
-    if d.get('areas'):
-        gcr = [['Area','Constraint / Issue']]
-        for a in d.get('areas',[]):
-            c = a.get('constraints','').strip()
-            gcr.append([TC(a.get('id','')),TC(c or '-')])
-        gct = Table(gcr,colWidths=[20*mm,CW-20*mm])
-        gct.setStyle(base_ts([('VALIGN',(0,0),(-1,-1),'TOP')]))
-        story.append(gct)
-    else:
-        story.append(Paragraph('No constraints reported.',st['ital_s']))
-    story.append(Spacer(1,SECTION_GAP))
-
-    # Remarks
-    story += SECTION('remarks')
-    area_remarks = []
-    for a in d.get('areas', []):
-        rm = a.get('remarks', '').strip()
-        area_remarks.append([TC(a.get('id', '')), TC(rm or '-')])
-
-    gr = d.get('global_remarks','').strip()
-    if area_remarks:
-        grt = Table(
-            [['Area', 'Remarks']] + area_remarks,
-            colWidths=[20*mm, CW - 20*mm],
-        )
-        grt.setStyle(base_ts([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
-        story.append(grt)
-        if gr:
-            story += [Spacer(1, 1.5*mm), Paragraph(_esc(gr), st['body_s'])]
-    else:
-        story.append(Paragraph(_esc(gr) if gr else '—', st['body_s']))
-    story.append(Spacer(1,SECTION_GAP))
+    story += _build_area_activity_flowables(
+        areas,
+        st,
+        GREY_LINE,
+        GREY_BG,
+        SECTION_GAP,
+        SECTION,
+        AH,
+        act_cell,
+    )
+    story += _build_area_manpower_flowables(
+        areas,
+        st,
+        SECTION_GAP,
+        SECTION,
+        AH,
+        TC,
+    )
+    story += _build_constraints_flowables(
+        d,
+        st,
+        SECTION_GAP,
+        SECTION,
+        TC,
+    )
+    story += _build_remarks_flowables(
+        d,
+        st,
+        SECTION_GAP,
+        SECTION,
+        TC,
+    )
     story += _build_sign_off_flowables(
         d,
         st,
