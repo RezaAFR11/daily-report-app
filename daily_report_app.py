@@ -2629,6 +2629,60 @@ def _record_drive_upload_failure(
     )
 
 
+def _drive_upload_request_fields(body):
+    """Validate the route payload and return its normalized identity fields."""
+    if not isinstance(body, dict):
+        raise TypeError('Request body must be a JSON object.')
+
+    filename = str(body.get('filename') or '').strip()
+    if not filename or filename != os.path.basename(filename):
+        raise ValueError('Invalid report filename.')
+    return (
+        filename,
+        str(body.get('archive_id') or '').strip(),
+        str(body.get('report_id') or '').strip(),
+        str(body.get('category_override') or '').strip(),
+    )
+
+
+def _resolve_drive_upload_target(username, filename, archive_id, report_id):
+    """Return the matching index row and owned PDF path, if both still exist."""
+    entry = _report_entry_for_drive(
+        username,
+        filename,
+        archive_id,
+        report_id,
+    )
+    report_path = get_owned_report_path(
+        username,
+        filename,
+        report_id=report_id,
+        archive_id=archive_id,
+    )
+    if entry is None or not report_path or not os.path.isfile(report_path):
+        return None, None
+    return entry, report_path
+
+
+def _drive_success_updates(result, category_override, attempts):
+    """Map uploader output to the stable fields stored in My Reports."""
+    return {
+        'drive_status': result['status'],
+        'drive_file_id': result['file_id'],
+        'drive_web_url': result['web_view_link'],
+        'drive_folder_path': ' / '.join(result['folder_path']),
+        'drive_category': result['category'],
+        'drive_category_override': category_override,
+        'drive_report_key': result['report_key'],
+        'drive_md5_checksum': result['md5_checksum'],
+        'drive_uploaded_at': datetime.now().astimezone().isoformat(
+            timespec='seconds',
+        ),
+        'drive_attempts': attempts,
+        'drive_error': '',
+    }
+
+
 def _perform_report_drive_upload(
     username,
     entry,
@@ -2651,25 +2705,12 @@ def _perform_report_drive_upload(
         report_date=report_date,
         category_override=category_override,
     )
-    updates = {
-        'drive_status': result['status'],
-        'drive_file_id': result['file_id'],
-        'drive_web_url': result['web_view_link'],
-        'drive_folder_path': ' / '.join(result['folder_path']),
-        'drive_category': result['category'],
-        'drive_category_override': category_override,
-        'drive_report_key': result['report_key'],
-        'drive_md5_checksum': result['md5_checksum'],
-        'drive_uploaded_at': datetime.now().astimezone().isoformat(timespec='seconds'),
-        'drive_attempts': attempts,
-        'drive_error': '',
-    }
     update_report_index_entry(
         username,
         filename=filename,
         archive_id=archive_id,
         report_id=report_id,
-        updates=updates,
+        updates=_drive_success_updates(result, category_override, attempts),
     )
     log_activity(
         username,
@@ -2679,29 +2720,156 @@ def _perform_report_drive_upload(
     return result
 
 
+_RECORDED_DRIVE_ERRORS = (
+    (
+        ProjectCategoryError,
+        'needs_review',
+        'project_needs_review',
+        422,
+        None,
+    ),
+    (
+        GoogleDriveReauthorizationRequired,
+        'reauth_required',
+        'drive_reauth_required',
+        503,
+        'Google Drive reauthorization required for %s',
+    ),
+    (
+        GoogleDrivePermissionError,
+        'permission_denied',
+        'drive_permission_denied',
+        503,
+        'Google Drive permission denied for %s',
+    ),
+    (
+        GoogleDriveUploadError,
+        'failed',
+        'drive_upload_failed',
+        502,
+        'Google Drive upload failed for %s: %s',
+    ),
+)
+
+
+def _recorded_drive_error_response(
+    username,
+    filename,
+    archive_id,
+    report_id,
+    attempts,
+    error,
+    error_spec,
+):
+    error_type, status, code, http_status, log_message = error_spec
+    _record_drive_upload_failure(
+        username,
+        filename,
+        archive_id,
+        report_id,
+        status,
+        attempts,
+        error,
+    )
+    if log_message and error_type is GoogleDriveUploadError:
+        app.logger.warning(
+            log_message,
+            username,
+            error,
+            exc_info=True,
+        )
+    elif log_message:
+        app.logger.warning(log_message, username, exc_info=True)
+    return jsonify({'error': str(error), 'code': code}), http_status
+
+
+def _unexpected_drive_error_response(
+    username,
+    filename,
+    archive_id,
+    report_id,
+    attempts,
+):
+    app.logger.exception(
+        'Unexpected Google Drive upload failure for %s',
+        username,
+    )
+    message = 'Unexpected Google Drive upload failure.'
+    _record_drive_upload_failure(
+        username,
+        filename,
+        archive_id,
+        report_id,
+        'failed',
+        attempts,
+        message,
+    )
+    return jsonify({
+        'error': 'Google Drive upload failed unexpectedly. Retry later.',
+        'code': 'drive_upload_failed',
+    }), 500
+
+
+def _drive_upload_error_response(
+    username,
+    filename,
+    archive_id,
+    report_id,
+    attempts,
+    error,
+):
+    """Translate Drive exceptions to stable API responses and persisted states."""
+    if isinstance(error, GoogleDriveNotConfigured):
+        return jsonify({
+            'error': str(error),
+            'code': 'drive_not_configured',
+        }), 503
+
+    for error_spec in _RECORDED_DRIVE_ERRORS:
+        if isinstance(error, error_spec[0]):
+            return _recorded_drive_error_response(
+                username,
+                filename,
+                archive_id,
+                report_id,
+                attempts,
+                error,
+                error_spec,
+            )
+
+    if isinstance(error, GoogleDriveError):
+        return jsonify({
+            'error': str(error),
+            'code': 'invalid_drive_report',
+        }), 422
+    return _unexpected_drive_error_response(
+        username,
+        filename,
+        archive_id,
+        report_id,
+        attempts,
+    )
+
+
 @app.route('/reports/drive-upload', methods=['POST'])
 @login_required
 def upload_report_to_drive():
     """Validate and upload one owned Daily Report PDF to Google Drive."""
     username = session['username']
-    body = request.get_json(silent=True)
-    if not isinstance(body, dict):
-        return jsonify({'error': 'Request body must be a JSON object.'}), 400
-    filename = str(body.get('filename') or '').strip()
-    archive_id = str(body.get('archive_id') or '').strip()
-    report_id = str(body.get('report_id') or '').strip()
-    category_override = str(body.get('category_override') or '').strip()
-    if not filename or filename != os.path.basename(filename):
-        return jsonify({'error': 'Invalid report filename.'}), 400
+    try:
+        filename, archive_id, report_id, category_override = (
+            _drive_upload_request_fields(request.get_json(silent=True))
+        )
+    except (TypeError, ValueError) as exc:
+        return jsonify({'error': str(exc)}), 400
 
-    entry = _report_entry_for_drive(username, filename, archive_id, report_id)
-    fpath = get_owned_report_path(
+    entry, report_path = _resolve_drive_upload_target(
         username,
         filename,
-        report_id=report_id,
-        archive_id=archive_id,
+        archive_id,
+        report_id,
     )
-    if entry is None or not fpath or not os.path.isfile(fpath):
+    if entry is None:
         return jsonify({'error': 'Report not found.'}), 404
 
     attempts = _next_drive_upload_attempt(entry)
@@ -2709,7 +2877,7 @@ def upload_report_to_drive():
         result = _perform_report_drive_upload(
             username,
             entry,
-            fpath,
+            report_path,
             filename,
             archive_id,
             report_id,
@@ -2717,85 +2885,15 @@ def upload_report_to_drive():
             attempts,
         )
         return jsonify({'ok': True, **result})
-    except GoogleDriveNotConfigured as exc:
-        return jsonify({'error': str(exc), 'code': 'drive_not_configured'}), 503
-    except ProjectCategoryError as exc:
-        _record_drive_upload_failure(
+    except Exception as exc:
+        return _drive_upload_error_response(
             username,
             filename,
             archive_id,
             report_id,
-            'needs_review',
             attempts,
             exc,
         )
-        return jsonify({'error': str(exc), 'code': 'project_needs_review'}), 422
-    except GoogleDriveReauthorizationRequired as exc:
-        _record_drive_upload_failure(
-            username,
-            filename,
-            archive_id,
-            report_id,
-            'reauth_required',
-            attempts,
-            exc,
-        )
-        app.logger.warning(
-            'Google Drive reauthorization required for %s',
-            username,
-            exc_info=True,
-        )
-        return jsonify({'error': str(exc), 'code': 'drive_reauth_required'}), 503
-    except GoogleDrivePermissionError as exc:
-        _record_drive_upload_failure(
-            username,
-            filename,
-            archive_id,
-            report_id,
-            'permission_denied',
-            attempts,
-            exc,
-        )
-        app.logger.warning(
-            'Google Drive permission denied for %s',
-            username,
-            exc_info=True,
-        )
-        return jsonify({'error': str(exc), 'code': 'drive_permission_denied'}), 503
-    except GoogleDriveUploadError as exc:
-        _record_drive_upload_failure(
-            username,
-            filename,
-            archive_id,
-            report_id,
-            'failed',
-            attempts,
-            exc,
-        )
-        app.logger.warning(
-            'Google Drive upload failed for %s: %s',
-            username,
-            exc,
-            exc_info=True,
-        )
-        return jsonify({'error': str(exc), 'code': 'drive_upload_failed'}), 502
-    except GoogleDriveError as exc:
-        return jsonify({'error': str(exc), 'code': 'invalid_drive_report'}), 422
-    except Exception:
-        app.logger.exception('Unexpected Google Drive upload failure for %s', username)
-        _record_drive_upload_failure(
-            username,
-            filename,
-            archive_id,
-            report_id,
-            'failed',
-            attempts,
-            'Unexpected Google Drive upload failure.',
-        )
-        return jsonify({
-            'error': 'Google Drive upload failed unexpectedly. Retry later.',
-            'code': 'drive_upload_failed',
-        }), 500
 
 @app.route('/reports/download/<path:filename>')
 @login_required

@@ -8,7 +8,12 @@ from unittest.mock import MagicMock, patch
 from daily_report_app import app
 from google_drive_integration import (
     GoogleDriveConfig,
+    GoogleDriveError,
+    GoogleDriveNotConfigured,
+    GoogleDrivePermissionError,
+    GoogleDriveReauthorizationRequired,
     GoogleDriveUploader,
+    GoogleDriveUploadError,
     ProjectCategoryError,
     build_drive_folder_path,
     resolve_project_category,
@@ -290,6 +295,85 @@ class GoogleDriveRouteTests(unittest.TestCase):
             json=["not", "an", "object"],
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_upload_route_preserves_drive_error_contracts(self):
+        cases = [
+            (
+                GoogleDriveNotConfigured('Drive not configured'),
+                503,
+                'drive_not_configured',
+                None,
+            ),
+            (
+                ProjectCategoryError('Project needs review'),
+                422,
+                'project_needs_review',
+                'needs_review',
+            ),
+            (
+                GoogleDriveReauthorizationRequired('Reconnect Drive'),
+                503,
+                'drive_reauth_required',
+                'reauth_required',
+            ),
+            (
+                GoogleDrivePermissionError('Permission denied'),
+                503,
+                'drive_permission_denied',
+                'permission_denied',
+            ),
+            (
+                GoogleDriveUploadError('Temporary upload failure'),
+                502,
+                'drive_upload_failed',
+                'failed',
+            ),
+            (
+                GoogleDriveError('Invalid report metadata'),
+                422,
+                'invalid_drive_report',
+                None,
+            ),
+            (
+                RuntimeError('Unexpected failure'),
+                500,
+                'drive_upload_failed',
+                'failed',
+            ),
+        ]
+
+        for error, status_code, response_code, failure_status in cases:
+            with self.subTest(error=type(error).__name__):
+                with (
+                    patch(
+                        'daily_report_app._report_entry_for_drive',
+                        return_value={'filename': 'Owned.pdf'},
+                    ),
+                    patch(
+                        'daily_report_app.get_owned_report_path',
+                        return_value=__file__,
+                    ),
+                    patch(
+                        'daily_report_app._perform_report_drive_upload',
+                        side_effect=error,
+                    ),
+                    patch(
+                        'daily_report_app._record_drive_upload_failure',
+                    ) as record_failure,
+                    patch('daily_report_app.app.logger.warning'),
+                    patch('daily_report_app.app.logger.exception'),
+                ):
+                    response = self.client.post(
+                        '/reports/drive-upload',
+                        json={'filename': 'Owned.pdf'},
+                    )
+
+                self.assertEqual(response.status_code, status_code)
+                self.assertEqual(response.get_json()['code'], response_code)
+                if failure_status is None:
+                    record_failure.assert_not_called()
+                else:
+                    self.assertEqual(record_failure.call_args.args[4], failure_status)
 
     def test_archive_id_selects_matching_pdf_when_display_names_are_equal(self):
         with tempfile.TemporaryDirectory() as temporary:
