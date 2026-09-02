@@ -2850,6 +2850,92 @@ def _photo_issue(area_name, photo_index, filename, reason):
     }
 
 
+def _read_photo_for_draft_export(photo, temp_dir):
+    """Read one inline or temporary photo referenced by a draft."""
+    inline = photo.get('img_data')
+    filename = str(photo.get('photo_filename') or '')
+    if inline:
+        try:
+            return _decode_photo_data_url(inline), ''
+        except ValueError as exc:
+            return None, str(exc)
+    if not filename:
+        return None, ''
+    if not _SAFE_PHOTO.fullmatch(filename):
+        return None, 'Unsafe or unsupported photo filename'
+
+    source_path = os.path.join(temp_dir, filename)
+    if not os.path.isfile(source_path):
+        return None, 'Referenced photo file was not found'
+    try:
+        with open(source_path, 'rb') as source:
+            raw = source.read(PHOTO_MAX_INPUT_BYTES + 1)
+    except OSError:
+        return None, 'Photo file could not be read'
+    if len(raw) > PHOTO_MAX_INPUT_BYTES:
+        return None, 'Image too large (max 20 MB)'
+    return raw, ''
+
+
+def _store_photo_in_draft_bundle(raw, bundled_photos, digest_names):
+    """Compress and deduplicate one photo for a portable draft bundle."""
+    try:
+        compressed = compress_photo_bytes(raw)
+    except ValueError as exc:
+        return None, str(exc)
+
+    digest = hashlib.sha256(compressed).hexdigest()
+    bundle_name = digest_names.get(digest)
+    if bundle_name is None:
+        bundle_name = f'photo-{len(digest_names) + 1:03d}-{digest[:12]}.jpg'
+        digest_names[digest] = bundle_name
+        bundled_photos[bundle_name] = compressed
+    return bundle_name, ''
+
+
+def _prepare_photo_for_draft_bundle(
+    photo,
+    temp_dir,
+    bundled_photos,
+    digest_names,
+):
+    """Rewrite one valid photo reference to its portable bundle filename."""
+    raw, reason = _read_photo_for_draft_export(photo, temp_dir)
+    if raw is None:
+        return False, reason
+
+    bundle_name, reason = _store_photo_in_draft_bundle(
+        raw,
+        bundled_photos,
+        digest_names,
+    )
+    if bundle_name is None:
+        return False, reason
+
+    photo['photo_filename'] = bundle_name
+    photo['img_data'] = ''
+    photo.pop('photo_missing', None)
+    return True, ''
+
+
+def _write_draft_bundle(portable, manifest, bundled_photos):
+    """Serialize draft JSON, manifest, and prepared photos into one ZIP stream."""
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            'report.json',
+            json.dumps(portable, ensure_ascii=False, indent=2).encode('utf-8'),
+        )
+        archive.writestr(
+            'manifest.json',
+            json.dumps(manifest, ensure_ascii=False, indent=2).encode('utf-8'),
+        )
+        for bundle_name, contents in bundled_photos.items():
+            archive.writestr(f'photos/{bundle_name}', contents)
+    output.seek(0)
+    return output
+
+
 def _build_draft_bundle(report, username):
     """Create a portable ZIP payload containing report.json and its photos."""
     if not isinstance(report, dict):
@@ -2864,47 +2950,14 @@ def _build_draft_bundle(report, username):
     for area_name, photo_index, photo in _iter_report_photos(portable):
         filename = str(photo.get('photo_filename') or '')
         inline = photo.get('img_data')
-        raw = None
-        reason = ''
-
-        if inline:
-            try:
-                raw = _decode_photo_data_url(inline)
-            except ValueError as exc:
-                reason = str(exc)
-        elif filename and _SAFE_PHOTO.fullmatch(filename):
-            source_path = os.path.join(temp_dir, filename)
-            if os.path.isfile(source_path):
-                try:
-                    with open(source_path, 'rb') as source:
-                        raw = source.read(PHOTO_MAX_INPUT_BYTES + 1)
-                    if len(raw) > PHOTO_MAX_INPUT_BYTES:
-                        raw = None
-                        reason = 'Image too large (max 20 MB)'
-                except OSError:
-                    reason = 'Photo file could not be read'
-            else:
-                reason = 'Referenced photo file was not found'
-        elif filename:
-            reason = 'Unsafe or unsupported photo filename'
-
-        if raw is not None:
-            try:
-                compressed = compress_photo_bytes(raw)
-            except ValueError as exc:
-                compressed = None
-                reason = str(exc)
-            if compressed is not None:
-                digest = hashlib.sha256(compressed).hexdigest()
-                bundle_name = digest_names.get(digest)
-                if not bundle_name:
-                    bundle_name = f'photo-{len(digest_names) + 1:03d}-{digest[:12]}.jpg'
-                    digest_names[digest] = bundle_name
-                    bundled_photos[bundle_name] = compressed
-                photo['photo_filename'] = bundle_name
-                photo['img_data'] = ''
-                photo.pop('photo_missing', None)
-                continue
+        prepared, reason = _prepare_photo_for_draft_bundle(
+            photo,
+            temp_dir,
+            bundled_photos,
+            digest_names,
+        )
+        if prepared:
+            continue
 
         if filename or inline:
             missing.append(_photo_issue(
@@ -2923,20 +2976,7 @@ def _build_draft_bundle(report, username):
         'photo_count': len(bundled_photos),
         'missing_photos': missing,
     }
-    output = io.BytesIO()
-    with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
-            'report.json',
-            json.dumps(portable, ensure_ascii=False, indent=2).encode('utf-8'),
-        )
-        archive.writestr(
-            'manifest.json',
-            json.dumps(manifest, ensure_ascii=False, indent=2).encode('utf-8'),
-        )
-        for bundle_name, contents in bundled_photos.items():
-            archive.writestr(f'photos/{bundle_name}', contents)
-    output.seek(0)
-    return output, manifest
+    return _write_draft_bundle(portable, manifest, bundled_photos), manifest
 
 
 def _safe_zip_members(archive):
@@ -2969,6 +3009,45 @@ def _read_zip_member(archive, member, max_bytes):
     return raw
 
 
+def _decode_draft_report(raw, invalid_message, object_message):
+    """Decode one UTF-8 JSON report while preserving caller-specific errors."""
+    try:
+        report = json.loads(raw.decode('utf-8-sig'))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(invalid_message) from exc
+    if not isinstance(report, dict):
+        raise ValueError(object_message)
+    return report
+
+
+def _open_uploaded_draft_zip(raw):
+    """Open and validate a ZIP draft, closing it on every failed parse path."""
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(raw), 'r')
+    except zipfile.BadZipFile as exc:
+        raise ValueError('Invalid or damaged draft ZIP file') from exc
+
+    try:
+        members = _safe_zip_members(archive)
+        report_member = members.get('report.json')
+        if report_member is None:
+            raise ValueError('Draft ZIP does not contain report.json')
+        report_raw = _read_zip_member(
+            archive,
+            report_member,
+            DRAFT_JSON_MAX_BYTES,
+        )
+        report = _decode_draft_report(
+            report_raw,
+            'Draft ZIP contains an invalid report.json',
+            'Draft report.json must contain one report object',
+        )
+    except Exception:
+        archive.close()
+        raise
+    return report, archive, members
+
+
 def _parse_uploaded_draft(upload):
     """Return (report, zip archive or None, safe ZIP members)."""
     original_name = str(upload.filename or '')
@@ -2980,35 +3059,16 @@ def _parse_uploaded_draft(upload):
     if extension == '.json':
         if len(raw) > DRAFT_JSON_MAX_BYTES:
             raise ValueError('JSON draft is too large (max 5 MB)')
-        try:
-            report = json.loads(raw.decode('utf-8-sig'))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError('Invalid JSON draft file') from exc
-        if not isinstance(report, dict):
-            raise ValueError('Draft JSON must contain one report object')
+        report = _decode_draft_report(
+            raw,
+            'Invalid JSON draft file',
+            'Draft JSON must contain one report object',
+        )
         return report, None, {}
 
     if extension != '.zip':
         raise ValueError('Choose a GPA draft ZIP or legacy JSON file')
-    try:
-        archive = zipfile.ZipFile(io.BytesIO(raw), 'r')
-    except zipfile.BadZipFile as exc:
-        raise ValueError('Invalid or damaged draft ZIP file') from exc
-    members = _safe_zip_members(archive)
-    report_member = members.get('report.json')
-    if report_member is None:
-        archive.close()
-        raise ValueError('Draft ZIP does not contain report.json')
-    try:
-        report_raw = _read_zip_member(archive, report_member, DRAFT_JSON_MAX_BYTES)
-        report = json.loads(report_raw.decode('utf-8-sig'))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        archive.close()
-        raise ValueError('Draft ZIP contains an invalid report.json') from exc
-    if not isinstance(report, dict):
-        archive.close()
-        raise ValueError('Draft report.json must contain one report object')
-    return report, archive, members
+    return _open_uploaded_draft_zip(raw)
 
 
 def _draft_photo_from_zip(archive, members, filename, source_cache):
@@ -3073,6 +3133,7 @@ def _prepare_imported_photo(raw, source_key, prepared):
 def _write_imported_photos(prepared, temp_dir):
     """Atomically persist prepared photos and roll back partial output on error."""
     written = []
+    temporary = None
     try:
         for row in prepared:
             target = os.path.join(temp_dir, row['filename'])
@@ -3080,14 +3141,84 @@ def _write_imported_photos(prepared, temp_dir):
             with open(temporary, 'wb') as output:
                 output.write(row['contents'])
             os.replace(temporary, target)
+            temporary = None
             written.append(target)
     except OSError as exc:
+        if temporary and os.path.exists(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
         for path in written:
             try:
                 os.remove(path)
             except OSError:
                 pass
         raise ValueError('Imported photos could not be saved') from exc
+
+
+def _resolve_imported_photo_source(
+    archive,
+    members,
+    temp_dir,
+    filename,
+    inline,
+    source_cache,
+):
+    """Resolve bundle, inline, or legacy-local photo bytes in priority order."""
+    raw = None
+    source_key = None
+    reason = ''
+
+    if archive is not None and filename:
+        raw, source_key, reason = _draft_photo_from_zip(
+            archive,
+            members,
+            filename,
+            source_cache,
+        )
+
+    if raw is None and inline:
+        try:
+            raw, source_key = _draft_photo_from_inline(inline)
+        except ValueError as exc:
+            reason = str(exc)
+
+    # Legacy JSON may carry only a server filename. Rehome it when the same
+    # user's temporary photo still exists on this server.
+    if (
+        raw is None
+        and archive is None
+        and filename
+        and _SAFE_PHOTO.fullmatch(filename)
+    ):
+        raw, source_key, local_reason = _draft_photo_from_local(
+            temp_dir,
+            filename,
+        )
+        if local_reason and (
+            local_reason != 'Referenced legacy photo file was not found'
+            or not reason
+        ):
+            reason = local_reason
+
+    return raw, source_key, reason
+
+
+def _restore_imported_photo(photo, raw, source_key, prepared):
+    """Rewrite one imported photo reference after compression/deduplication."""
+    imported_filename, reason = _prepare_imported_photo(
+        raw,
+        source_key,
+        prepared,
+    )
+    if imported_filename is None:
+        return False, reason
+
+    photo['photo_filename'] = imported_filename
+    photo['img_data'] = ''
+    photo.pop('photo_missing', None)
+    return True, ''
 
 
 def _import_draft_photos(report, username, archive=None, members=None):
@@ -3103,45 +3234,25 @@ def _import_draft_photos(report, username, archive=None, members=None):
     for area_name, photo_index, photo in _iter_report_photos(imported):
         filename = str(photo.get('photo_filename') or '')
         inline = photo.get('img_data')
-        raw = None
-        source_key = None
-        reason = ''
-
-        if archive is not None and filename:
-            raw, source_key, reason = _draft_photo_from_zip(
-                archive,
-                members,
-                filename,
-                source_cache,
-            )
-
-        if raw is None and inline:
-            try:
-                raw, source_key = _draft_photo_from_inline(inline)
-            except ValueError as exc:
-                reason = str(exc)
-
-        # Legacy JSON only carried a server filename. It can still be recovered
-        # when imported by the same user on the same server.
-        if raw is None and archive is None and filename and _SAFE_PHOTO.fullmatch(filename):
-            raw, source_key, local_reason = _draft_photo_from_local(temp_dir, filename)
-            if local_reason and (
-                local_reason != 'Referenced legacy photo file was not found' or not reason
-            ):
-                reason = local_reason
+        raw, source_key, reason = _resolve_imported_photo_source(
+            archive,
+            members,
+            temp_dir,
+            filename,
+            inline,
+            source_cache,
+        )
 
         if raw is not None:
-            imported_filename, import_reason = _prepare_imported_photo(
+            restored, import_reason = _restore_imported_photo(
+                photo,
                 raw,
                 source_key,
                 prepared,
             )
             if import_reason:
                 reason = import_reason
-            if imported_filename:
-                photo['photo_filename'] = imported_filename
-                photo['img_data'] = ''
-                photo.pop('photo_missing', None)
+            if restored:
                 restored_count += 1
                 continue
 
