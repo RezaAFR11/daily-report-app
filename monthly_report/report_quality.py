@@ -501,6 +501,134 @@ def _identity_key(value: Any) -> str:
     return " ".join(str(value or "").split()).casefold()
 
 
+def _source_identity_critical_issues(
+    report: Mapping[str, Any],
+    validation: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    report_project_no = str(
+        report.get("project_no") or report.get("vendor_project_no") or ""
+    ).strip()
+    report_project_title = str(
+        report.get("project_title") or report.get("project_name") or ""
+    ).strip()
+    selected_project_no = str(
+        validation.get("selected_project_no") or report_project_no
+    ).strip()
+    selected_project_title = str(
+        validation.get("selected_project_title") or report_project_title
+    ).strip()
+
+    if not selected_project_no or not selected_project_title:
+        return [{
+            "code": "source_identity_missing",
+            "message": "Report Project No. and Project Title must be known before Final issue.",
+        }]
+    if (
+        report_project_no
+        and report_project_title
+        and (
+            _identity_key(selected_project_no) != _identity_key(report_project_no)
+            or _identity_key(selected_project_title) != _identity_key(report_project_title)
+        )
+    ):
+        return [{
+            "code": "source_identity_mismatch",
+            "message": (
+                "The report project identity differs from the identity stored in "
+                "Source Data Validation. Re-apply the source decision before Final issue."
+            ),
+        }]
+    return []
+
+
+def _unresolved_project_group_issues(
+    validation: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    issues: list[dict[str, str]] = []
+    project_groups = validation.get("project_groups")
+    for index, group in enumerate(project_groups if isinstance(project_groups, list) else []):
+        if not isinstance(group, Mapping) or not _bool(group.get("requires_confirmation"), False):
+            continue
+        decision = str(group.get("decision") or "").strip().casefold()
+        if decision in _RESOLVED_PROJECT_DECISIONS:
+            continue
+        label = (
+            str(group.get("project_title") or group.get("project_no") or "").strip()
+            or f"project group {index + 1}"
+        )
+        issues.append({
+            "code": "source_identity_unresolved",
+            "message": f"Source project identity decision is unresolved for {label}.",
+        })
+    return issues
+
+
+def _unresolved_duplicate_issues(
+    validation: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    issues: list[dict[str, str]] = []
+    duplicate_groups = validation.get("duplicate_groups")
+    for group in duplicate_groups if isinstance(duplicate_groups, list) else []:
+        if not isinstance(group, Mapping):
+            continue
+        candidates = [
+            str(candidate.get("record_id") or "").strip()
+            for candidate in _as_list(group.get("candidates"))
+            if isinstance(candidate, Mapping)
+            and str(candidate.get("record_id") or "").strip()
+        ]
+        if len(candidates) < 2 and not _bool(group.get("requires_confirmation"), False):
+            continue
+        selected = str(group.get("selected_record_id") or "").strip()
+        if selected and selected in candidates:
+            continue
+        report_date = str(group.get("report_date") or "unknown date").strip()
+        issues.append({
+            "code": "source_duplicate_unresolved",
+            "message": (
+                "A valid Daily Report source has not been selected for "
+                f"duplicate date {report_date}."
+            ),
+        })
+    return issues
+
+
+def _critical_source_issue_rows(
+    validation: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    issues: list[dict[str, str]] = []
+    source_issues = validation.get("issues")
+    for source_issue in source_issues if isinstance(source_issues, list) else []:
+        if not isinstance(source_issue, Mapping):
+            continue
+        severity = str(source_issue.get("severity") or "warning").strip().casefold()
+        if severity not in _CRITICAL_SOURCE_SEVERITIES:
+            continue
+        code = str(source_issue.get("code") or "source_validation_error").strip()
+        message = str(source_issue.get("message") or code).strip()
+        filename = str(source_issue.get("filename") or "").strip()
+        if filename:
+            message = f"{filename}: {message}"
+        issues.append({"code": code or "source_validation_error", "message": message})
+    return issues
+
+
+def _unique_issue_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        code = str(row.get("code") or "").strip()
+        message = str(row.get("message") or code).strip()
+        if not message:
+            continue
+        key = (code, message)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"code": code, "message": message})
+    return result
+
+
 def _source_validation_critical_issues(
     report: Mapping[str, Any],
 ) -> list[dict[str, str]]:
@@ -522,91 +650,75 @@ def _source_validation_critical_issues(
             ),
         }]
 
-    issues: list[dict[str, str]] = []
-    report_project_no = str(report.get("project_no") or report.get("vendor_project_no") or "").strip()
-    report_project_title = str(report.get("project_title") or report.get("project_name") or "").strip()
-    selected_project_no = str(validation.get("selected_project_no") or report_project_no).strip()
-    selected_project_title = str(validation.get("selected_project_title") or report_project_title).strip()
+    issues = _source_identity_critical_issues(report, validation)
+    issues.extend(_unresolved_project_group_issues(validation))
+    issues.extend(_unresolved_duplicate_issues(validation))
+    issues.extend(_critical_source_issue_rows(validation))
+    return _unique_issue_rows(issues)
 
-    if not selected_project_no or not selected_project_title:
-        issues.append({
-            "code": "source_identity_missing",
-            "message": "Report Project No. and Project Title must be known before Final issue.",
-        })
-    elif (
-        report_project_no
-        and report_project_title
-        and (
-            _identity_key(selected_project_no) != _identity_key(report_project_no)
-            or _identity_key(selected_project_title) != _identity_key(report_project_title)
-        )
-    ):
-        issues.append({
-            "code": "source_identity_mismatch",
-            "message": (
-                "The report project identity differs from the identity stored in "
-                "Source Data Validation. Re-apply the source decision before Final issue."
-            ),
-        })
 
-    project_groups = validation.get("project_groups")
-    for index, group in enumerate(project_groups if isinstance(project_groups, list) else []):
-        if not isinstance(group, Mapping) or not _bool(group.get("requires_confirmation"), False):
-            continue
-        decision = str(group.get("decision") or "").strip().casefold()
-        if decision in _RESOLVED_PROJECT_DECISIONS:
-            continue
-        label = (
-            str(group.get("project_title") or group.get("project_no") or "").strip()
-            or f"project group {index + 1}"
-        )
-        issues.append({
-            "code": "source_identity_unresolved",
-            "message": f"Source project identity decision is unresolved for {label}.",
-        })
+def _issue_codes(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    return [
+        code
+        for code in dict.fromkeys(str(row.get("code") or "").strip() for row in rows)
+        if code
+    ]
 
-    duplicate_groups = validation.get("duplicate_groups")
-    for group in duplicate_groups if isinstance(duplicate_groups, list) else []:
-        if not isinstance(group, Mapping):
-            continue
-        candidates = [
-            str(candidate.get("record_id") or "").strip()
-            for candidate in _as_list(group.get("candidates"))
-            if isinstance(candidate, Mapping) and str(candidate.get("record_id") or "").strip()
-        ]
-        if len(candidates) < 2 and not _bool(group.get("requires_confirmation"), False):
-            continue
-        selected = str(group.get("selected_record_id") or "").strip()
-        if selected and selected in candidates:
-            continue
-        report_date = str(group.get("report_date") or "unknown date").strip()
-        issues.append({
-            "code": "source_duplicate_unresolved",
-            "message": f"A valid Daily Report source has not been selected for duplicate date {report_date}.",
-        })
 
-    source_issues = validation.get("issues")
-    for source_issue in source_issues if isinstance(source_issues, list) else []:
-        if not isinstance(source_issue, Mapping):
-            continue
-        severity = str(source_issue.get("severity") or "warning").strip().casefold()
-        if severity not in _CRITICAL_SOURCE_SEVERITIES:
-            continue
-        code = str(source_issue.get("code") or "source_validation_error").strip()
-        message = str(source_issue.get("message") or code).strip()
-        filename = str(source_issue.get("filename") or "").strip()
-        if filename:
-            message = f"{filename}: {message}"
-        issues.append({"code": code or "source_validation_error", "message": message})
+def _readiness_status(*, ready: bool, warnings: Sequence[Any]) -> str:
+    if not ready:
+        return "blocked"
+    return "ready_with_warnings" if warnings else "ready"
 
-    result: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for issue in issues:
-        key = (issue["code"], issue["message"])
-        if key not in seen:
-            seen.add(key)
-            result.append(issue)
-    return result
+
+def _highest_risk(
+    *,
+    critical_count: int,
+    warnings: Sequence[Any],
+    info: Sequence[Any],
+) -> str:
+    if critical_count:
+        return "critical"
+    if warnings:
+        return "warning"
+    return "info" if info else "clear"
+
+
+def _refreshed_critical_risk(
+    preflight: Mapping[str, Any],
+    blockers: list[dict[str, str]],
+    runtime_final: list[dict[str, str]],
+    *,
+    for_final: bool,
+) -> tuple[int, list[str]]:
+    if for_final:
+        known = {(row["code"], row["message"]) for row in blockers}
+        for row in runtime_final:
+            key = (row["code"], row["message"])
+            if key in known:
+                continue
+            known.add(key)
+            blockers.append(row)
+        return len(blockers), _issue_codes(blockers)
+
+    risk_tiers = preflight.get("risk_tiers")
+    risk_tiers = risk_tiers if isinstance(risk_tiers, Mapping) else {}
+    critical = risk_tiers.get("critical")
+    critical = critical if isinstance(critical, Mapping) else {}
+    try:
+        critical_count = max(0, int(critical.get("count") or 0))
+    except (TypeError, ValueError):
+        critical_count = 0
+    critical_codes = [
+        str(code).strip()
+        for code in _as_list(critical.get("codes"))
+        if str(code).strip()
+    ]
+    critical_count += len(runtime_final)
+    critical_codes = list(dict.fromkeys(
+        critical_codes + [row["code"] for row in runtime_final if row.get("code")]
+    ))
+    return critical_count, critical_codes
 
 
 def refresh_preflight_readiness(
@@ -623,77 +735,27 @@ def refresh_preflight_readiness(
     future Final while the Preview itself remains available.
     """
 
-    def normalise_rows(value: Any) -> list[dict[str, str]]:
-        rows: list[dict[str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for raw in value if isinstance(value, list) else []:
-            if not isinstance(raw, Mapping):
-                continue
-            code = str(raw.get("code") or "").strip()
-            message = str(raw.get("message") or code).strip()
-            if not message:
-                continue
-            key = (code, message)
-            if key in seen:
-                continue
-            seen.add(key)
-            rows.append({"code": code, "message": message})
-        return rows
-
-    blockers = normalise_rows(preflight.get("blockers"))
-    warnings = normalise_rows(preflight.get("warnings"))
-    info = normalise_rows(preflight.get("info"))
-    runtime_final = normalise_rows(list(additional_final_blockers))
+    blockers = _unique_issue_rows(
+        preflight.get("blockers") if isinstance(preflight.get("blockers"), list) else []
+    )
+    warnings = _unique_issue_rows(
+        preflight.get("warnings") if isinstance(preflight.get("warnings"), list) else []
+    )
+    info = _unique_issue_rows(
+        preflight.get("info") if isinstance(preflight.get("info"), list) else []
+    )
+    runtime_final = _unique_issue_rows(list(additional_final_blockers))
     for_final = bool(preflight.get("for_final"))
-
-    if for_final:
-        known = {(row["code"], row["message"]) for row in blockers}
-        for row in runtime_final:
-            key = (row["code"], row["message"])
-            if key not in known:
-                known.add(key)
-                blockers.append(row)
-        critical_count = len(blockers)
-        critical_codes = [
-            code
-            for code in dict.fromkeys(row["code"] for row in blockers)
-            if code
-        ]
-    else:
-        risk_tiers = preflight.get("risk_tiers")
-        risk_tiers = risk_tiers if isinstance(risk_tiers, Mapping) else {}
-        critical = risk_tiers.get("critical")
-        critical = critical if isinstance(critical, Mapping) else {}
-        try:
-            critical_count = max(0, int(critical.get("count") or 0))
-        except (TypeError, ValueError):
-            critical_count = 0
-        critical_codes = [
-            str(code).strip()
-            for code in _as_list(critical.get("codes"))
-            if str(code).strip()
-        ]
-        critical_count += len(runtime_final)
-        critical_codes = list(dict.fromkeys(
-            critical_codes
-            + [row["code"] for row in runtime_final if row.get("code")]
-        ))
-
-    def issue_codes(rows: list[dict[str, str]]) -> list[str]:
-        return [
-            code
-            for code in dict.fromkeys(row["code"] for row in rows)
-            if code
-        ]
+    critical_count, critical_codes = _refreshed_critical_risk(
+        preflight,
+        blockers,
+        runtime_final,
+        for_final=for_final,
+    )
 
     final_ready = critical_count == 0
     requested_ready = final_ready if for_final else True
-    if not requested_ready:
-        status = "blocked"
-    elif warnings:
-        status = "ready_with_warnings"
-    else:
-        status = "ready"
+    status = _readiness_status(ready=requested_ready, warnings=warnings)
 
     preflight["blockers"] = blockers
     preflight["warnings"] = warnings
@@ -711,80 +773,93 @@ def refresh_preflight_readiness(
         "warning_confirmation_required": bool(warnings),
     }
     preflight["risk_tiers"] = {
-        "highest": (
-            "critical" if critical_count
-            else "warning" if warnings
-            else "info" if info
-            else "clear"
+        "highest": _highest_risk(
+            critical_count=critical_count,
+            warnings=warnings,
+            info=info,
         ),
         "critical": {"count": critical_count, "codes": critical_codes},
-        "warning": {"count": len(warnings), "codes": issue_codes(warnings)},
-        "info": {"count": len(info), "codes": issue_codes(info)},
+        "warning": {"count": len(warnings), "codes": _issue_codes(warnings)},
+        "info": {"count": len(info), "codes": _issue_codes(info)},
     }
     return preflight
 
 
-def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False) -> dict[str, Any]:
-    """Return risk-tiered readiness without making Draft review unnecessarily strict.
+def _add_final_blocker(
+    final_blockers: list[dict[str, str]],
+    warnings: list[dict[str, str]],
+    *,
+    for_final: bool,
+    code: str,
+    message: str,
+) -> None:
+    row = {"code": code, "message": message}
+    final_blockers.append(row)
+    if not for_final:
+        # Draft remains previewable, while future Final risk remains visible.
+        warnings.append(dict(row))
 
-    Preview/Draft output remains available with review warnings. Final issue is
-    stricter: source ambiguity/errors, workforce arithmetic, authoritative progress
-    consistency, client-text contamination, incomplete photo evidence/date coverage,
-    and source-backed facts lost during periodic propagation are hard blockers.
-    """
 
-    final_blockers: list[dict[str, str]] = []
-    warnings: list[dict[str, str]] = []
-    info: list[dict[str, str]] = []
-
-    def add_final_blocker(code: str, message: str) -> None:
-        row = {"code": code, "message": message}
-        final_blockers.append(row)
-        if not for_final:
-            # A Draft remains previewable, but the future Final risk must stay
-            # visible rather than disappearing merely because it is non-blocking.
-            warnings.append(dict(row))
-
+def _append_source_preflight_issues(
+    report: Mapping[str, Any],
+    *,
+    for_final: bool,
+    final_blockers: list[dict[str, str]],
+    warnings: list[dict[str, str]],
+    info: list[dict[str, str]],
+) -> None:
     validation = report.get("source_validation")
     source_critical = _source_validation_critical_issues(report)
     for issue in source_critical:
-        add_final_blocker(issue["code"], issue["message"])
-    if isinstance(validation, Mapping):
-        if validation.get("applied") and validation.get("confirmed"):
-            info.append({
-                "code": "source_validation_confirmed",
-                "message": "Source Data Validation is applied and confirmed.",
-            })
-        elif not source_critical:
-            warnings.append({
-                "code": "source_review_pending",
-                "message": (
-                    "Source review is not yet confirmed. Draft preview remains available; "
-                    "resolve any material exceptions before Final issue."
-                ),
-            })
-        for source_issue in (
-            validation.get("issues")
-            if isinstance(validation.get("issues"), list)
-            else []
-        ):
-            if not isinstance(source_issue, Mapping):
-                continue
-            severity = str(source_issue.get("severity") or "warning").strip().casefold()
-            if severity in _CRITICAL_SOURCE_SEVERITIES:
-                continue
-            message = str(source_issue.get("message") or source_issue.get("code") or "").strip()
-            if not message:
-                continue
-            filename = str(source_issue.get("filename") or "").strip()
-            if filename:
-                message = f"{filename}: {message}"
-            warnings.append({
-                "code": str(source_issue.get("code") or "source_review_warning").strip()
-                or "source_review_warning",
-                "message": message,
-            })
+        _add_final_blocker(
+            final_blockers,
+            warnings,
+            for_final=for_final,
+            code=issue["code"],
+            message=issue["message"],
+        )
+    if not isinstance(validation, Mapping):
+        return
+    if validation.get("applied") and validation.get("confirmed"):
+        info.append({
+            "code": "source_validation_confirmed",
+            "message": "Source Data Validation is applied and confirmed.",
+        })
+    elif not source_critical:
+        warnings.append({
+            "code": "source_review_pending",
+            "message": (
+                "Source review is not yet confirmed. Draft preview remains available; "
+                "resolve any material exceptions before Final issue."
+            ),
+        })
 
+    source_issues = validation.get("issues")
+    for source_issue in source_issues if isinstance(source_issues, list) else []:
+        if not isinstance(source_issue, Mapping):
+            continue
+        severity = str(source_issue.get("severity") or "warning").strip().casefold()
+        if severity in _CRITICAL_SOURCE_SEVERITIES:
+            continue
+        message = str(
+            source_issue.get("message") or source_issue.get("code") or ""
+        ).strip()
+        if not message:
+            continue
+        filename = str(source_issue.get("filename") or "").strip()
+        if filename:
+            message = f"{filename}: {message}"
+        warnings.append({
+            "code": str(source_issue.get("code") or "source_review_warning").strip()
+            or "source_review_warning",
+            "message": message,
+        })
+
+
+def _append_pending_review_issues(
+    report: Mapping[str, Any],
+    warnings: list[dict[str, str]],
+) -> None:
     if _pending_workforce(report):
         warnings.append({
             "code": "workforce_review_pending",
@@ -804,19 +879,37 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
             ),
         })
 
-    # Photo review is optional. Automatic photo mapping/captions may be used
-    # directly for Final issue; users can still review/edit photos when needed.
 
+def _append_coverage_issues(
+    report: Mapping[str, Any],
+    warnings: list[dict[str, str]],
+    info: list[dict[str, str]],
+) -> None:
     coverage = report.get("coverage") if isinstance(report.get("coverage"), Mapping) else {}
     missing = [str(x) for x in _as_list(coverage.get("missing_dates")) if str(x).strip()]
     if missing:
         warnings.append({
             "code": "partial_coverage",
-            "message": f"Daily Report coverage is partial; {len(missing)} date(s) are missing: {', '.join(missing)}.",
+            "message": (
+                f"Daily Report coverage is partial; {len(missing)} date(s) are missing: "
+                f"{', '.join(missing)}."
+            ),
         })
-    else:
-        info.append({"code": "coverage_complete", "message": "Daily Report coverage is complete for the selected period."})
+        return
+    info.append({
+        "code": "coverage_complete",
+        "message": "Daily Report coverage is complete for the selected period.",
+    })
 
+
+def _append_s_curve_issues(
+    report: Mapping[str, Any],
+    *,
+    for_final: bool,
+    final_blockers: list[dict[str, str]],
+    warnings: list[dict[str, str]],
+    info: list[dict[str, str]],
+) -> None:
     include_s_curve = _s_curve_requested(report, for_final=for_final)
     final_include_s_curve = _s_curve_requested(report, for_final=True)
     progress_available = (
@@ -824,29 +917,44 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
         or _has_progress_rows(report.get("overall_progress"))
     )
     if final_include_s_curve and not _has_approved_s_curve(report):
-        add_final_blocker(
-            "illustrative_s_curve",
-            "Final reports may not use an illustrative/generated S-Curve. Supply an approved time series or disable the S-Curve.",
+        _add_final_blocker(
+            final_blockers,
+            warnings,
+            for_final=for_final,
+            code="illustrative_s_curve",
+            message=(
+                "Final reports may not use an illustrative/generated S-Curve. "
+                "Supply an approved time series or disable the S-Curve."
+            ),
         )
     elif for_final and progress_available and not include_s_curve:
         info.append({
             "code": "s_curve_omitted_final",
-            "message": "Progress rows are available, but no approved S-Curve time series was supplied; the S-Curve appendix will be omitted from Final.",
+            "message": (
+                "Progress rows are available, but no approved S-Curve time series was "
+                "supplied; the S-Curve appendix will be omitted from Final."
+            ),
         })
 
-    for message in _workforce_reconciliation_issues(report):
-        add_final_blocker("workforce_reconciliation", message)
 
-    for message in _client_text_issues(report):
-        if for_final:
-            add_final_blocker("client_text_quality", message)
-        else:
-            warnings.append({"code": "client_text_quality", "message": message})
-
+def _append_photo_issues(
+    report: Mapping[str, Any],
+    *,
+    for_final: bool,
+    final_blockers: list[dict[str, str]],
+    warnings: list[dict[str, str]],
+    info: list[dict[str, str]],
+) -> None:
     for message in _photo_completeness_issues(report):
         rendered_message = "Photo Documentation may be incomplete: " + message
         if for_final:
-            add_final_blocker("photo_documentation_incomplete", rendered_message)
+            _add_final_blocker(
+                final_blockers,
+                warnings,
+                for_final=True,
+                code="photo_documentation_incomplete",
+                message=rendered_message,
+            )
         else:
             warnings.append({
                 "code": "photo_documentation_incomplete",
@@ -854,20 +962,20 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
             })
 
     for message in _photo_mapping_issues(report):
-        warnings.append({
-            "code": "photo_area_mapping_review",
-            "message": message,
-        })
+        warnings.append({"code": "photo_area_mapping_review", "message": message})
 
     photo_date_issues = _photo_date_coverage_issues(report)
     for message in photo_date_issues:
         if for_final:
-            add_final_blocker("photo_date_coverage", message)
+            _add_final_blocker(
+                final_blockers,
+                warnings,
+                for_final=True,
+                code="photo_date_coverage",
+                message=message,
+            )
         else:
-            warnings.append({
-                "code": "photo_date_coverage",
-                "message": message,
-            })
+            warnings.append({"code": "photo_date_coverage", "message": message})
     photo_coverage = report.get("photo_coverage")
     if isinstance(photo_coverage, Mapping) and not photo_date_issues:
         source_count = int(photo_coverage.get("source_date_count") or 0)
@@ -875,17 +983,143 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
         if source_count:
             info.append({
                 "code": "photo_date_coverage_complete",
-                "message": f"Photo Documentation retains extractable photo evidence for {retained_count}/{source_count} source date(s).",
+                "message": (
+                    "Photo Documentation retains extractable photo evidence for "
+                    f"{retained_count}/{source_count} source date(s)."
+                ),
             })
+
+
+def _preflight_payload(
+    *,
+    for_final: bool,
+    final_blockers: list[dict[str, str]],
+    warnings: list[dict[str, str]],
+    info: list[dict[str, str]],
+) -> dict[str, Any]:
+    final_blockers = _unique_issue_rows(final_blockers)
+    warnings = _unique_issue_rows(warnings)
+    info = _unique_issue_rows(info)
+    blockers = final_blockers if for_final else []
+    final_ready = not final_blockers
+    requested_ready = final_ready if for_final else True
+    return {
+        "ready": requested_ready,
+        "for_final": bool(for_final),
+        "blockers": blockers,
+        "warnings": warnings,
+        "info": info,
+        "requires_override_reason": any(
+            row["code"] == "partial_coverage" for row in warnings
+        ),
+        "readiness": {
+            "requested_stage": "final" if for_final else "preview",
+            "status": _readiness_status(ready=requested_ready, warnings=warnings),
+            "preview_ready": True,
+            "final_ready": final_ready,
+            "final_blocker_count": len(final_blockers),
+            "warning_confirmation_required": bool(warnings),
+        },
+        "risk_tiers": {
+            "highest": _highest_risk(
+                critical_count=len(final_blockers),
+                warnings=warnings,
+                info=info,
+            ),
+            "critical": {
+                "count": len(final_blockers),
+                "codes": _issue_codes(final_blockers),
+            },
+            "warning": {
+                "count": len(warnings),
+                "codes": _issue_codes(warnings),
+            },
+            "info": {
+                "count": len(info),
+                "codes": _issue_codes(info),
+            },
+        },
+    }
+
+
+def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False) -> dict[str, Any]:
+    """Return risk-tiered readiness without making Draft review unnecessarily strict.
+
+    Preview/Draft output remains available with review warnings. Final issue is
+    stricter: source ambiguity/errors, workforce arithmetic, authoritative progress
+    consistency, client-text contamination, incomplete photo evidence/date coverage,
+    and source-backed facts lost during periodic propagation are hard blockers.
+    """
+
+    final_blockers: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+    info: list[dict[str, str]] = []
+    _append_source_preflight_issues(
+        report,
+        for_final=for_final,
+        final_blockers=final_blockers,
+        warnings=warnings,
+        info=info,
+    )
+    _append_pending_review_issues(report, warnings)
+    _append_coverage_issues(report, warnings, info)
+    _append_s_curve_issues(
+        report,
+        for_final=for_final,
+        final_blockers=final_blockers,
+        warnings=warnings,
+        info=info,
+    )
+
+    for message in _workforce_reconciliation_issues(report):
+        _add_final_blocker(
+            final_blockers,
+            warnings,
+            for_final=for_final,
+            code="workforce_reconciliation",
+            message=message,
+        )
+
+    for message in _client_text_issues(report):
+        if for_final:
+            _add_final_blocker(
+                final_blockers,
+                warnings,
+                for_final=True,
+                code="client_text_quality",
+                message=message,
+            )
+        else:
+            warnings.append({"code": "client_text_quality", "message": message})
+
+    _append_photo_issues(
+        report,
+        for_final=for_final,
+        final_blockers=final_blockers,
+        warnings=warnings,
+        info=info,
+    )
 
     for message in _periodic_source_propagation_issues(report):
         if for_final:
-            add_final_blocker("periodic_source_propagation", message)
+            _add_final_blocker(
+                final_blockers,
+                warnings,
+                for_final=True,
+                code="periodic_source_propagation",
+                message=message,
+            )
         else:
             warnings.append({"code": "periodic_source_propagation", "message": message})
 
     for message in _progress_source_consistency_issues(report):
-        add_final_blocker("progress_source_consistency", message)
+        _add_final_blocker(
+            final_blockers,
+            warnings,
+            for_final=for_final,
+            code="progress_source_consistency",
+            message=message,
+        )
 
     deterministic_warnings, deterministic_info = _deterministic_summary_issues(report)
     for message in deterministic_warnings:
@@ -895,68 +1129,9 @@ def build_report_preflight(report: Mapping[str, Any], *, for_final: bool = False
 
     for message in _manual_source_issues(report):
         warnings.append({"code": "manual_source_audit", "message": message})
-
-    def unique_issues(rows: list[dict[str, str]]) -> list[dict[str, str]]:
-        result: list[dict[str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for row in rows:
-            key = (str(row.get("code") or ""), str(row.get("message") or ""))
-            if key in seen:
-                continue
-            seen.add(key)
-            result.append(row)
-        return result
-
-    final_blockers = unique_issues(final_blockers)
-    warnings = unique_issues(warnings)
-    info = unique_issues(info)
-    blockers = final_blockers if for_final else []
-    final_ready = not final_blockers
-    requested_ready = final_ready if for_final else True
-    if not requested_ready:
-        readiness_status = "blocked"
-    elif warnings:
-        readiness_status = "ready_with_warnings"
-    else:
-        readiness_status = "ready"
-    highest_risk = (
-        "critical" if final_blockers
-        else "warning" if warnings
-        else "info" if info
-        else "clear"
+    return _preflight_payload(
+        for_final=for_final,
+        final_blockers=final_blockers,
+        warnings=warnings,
+        info=info,
     )
-
-    def issue_codes(rows: list[dict[str, str]]) -> list[str]:
-        return list(dict.fromkeys(str(row.get("code") or "") for row in rows if row.get("code")))
-
-    return {
-        "ready": requested_ready,
-        "for_final": bool(for_final),
-        "blockers": blockers,
-        "warnings": warnings,
-        "info": info,
-        "requires_override_reason": any(row["code"] == "partial_coverage" for row in warnings),
-        "readiness": {
-            "requested_stage": "final" if for_final else "preview",
-            "status": readiness_status,
-            "preview_ready": True,
-            "final_ready": final_ready,
-            "final_blocker_count": len(final_blockers),
-            "warning_confirmation_required": bool(warnings),
-        },
-        "risk_tiers": {
-            "highest": highest_risk,
-            "critical": {
-                "count": len(final_blockers),
-                "codes": issue_codes(final_blockers),
-            },
-            "warning": {
-                "count": len(warnings),
-                "codes": issue_codes(warnings),
-            },
-            "info": {
-                "count": len(info),
-                "codes": issue_codes(info),
-            },
-        },
-    }

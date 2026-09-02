@@ -179,17 +179,32 @@ def _validation_identity(
     )
 
 
-def build_source_validation(
+def _trusted_canonical_match(
+    source_identity: Mapping[str, Any],
+    *,
+    selected_no_norm: str,
+    selected_title_norm: str,
+) -> bool:
+    return bool(
+        _normalise(source_identity.get("canonical_project_no")) == selected_no_norm
+        and _normalise(source_identity.get("canonical_project_title"))
+        == selected_title_norm
+        and _clean(source_identity.get("review_state")).casefold()
+        in {"matched", "confirmed"}
+        and _clean(source_identity.get("match_method")).casefold()
+        in _TRUSTED_CANONICAL_MATCH_METHODS
+    )
+
+
+def _group_validation_records(
     records: Iterable[Mapping[str, Any]],
     *,
     selected_project_no: str,
     selected_project_title: str,
-    issues: Iterable[Any] = (),
-) -> dict[str, Any]:
-    """Describe source project variants without silently merging them."""
-
-    selected_no_norm = _normalise(selected_project_no)
-    selected_title_norm = _normalise(selected_project_title)
+    selected_no_norm: str,
+    selected_title_norm: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]], bool]:
+    """Group raw source identities and collect same-date candidates."""
     grouped: dict[str, dict[str, Any]] = {}
     dated_records: dict[str, list[dict[str, Any]]] = {}
     review_requested = False
@@ -199,15 +214,12 @@ def build_source_validation(
             continue
         source_project_no = _metadata(record, "project_no")
         source_project_title = _metadata(record, "project_title")
-        source_identity = record.get("source_identity") if isinstance(record.get("source_identity"), Mapping) else {}
-        explicit_document_no = _clean(source_identity.get("document_no"))
-        trusted_canonical_match = bool(
-            _normalise(source_identity.get("canonical_project_no")) == selected_no_norm
-            and _normalise(source_identity.get("canonical_project_title")) == selected_title_norm
-            and _clean(source_identity.get("review_state")).casefold() in {"matched", "confirmed"}
-            and _clean(source_identity.get("match_method")).casefold()
-            in _TRUSTED_CANONICAL_MATCH_METHODS
+        source_identity = (
+            record.get("source_identity")
+            if isinstance(record.get("source_identity"), Mapping)
+            else {}
         )
+        explicit_document_no = _clean(source_identity.get("document_no"))
         review_requested = review_requested or bool(record.get("review_required"))
         project_no, project_title, document_no = _validation_identity(
             source_project_no=source_project_no,
@@ -215,7 +227,11 @@ def build_source_validation(
             selected_project_no=selected_project_no,
             selected_project_title=selected_project_title,
             source_day_no=_payload(record).get("day_no"),
-            trusted_canonical_match=trusted_canonical_match,
+            trusted_canonical_match=_trusted_canonical_match(
+                source_identity,
+                selected_no_norm=selected_no_norm,
+                selected_title_norm=selected_title_norm,
+            ),
         )
         document_no = explicit_document_no or document_no
         record_id = _record_id(record, index)
@@ -236,6 +252,7 @@ def build_source_validation(
         if document_no and document_no not in group["source_document_nos"]:
             group["source_document_nos"].append(document_no)
         group["record_ids"].append(record_id)
+
         source = record.get("source") if isinstance(record.get("source"), Mapping) else {}
         filename = _clean(source.get("filename"))
         report_date = _record_date(record)
@@ -253,26 +270,40 @@ def build_source_validation(
                 "revision": _integer(record.get("revision")),
                 "generated_at": _clean(record.get("generated_at")),
             })
+    return grouped, dated_records, review_requested
 
-    project_groups = []
+
+def _project_validation_groups(
+    grouped: Mapping[str, dict[str, Any]],
+    *,
+    selected_project_no: str,
+    selected_project_title: str,
+) -> list[dict[str, Any]]:
+    selected_no_norm = _normalise(selected_project_no)
+    selected_title_norm = _normalise(selected_project_title)
+    project_groups: list[dict[str, Any]] = []
     for group in grouped.values():
-        number_match = bool(selected_no_norm and _normalise(group["project_no"]) == selected_no_norm)
+        number_match = bool(
+            selected_no_norm and _normalise(group["project_no"]) == selected_no_norm
+        )
         title_match = bool(
-            selected_title_norm and _normalise(group["project_title"]) == selected_title_norm
+            selected_title_norm
+            and _normalise(group["project_title"]) == selected_title_norm
         )
         requires_confirmation = not (number_match and title_match)
-        group.update(
-            {
-                "matches_selected": number_match and title_match,
-                "number_matches_selected": number_match,
-                "title_matches_selected": title_match,
-                "title_similarity": _title_similarity(group["project_title"], selected_project_title),
-                "requires_confirmation": requires_confirmation,
-                "decision": "" if requires_confirmation else "merge",
-                "dates": sorted(group["dates"]),
-                "filenames": sorted(group["filenames"]),
-            }
-        )
+        group.update({
+            "matches_selected": number_match and title_match,
+            "number_matches_selected": number_match,
+            "title_matches_selected": title_match,
+            "title_similarity": _title_similarity(
+                group["project_title"],
+                selected_project_title,
+            ),
+            "requires_confirmation": requires_confirmation,
+            "decision": "" if requires_confirmation else "merge",
+            "dates": sorted(group["dates"]),
+            "filenames": sorted(group["filenames"]),
+        })
         project_groups.append(group)
 
     project_groups.sort(
@@ -282,48 +313,89 @@ def build_source_validation(
             _normalise(group["project_no"]),
         )
     )
-    issue_rows = []
+    return project_groups
+
+
+def _validation_issue_rows(issues: Iterable[Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     for issue in issues:
         if isinstance(issue, Mapping):
             message = _clean(issue.get("message") or issue.get("code"))
-            if message:
-                issue_rows.append({
-                    "code": _clean(issue.get("code")),
-                    "severity": _clean(issue.get("severity") or "warning"),
-                    "field": _clean(issue.get("field")),
-                    "filename": _clean(issue.get("filename")),
-                    "message": message,
-                    "can_override": _clean(issue.get("severity") or "warning").casefold()
-                    not in {"error", "critical", "blocker"},
-                })
-        else:
-            message = _clean(issue)
-            if message:
-                issue_rows.append({
-                    "severity": "warning",
-                    "message": message,
-                    "can_override": True,
-                })
+            if not message:
+                continue
+            severity = _clean(issue.get("severity") or "warning")
+            rows.append({
+                "code": _clean(issue.get("code")),
+                "severity": severity,
+                "field": _clean(issue.get("field")),
+                "filename": _clean(issue.get("filename")),
+                "message": message,
+                "can_override": severity.casefold()
+                not in {"error", "critical", "blocker"},
+            })
+            continue
+        message = _clean(issue)
+        if message:
+            rows.append({
+                "severity": "warning",
+                "message": message,
+                "can_override": True,
+            })
+    return rows
 
-    duplicate_groups = []
+
+def _duplicate_validation_groups(
+    dated_records: Mapping[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
     for report_date, candidates in sorted(dated_records.items()):
         if len(candidates) < 2:
             continue
         record_ids = [str(candidate["record_id"]) for candidate in candidates]
-        duplicate_groups.append({
+        groups.append({
             "key": _duplicate_group_key(report_date, record_ids),
             "report_date": report_date,
             "candidates": candidates,
             "selected_record_id": "",
             "requires_confirmation": True,
         })
+    return groups
 
-    decision_required = len(project_groups) > 1 or any(
-        group["requires_confirmation"] for group in project_groups
-    ) or bool(duplicate_groups) or any(
-        str(issue.get("severity") or "warning").casefold()
-        in {"error", "critical", "blocker"}
-        for issue in issue_rows
+
+def build_source_validation(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    selected_project_no: str,
+    selected_project_title: str,
+    issues: Iterable[Any] = (),
+) -> dict[str, Any]:
+    """Describe source project variants without silently merging them."""
+
+    selected_no_norm = _normalise(selected_project_no)
+    selected_title_norm = _normalise(selected_project_title)
+    grouped, dated_records, review_requested = _group_validation_records(
+        records,
+        selected_project_no=selected_project_no,
+        selected_project_title=selected_project_title,
+        selected_no_norm=selected_no_norm,
+        selected_title_norm=selected_title_norm,
+    )
+    project_groups = _project_validation_groups(
+        grouped,
+        selected_project_no=selected_project_no,
+        selected_project_title=selected_project_title,
+    )
+    issue_rows = _validation_issue_rows(issues)
+    duplicate_groups = _duplicate_validation_groups(dated_records)
+    decision_required = (
+        len(project_groups) > 1
+        or any(group["requires_confirmation"] for group in project_groups)
+        or bool(duplicate_groups)
+        or any(
+            str(issue.get("severity") or "warning").casefold()
+            in {"error", "critical", "blocker"}
+            for issue in issue_rows
+        )
     )
     required = decision_required or review_requested
     automatically_confirmed = not required
@@ -343,21 +415,10 @@ def build_source_validation(
     }
 
 
-def resolve_project_records(
-    records: Iterable[Mapping[str, Any]],
+def _project_resolution_decisions(
     validation: Mapping[str, Any],
-    *,
-    project_no: str,
-    project_title: str,
     resolutions: Iterable[Mapping[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Apply explicit merge/separate decisions to a draft-local record batch."""
-
-    project_no = _clean(project_no)
-    project_title = _clean(project_title)
-    if not project_no or not project_title:
-        raise ValueError("Report Project Title and Project No. are required.")
-
+) -> dict[str, str]:
     groups = validation.get("project_groups") if isinstance(validation, Mapping) else []
     groups = groups if isinstance(groups, list) else []
     known = {
@@ -378,12 +439,97 @@ def resolve_project_records(
         decisions[key] = decision
 
     for key, group in known.items():
-        if key not in decisions:
-            default = str(group.get("decision") or "")
-            if default == "merge" and not group.get("requires_confirmation"):
-                decisions[key] = default
-            else:
-                raise ValueError("Choose Merge or Keep separate for every project identity.")
+        if key in decisions:
+            continue
+        default = str(group.get("decision") or "")
+        if default == "merge" and not group.get("requires_confirmation"):
+            decisions[key] = default
+            continue
+        raise ValueError("Choose Merge or Keep separate for every project identity.")
+    return decisions
+
+
+def _resolved_record_identity(
+    record: Mapping[str, Any],
+    index: int,
+    *,
+    project_no: str,
+    project_title: str,
+) -> tuple[str, str, str, str]:
+    """Return source title/no, document number, and validated group key."""
+    source_title = _metadata(record, "project_title")
+    source_no = _metadata(record, "project_no")
+    prior_identity = (
+        record.get("source_identity")
+        if isinstance(record.get("source_identity"), Mapping)
+        else {}
+    )
+    explicit_document_no = _clean(prior_identity.get("document_no"))
+    effective_no, effective_title, document_no = _validation_identity(
+        source_project_no=source_no,
+        source_project_title=source_title,
+        selected_project_no=project_no,
+        selected_project_title=project_title,
+        source_day_no=_payload(record).get("day_no"),
+        trusted_canonical_match=_trusted_canonical_match(
+            prior_identity,
+            selected_no_norm=_normalise(project_no),
+            selected_title_norm=_normalise(project_title),
+        ),
+    )
+    document_no = explicit_document_no or document_no
+    key = _record_group_key(record, index, effective_title, effective_no)
+    return source_title, source_no, document_no, key
+
+
+def _apply_canonical_project_identity(
+    record: dict[str, Any],
+    index: int,
+    *,
+    source_title: str,
+    source_no: str,
+    document_no: str,
+    group_key: str,
+    project_no: str,
+    project_title: str,
+) -> None:
+    record["source_identity"] = {
+        # Reported identity stays immutable; canonical identity is explicit.
+        "project_no": source_no,
+        "project_title": source_title,
+        "reported_project_no": source_no,
+        "reported_project_title": source_title,
+        "document_no": document_no,
+        "validation_group_key": group_key,
+        "record_id": _record_id(record, index),
+        "canonical_project_no": project_no,
+        "canonical_project_title": project_title,
+        "match_method": "reviewed_merge",
+        "review_state": "confirmed",
+    }
+    record["project_no"] = project_no
+    record["project_title"] = project_title
+    payload = copy.deepcopy(dict(_payload(record)))
+    payload["project_no"] = project_no
+    payload["project_title"] = project_title
+    record["payload"] = payload
+
+
+def resolve_project_records(
+    records: Iterable[Mapping[str, Any]],
+    validation: Mapping[str, Any],
+    *,
+    project_no: str,
+    project_title: str,
+    resolutions: Iterable[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Apply explicit merge/separate decisions to a draft-local record batch."""
+
+    project_no = _clean(project_no)
+    project_title = _clean(project_title)
+    if not project_no or not project_title:
+        raise ValueError("Report Project Title and Project No. are required.")
+    decisions = _project_resolution_decisions(validation, resolutions)
 
     included: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
@@ -391,54 +537,27 @@ def resolve_project_records(
         if not isinstance(source_record, Mapping):
             continue
         record = copy.deepcopy(dict(source_record))
-        source_title = _metadata(record, "project_title")
-        source_no = _metadata(record, "project_no")
-        prior_identity = record.get("source_identity") if isinstance(record.get("source_identity"), Mapping) else {}
-        explicit_document_no = _clean(prior_identity.get("document_no"))
-        trusted_canonical_match = bool(
-            _normalise(prior_identity.get("canonical_project_no")) == _normalise(project_no)
-            and _normalise(prior_identity.get("canonical_project_title")) == _normalise(project_title)
-            and _clean(prior_identity.get("review_state")).casefold() in {"matched", "confirmed"}
-            and _clean(prior_identity.get("match_method")).casefold()
-            in _TRUSTED_CANONICAL_MATCH_METHODS
+        source_title, source_no, document_no, key = _resolved_record_identity(
+            record,
+            index,
+            project_no=project_no,
+            project_title=project_title,
         )
-        effective_no, effective_title, document_no = _validation_identity(
-            source_project_no=source_no,
-            source_project_title=source_title,
-            selected_project_no=project_no,
-            selected_project_title=project_title,
-            source_day_no=_payload(record).get("day_no"),
-            trusted_canonical_match=trusted_canonical_match,
-        )
-        document_no = explicit_document_no or document_no
-        key = _record_group_key(record, index, effective_title, effective_no)
         if key not in decisions:
             raise ValueError("A source project identity changed after validation. Compile again.")
         if decisions[key] == "separate":
             excluded.append(record)
             continue
-
-        record["source_identity"] = {
-            # Keep reported identity immutable; canonical identity is explicit
-            # below and on the working record/payload.
-            "project_no": source_no,
-            "project_title": source_title,
-            "reported_project_no": source_no,
-            "reported_project_title": source_title,
-            "document_no": document_no,
-            "validation_group_key": key,
-            "record_id": _record_id(record, index),
-            "canonical_project_no": project_no,
-            "canonical_project_title": project_title,
-            "match_method": "reviewed_merge",
-            "review_state": "confirmed",
-        }
-        record["project_no"] = project_no
-        record["project_title"] = project_title
-        payload = copy.deepcopy(dict(_payload(record)))
-        payload["project_no"] = project_no
-        payload["project_title"] = project_title
-        record["payload"] = payload
+        _apply_canonical_project_identity(
+            record,
+            index,
+            source_title=source_title,
+            source_no=source_no,
+            document_no=document_no,
+            group_key=key,
+            project_no=project_no,
+            project_title=project_title,
+        )
         included.append(record)
 
     if not included:
