@@ -1949,24 +1949,28 @@ def _manpower_appendix_flowables(
     return result
 
 
-def _build_story(
+def _report_progress_curve(
     report: Mapping[str, Any],
-    styles: Mapping[str, ParagraphStyle],
     *,
-    photo_base_dir: str | os.PathLike[str] | None = None,
-) -> list[Flowable]:
-    report_type = _report_type(report)
-    status = _normalise_status(_value(report, "status", "report_mode", default="draft"), report_type=report_type)
-    progress = _normalise_progress(report.get("progress", report.get("overall_progress", [])))
-    explicit_curve = _normalise_s_curve(report.get("s_curve"), []) if isinstance(report.get("s_curve"), Mapping) else None
+    report_type: str,
+) -> tuple[list[dict[str, Any]], tuple[list[str], list[float], list[float], bool] | None]:
+    status = _normalise_status(
+        _value(report, "status", "report_mode", default="draft"),
+        report_type=report_type,
+    )
+    progress = _normalise_progress(
+        report.get("progress", report.get("overall_progress", []))
+    )
+    explicit_curve = (
+        _normalise_s_curve(report.get("s_curve"), [])
+        if isinstance(report.get("s_curve"), Mapping)
+        else None
+    )
     if "include_s_curve" in report:
         include_s_curve = _coerce_bool(report.get("include_s_curve"), False)
     elif explicit_curve is not None:
         include_s_curve = True
     else:
-        # Progress rows can produce an illustrative S-Curve in Preview/Draft.
-        # A Final report without an approved explicit time series omits the
-        # appendix instead of becoming impossible to issue.
         include_s_curve = bool(progress) and status != "FINAL"
     curve = _normalise_s_curve(report.get("s_curve"), progress) if include_s_curve else None
     if status == "FINAL" and curve is not None and curve[3]:
@@ -1974,37 +1978,41 @@ def _build_story(
             "Final reports cannot render an illustrative/unapproved S-Curve. "
             "Supply an approved time series or disable the S-Curve."
         )
-    appendices = _normalise_appendices(report.get("appendices"), has_s_curve=curve is not None)
-    manpower = report.get("manpower") if isinstance(report.get("manpower"), Mapping) else {}
-    manpower_totals = manpower.get("totals") if isinstance(manpower.get("totals"), Mapping) else {}
+    return progress, curve
+
+
+def _visible_report_appendices(
+    report: Mapping[str, Any],
+    *,
+    curve: tuple[list[str], list[float], list[float], bool] | None,
+    manpower: Mapping[str, Any],
+    photos: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    appendices = _normalise_appendices(
+        report.get("appendices"),
+        has_s_curve=curve is not None,
+    )
+    manpower_totals = (
+        manpower.get("totals") if isinstance(manpower.get("totals"), Mapping) else {}
+    )
     if manpower.get("daily") or manpower_totals:
         for item in appendices:
             if _appendix_source_number(item) == "6.5":
                 item["status"] = "Attached"
                 item["content"] = "__reviewed_manpower__"
                 break
-    photos = [item for item in _as_list(report.get("photo_documentation")) if isinstance(item, Mapping)]
     if photos:
         for item in appendices:
             if _appendix_source_number(item) == "6.6":
                 item["status"] = "Attached"
                 item["content"] = "__reviewed_photos__"
                 break
-
-    # Keep all appendix definitions in ``appendices`` for future data, but only
-    # render appendices that are actually available for this report.  Hidden
-    # entries are therefore also omitted automatically from the TOC because no
-    # heading flowable is emitted for them.
-    visible_appendices = _renumber_visible_appendices(
+    return _renumber_visible_appendices(
         [item for item in appendices if _appendix_is_visible(item)]
     )
 
-    story: list[Flowable] = [
-        Spacer(1, 1),
-        NextPageTemplate("body"),
-        PageBreak(),
-        Paragraph("Table of Contents", styles["toc_title"]),
-    ]
+
+def _toc_story(styles: Mapping[str, ParagraphStyle]) -> list[Flowable]:
     toc = TableOfContents()
     toc.dotsMinLevel = 0
     toc.levelStyles = [
@@ -2031,17 +2039,34 @@ def _build_story(
             textColor=BLACK,
         ),
     ]
-    story.extend([toc, PageBreak()])
+    return [
+        Spacer(1, 1),
+        NextPageTemplate("body"),
+        PageBreak(),
+        Paragraph("Table of Contents", styles["toc_title"]),
+        toc,
+        PageBreak(),
+    ]
 
-    story.extend([
+
+def _summary_safety_story(
+    report: Mapping[str, Any],
+    styles: Mapping[str, ParagraphStyle],
+    *,
+    report_type: str,
+    progress: list[dict[str, Any]],
+) -> list[Flowable]:
+    story: list[Flowable] = [
         _heading("1. Executive Summary", styles["h1"], 0),
         _paragraph(_executive_summary(report, progress), styles["body"]),
         Spacer(1, 6),
-    ])
+    ]
     story.extend(_coverage_flowables(report, styles))
     story.extend([
         _progress_table(
-            progress, styles, report_type=report_type,
+            progress,
+            styles,
+            report_type=report_type,
             period_label=_plain(report.get("progress_period_label")),
         ),
         Spacer(1, 18),
@@ -2050,9 +2075,17 @@ def _build_story(
         _safety_table(report.get("safety"), styles),
         PageBreak(),
     ])
+    return story
 
-    story.append(_heading("3. Engineering", styles["h1"], 0))
-    story.append(_heading("3.1 Status Engineering", styles["h2"], 1))
+
+def _engineering_story(
+    report: Mapping[str, Any],
+    styles: Mapping[str, ParagraphStyle],
+) -> list[Flowable]:
+    story: list[Flowable] = [
+        _heading("3. Engineering", styles["h1"], 0),
+        _heading("3.1 Status Engineering", styles["h2"], 1),
+    ]
     story.extend(_content_flowables(
         _client_facing_missing_summary(report.get("engineering"), section="engineering"),
         styles,
@@ -2060,33 +2093,39 @@ def _build_story(
         bullets=True,
     ))
     story.append(PageBreak())
+    return story
 
+
+def _procurement_story(
+    report: Mapping[str, Any],
+    styles: Mapping[str, ParagraphStyle],
+) -> list[Flowable]:
     procurement = _client_facing_missing_summary(
         report.get("procurement"),
         section="procurement",
     )
     summary, po_rows, embedded_equipment, embedded_shipments = _po_rows(procurement)
-    if _plain(summary):
-        procurement_intro = [_paragraph(summary, styles["body"]), Spacer(1, 3)]
-    else:
-        procurement_intro = []
     equipment = report.get("equipment_delivery", embedded_equipment)
     shipments = report.get("shipments", embedded_shipments)
-
-    story.append(_heading("4. Procurement", styles["h1"], 0))
-    story.extend(procurement_intro)
+    story: list[Flowable] = [_heading("4. Procurement", styles["h1"], 0)]
+    if _plain(summary):
+        story.extend([_paragraph(summary, styles["body"]), Spacer(1, 3)])
     story.append(_heading("4.1 Procurement Status", styles["h2"], 1))
     story.extend([_procurement_table(po_rows, styles), Spacer(1, 10)])
     story.append(_heading("4.2 Equipment Delivery Status", styles["h2"], 1))
-    equipment_rows = []
+
+    equipment_rows: list[Mapping[str, Any]] = []
     equipment_summary = equipment
     if isinstance(equipment, Mapping):
         equipment_summary = equipment.get("summary")
         equipment_rows = [
-            row for row in _as_list(_value(equipment, "rows", "items", default=[]))
+            row
+            for row in _as_list(_value(equipment, "rows", "items", default=[]))
             if isinstance(row, Mapping)
         ]
-    elif isinstance(equipment, Sequence) and not isinstance(equipment, (str, bytes, bytearray)):
+    elif isinstance(equipment, Sequence) and not isinstance(
+        equipment, (str, bytes, bytearray)
+    ):
         equipment_rows = [row for row in equipment if isinstance(row, Mapping)]
         if equipment_rows:
             equipment_summary = None
@@ -2094,106 +2133,134 @@ def _build_story(
         story.extend([_equipment_table(equipment_rows, styles), Spacer(1, 10)])
     else:
         story.extend(_content_flowables(
-            equipment_summary, styles,
-            empty_message="No equipment delivery information supplied.", bullets=True,
+            equipment_summary,
+            styles,
+            empty_message="No equipment delivery information supplied.",
+            bullets=True,
         ))
+
     story.append(_heading("4.3 Shipment Status", styles["h2"], 1))
     shipment_rows = [row for row in _as_list(shipments) if isinstance(row, Mapping)]
     if isinstance(shipments, Mapping):
         shipment_rows = [
-            row for row in _as_list(_value(shipments, "rows", "items", default=[]))
+            row
+            for row in _as_list(_value(shipments, "rows", "items", default=[]))
             if isinstance(row, Mapping)
         ]
-    story.append(_shipment_table(shipment_rows, styles))
-    story.append(PageBreak())
+    story.extend([_shipment_table(shipment_rows, styles), PageBreak()])
+    return story
 
-    site = report.get("site") if isinstance(report.get("site"), Mapping) else {}
+
+def _site_activity_configuration(report_type: str) -> tuple[Any, ...]:
     if report_type == "weekly":
-        current_activity_keys = (
-            "this_period_activities",
-            "current_period_activities",
-            "this_period",
-            "current_period",
-            "this_week_activities",
-            "this_week",
-            "this_month_activities",
-            "this_month",
-            "activities",
+        return (
+            (
+                "this_period_activities", "current_period_activities", "this_period",
+                "current_period", "this_week_activities", "this_week",
+                "this_month_activities", "this_month", "activities",
+            ),
+            (
+                "next_period_activities", "planned_next_period_activities",
+                "next_week_activities", "planned_next_week",
+            ),
+            "5.2 This Week Activities",
+            "5.3 Planned Activities Next Week",
+            "No current-week activities supplied.",
+            "No next-week activities supplied.",
         )
-        next_activity_keys = (
-            "next_period_activities",
-            "planned_next_period_activities",
-            "next_week_activities",
-            "planned_next_week",
-        )
-        current_heading = "5.2 This Week Activities"
-        next_heading = "5.3 Planned Activities Next Week"
-        current_empty = "No current-week activities supplied."
-        next_empty = "No next-week activities supplied."
-    else:
-        current_activity_keys = (
-            "this_month_activities",
-            "this_month",
-            "this_period_activities",
-            "current_period_activities",
-            "this_period",
-            "current_period",
-            "activities",
-        )
-        next_activity_keys = (
-            "next_month_activities",
-            "next_period_activities",
-            "planned_next_period_activities",
-            "planned_next_month",
-        )
-        current_heading = "5.2 This Month Activities"
-        next_heading = "5.3 Planned Activities Next Month"
-        current_empty = "No current-month activities supplied."
-        next_empty = "No next-month activities supplied."
+    return (
+        (
+            "this_month_activities", "this_month", "this_period_activities",
+            "current_period_activities", "this_period", "current_period", "activities",
+        ),
+        (
+            "next_month_activities", "next_period_activities",
+            "planned_next_period_activities", "planned_next_month",
+        ),
+        "5.2 This Month Activities",
+        "5.3 Planned Activities Next Month",
+        "No current-month activities supplied.",
+        "No next-month activities supplied.",
+    )
 
+
+def _site_story(
+    report: Mapping[str, Any],
+    styles: Mapping[str, ParagraphStyle],
+    *,
+    report_type: str,
+) -> list[Flowable]:
+    site = report.get("site") if isinstance(report.get("site"), Mapping) else {}
+    (
+        current_keys,
+        next_keys,
+        current_heading,
+        next_heading,
+        current_empty,
+        next_empty,
+    ) = _site_activity_configuration(report_type)
     current_activities = _value(
         site,
-        *current_activity_keys,
-        default=_value(report, *current_activity_keys, default=[]),
+        *current_keys,
+        default=_value(report, *current_keys, default=[]),
     )
     next_activities = _value(
         site,
-        *next_activity_keys,
-        default=_value(report, *next_activity_keys, default=[]),
+        *next_keys,
+        default=_value(report, *next_keys, default=[]),
     )
-    story.append(_heading("5. Site Services / Construction", styles["h1"], 0))
+    story: list[Flowable] = [
+        _heading("5. Site Services / Construction", styles["h1"], 0)
+    ]
     site_summary = _plain(site.get("summary"))
     if site_summary:
         story.extend([_paragraph(site_summary, styles["body"]), Spacer(1, 3)])
     story.append(_heading("5.1 Project Schedule Status", styles["h2"], 1))
     story.extend(_content_flowables(
-        _value(site, "schedule_status", "project_schedule_status"), styles,
+        _value(site, "schedule_status", "project_schedule_status"),
+        styles,
         empty_message="Overall schedule/progress data was not supplied for this reporting period.",
     ))
     story.append(_heading(current_heading, styles["h2"], 1))
-    story.extend(_activity_flowables(
-        current_activities,
-        styles, empty_message=current_empty,
-    ))
+    story.extend(_activity_flowables(current_activities, styles, empty_message=current_empty))
     story.append(_heading(next_heading, styles["h2"], 1))
-    story.extend(_activity_flowables(
-        next_activities,
-        styles, empty_message=next_empty,
-    ))
+    story.extend(_activity_flowables(next_activities, styles, empty_message=next_empty))
     story.append(_heading(
-        "5.4 Area of Concern and Suggested Corrective Action", styles["h2"], 1
+        "5.4 Area of Concern and Suggested Corrective Action",
+        styles["h2"],
+        1,
     ))
-    concern_rows = _as_list(_value(site, "concerns", "constraints", default=report.get("constraints")))
+    concern_rows = _as_list(
+        _value(site, "concerns", "constraints", default=report.get("constraints"))
+    )
     concerns_table = _concerns_table(concern_rows, styles)
     if concerns_table is None:
-        story.append(_paragraph(_constraint_reporting_message(report, site), styles["placeholder"]))
+        story.append(
+            _paragraph(_constraint_reporting_message(report, site), styles["placeholder"])
+        )
     else:
         story.append(concerns_table)
     findings_table = _key_findings_table(_as_list(site.get("key_findings")), styles)
     if findings_table is not None:
-        story.extend([Spacer(1, 5), _display_heading("Key Remarks / Findings", styles["h2"]), findings_table])
+        story.extend([
+            Spacer(1, 5),
+            _display_heading("Key Remarks / Findings", styles["h2"]),
+            findings_table,
+        ])
     story.append(PageBreak())
+    return story
 
+
+def _appendices_story(
+    visible_appendices: list[dict[str, Any]],
+    styles: Mapping[str, ParagraphStyle],
+    *,
+    curve: tuple[list[str], list[float], list[float], bool] | None,
+    photos: list[Mapping[str, Any]],
+    manpower: Mapping[str, Any],
+    photo_base_dir: str | os.PathLike[str] | None,
+) -> list[Flowable]:
+    story: list[Flowable] = []
     if visible_appendices:
         story.append(_heading("6. Appendices", styles["h1"], 0))
         for item in visible_appendices:
@@ -2202,11 +2269,19 @@ def _build_story(
     if curve is not None:
         labels, planned, actual, illustrative = curve
         curve_item = next(
-            (item for item in visible_appendices if _appendix_source_number(item) == "6.2"),
+            (
+                item
+                for item in visible_appendices
+                if _appendix_source_number(item) == "6.2"
+            ),
             None,
         )
         curve_number = _plain(curve_item.get("number")) if curve_item else "6.1"
-        curve_title = _plain(curve_item.get("title"), "Progress S-Curve") if curve_item else "Progress S-Curve"
+        curve_title = (
+            _plain(curve_item.get("title"), "Progress S-Curve")
+            if curve_item
+            else "Progress S-Curve"
+        )
         story.extend([
             PageBreak(),
             Paragraph(
@@ -2238,8 +2313,51 @@ def _build_story(
             story.extend(_manpower_appendix_flowables(manpower, styles))
         else:
             story.extend(_content_flowables(
-                content, styles, empty_message="No appendix content supplied.", bullets=True,
+                content,
+                styles,
+                empty_message="No appendix content supplied.",
+                bullets=True,
             ))
+    return story
+
+
+def _build_story(
+    report: Mapping[str, Any],
+    styles: Mapping[str, ParagraphStyle],
+    *,
+    photo_base_dir: str | os.PathLike[str] | None = None,
+) -> list[Flowable]:
+    report_type = _report_type(report)
+    progress, curve = _report_progress_curve(report, report_type=report_type)
+    manpower = report.get("manpower") if isinstance(report.get("manpower"), Mapping) else {}
+    photos = [item for item in _as_list(report.get("photo_documentation")) if isinstance(item, Mapping)]
+    visible_appendices = _visible_report_appendices(
+        report,
+        curve=curve,
+        manpower=manpower,
+        photos=photos,
+    )
+    story = _toc_story(styles)
+    story.extend(_summary_safety_story(
+        report,
+        styles,
+        report_type=report_type,
+        progress=progress,
+    ))
+    story.extend(_engineering_story(report, styles))
+
+    story.extend(_procurement_story(report, styles))
+
+    story.extend(_site_story(report, styles, report_type=report_type))
+
+    story.extend(_appendices_story(
+        visible_appendices,
+        styles,
+        curve=curve,
+        photos=photos,
+        manpower=manpower,
+        photo_base_dir=photo_base_dir,
+    ))
     return story
 
 

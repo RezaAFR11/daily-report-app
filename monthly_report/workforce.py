@@ -427,6 +427,265 @@ def _record_resolution_map(value: Any) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _keep_regular_workforce(
+    draft: dict[str, Any],
+    state: dict[str, Any],
+    overtime: dict[str, Any],
+    regular_manpower: Mapping[str, Any],
+    regular_hours: float,
+    *,
+    actor: str,
+) -> dict[str, Any]:
+    overtime["status"] = "kept"
+    overtime["decided_by"] = actor
+    overtime["decided_at"] = datetime.now().isoformat(timespec="seconds")
+    draft["manpower"] = copy.deepcopy(regular_manpower)
+    regular_totals = draft["manpower"].get("totals", {})
+    safety = draft.get("safety") if isinstance(draft.get("safety"), dict) else {}
+    safety["total_manpower"] = int(_number(regular_totals.get("peak_headcount")))
+    safety["total_man_hours"] = _compact_number(regular_hours)
+    draft["safety"] = safety
+    state["effective"] = {
+        "source": "timesheet",
+        "peak_headcount": safety["total_manpower"],
+        "regular_man_hours": _compact_number(regular_hours),
+        "overtime_man_hours": None,
+        "total_man_hours": _compact_number(regular_hours),
+        "overtime_applied": False,
+        "total_hours_complete": False,
+        "note": "Reviewed overtime workbook was not applied.",
+    }
+    return state
+
+
+def _overtime_categories(
+    people: Mapping[str, Mapping[str, Any]],
+    decisions: Mapping[str, str],
+) -> dict[str, str]:
+    categories: dict[str, str] = {}
+    for key, row in people.items():
+        category = decisions.get(key) or str(row.get("category") or "")
+        if category not in {"direct", "indirect", "exclude"}:
+            raise ValueError(
+                "Choose Direct, Indirect, or Exclude for overtime employee "
+                f"{row.get('name') or key}."
+            )
+        categories[key] = category
+    return categories
+
+
+def _accepted_overtime_records(
+    preview: Mapping[str, Any],
+    categories: Mapping[str, str],
+    record_decisions: Mapping[str, Mapping[str, Any]],
+    selected_populated_dates: list[str],
+) -> tuple[dict[str, dict[str, float]], list[dict[str, Any]]]:
+    daily_ot: dict[str, dict[str, float]] = defaultdict(
+        lambda: {"direct": 0.0, "indirect": 0.0}
+    )
+    for report_date in selected_populated_dates:
+        # A populated reviewed sheet is supplied even if every accepted row is
+        # subsequently excluded by the reviewer.
+        daily_ot[report_date]
+
+    accepted_records: list[dict[str, Any]] = []
+    for record in preview.get("records", []):
+        if not isinstance(record, Mapping):
+            continue
+        category = categories.get(str(record.get("employee_key") or ""), "")
+        if category not in {"direct", "indirect"}:
+            continue
+        record_id = str(record.get("record_id") or "")
+        record_decision = record_decisions.get(record_id)
+        if record.get("requires_review") and record_decision is None:
+            raise ValueError(
+                "Choose Include or Exclude for reviewed overtime record "
+                f"{record_id or '(unknown)'}."
+            )
+        include_record = bool(record.get("included_in_total"))
+        if record_decision is not None:
+            include_record = record_decision["decision"] == "include"
+        if not include_record:
+            continue
+        raw_hours = (
+            record_decision.get("duration_hours")
+            if record_decision is not None
+            and record_decision.get("duration_hours") not in (None, "")
+            else record.get("duration_hours", record.get("suggested_duration_hours"))
+        )
+        hours = _number(raw_hours)
+        if hours <= 0 or hours > 24:
+            raise ValueError(
+                "Enter an overtime duration greater than 0 and no more than 24 hours "
+                f"for record {record_id or '(unknown)'}."
+            )
+        daily_ot[str(record.get("date") or "")][category] += hours
+        accepted = copy.deepcopy(dict(record))
+        accepted["category"] = category
+        accepted["duration_hours"] = _compact_number(hours)
+        accepted["review_decision"] = (
+            record_decision["decision"]
+            if record_decision is not None
+            else "source_confirmed"
+        )
+        accepted_records.append(accepted)
+
+    if not accepted_records:
+        raise ValueError(
+            "No confirmed overtime record remains to apply. Resolve the intervals/mappings "
+            "or Keep Without OT."
+        )
+    return daily_ot, accepted_records
+
+
+def _apply_daily_overtime(
+    manpower: dict[str, Any],
+    daily_ot: Mapping[str, Mapping[str, float]],
+    not_supplied_dates: list[str],
+) -> None:
+    daily_rows = {
+        str(row.get("date") or ""): row
+        for row in manpower.get("daily", [])
+        if isinstance(row, dict)
+    }
+    for report_date, category_hours in daily_ot.items():
+        row = daily_rows.get(report_date)
+        if row is None:
+            row = {
+                "date": report_date,
+                "direct_headcount": 0,
+                "indirect_headcount": 0,
+                "total_headcount": 0,
+                "direct_man_hours": 0,
+                "indirect_man_hours": 0,
+                "total_man_hours": 0,
+                "source": "timesheet_kn_v1",
+            }
+            manpower.setdefault("daily", []).append(row)
+            daily_rows[report_date] = row
+        regular_direct = _number(row.get("direct_man_hours"))
+        regular_indirect = _number(row.get("indirect_man_hours"))
+        row["regular_man_hours"] = _compact_number(regular_direct + regular_indirect)
+        row["direct_overtime_man_hours"] = _compact_number(category_hours["direct"])
+        row["indirect_overtime_man_hours"] = _compact_number(category_hours["indirect"])
+        row["overtime_man_hours"] = _compact_number(
+            category_hours["direct"] + category_hours["indirect"]
+        )
+        row["overtime_supplied"] = True
+        row["direct_man_hours"] = _compact_number(regular_direct + category_hours["direct"])
+        row["indirect_man_hours"] = _compact_number(
+            regular_indirect + category_hours["indirect"]
+        )
+        row["total_man_hours"] = _compact_number(
+            row["direct_man_hours"] + row["indirect_man_hours"]
+        )
+    for report_date in not_supplied_dates:
+        row = daily_rows.get(report_date)
+        if row is None:
+            continue
+        regular_direct = _number(row.get("direct_man_hours"))
+        regular_indirect = _number(row.get("indirect_man_hours"))
+        row["regular_man_hours"] = _compact_number(regular_direct + regular_indirect)
+        row["direct_overtime_man_hours"] = None
+        row["indirect_overtime_man_hours"] = None
+        row["overtime_man_hours"] = None
+        row["overtime_supplied"] = False
+        row["hours_complete"] = False
+    manpower["daily"] = sorted(
+        manpower.get("daily", []),
+        key=lambda row: row.get("date", ""),
+    )
+
+
+def _apply_overtime_totals(
+    manpower: dict[str, Any],
+    daily_ot: Mapping[str, Mapping[str, float]],
+    *,
+    regular_hours: float,
+    selected_populated_dates: list[str],
+    not_supplied_dates: list[str],
+) -> tuple[dict[str, Any], float]:
+    direct_ot = sum(values["direct"] for values in daily_ot.values())
+    indirect_ot = sum(values["indirect"] for values in daily_ot.values())
+    total_ot = direct_ot + indirect_ot
+    totals = manpower.setdefault("totals", {})
+    totals["regular_direct_man_hours"] = totals.get("direct_man_hours", 0)
+    totals["regular_indirect_man_hours"] = totals.get("indirect_man_hours", 0)
+    totals["regular_man_hours"] = _compact_number(regular_hours)
+    totals["direct_overtime_man_hours"] = _compact_number(direct_ot)
+    totals["indirect_overtime_man_hours"] = _compact_number(indirect_ot)
+    totals["overtime_man_hours"] = _compact_number(total_ot)
+    totals["direct_man_hours"] = _compact_number(
+        _number(totals.get("direct_man_hours")) + direct_ot
+    )
+    totals["indirect_man_hours"] = _compact_number(
+        _number(totals.get("indirect_man_hours")) + indirect_ot
+    )
+    totals["total_man_hours"] = _compact_number(regular_hours + total_ot)
+    totals["overtime_coverage_complete"] = not not_supplied_dates
+    totals["overtime_supplied_dates"] = copy.deepcopy(selected_populated_dates)
+    totals["overtime_not_supplied_dates"] = copy.deepcopy(not_supplied_dates)
+    totals["hours_complete"] = bool(totals.get("hours_complete")) and not not_supplied_dates
+    return totals, total_ot
+
+
+def _apply_role_overtime(
+    manpower: dict[str, Any],
+    timesheet: Mapping[str, Any],
+    accepted_records: list[dict[str, Any]],
+) -> None:
+    timesheet_employees = {
+        str(row.get("employee_key") or ""): row
+        for row in timesheet.get("preview", {}).get("employees", [])
+        if isinstance(row, Mapping) and row.get("employee_key")
+    }
+    role_rows = [row for row in manpower.get("roles", []) if isinstance(row, dict)]
+    roles_by_key: dict[str, dict[str, Any]] = {}
+    for row in role_rows:
+        role_name = str(row.get("role") or "Unspecified").strip() or "Unspecified"
+        role_key = " ".join(role_name.casefold().split())
+        regular_role_hours = _number(row.get("physical_manhours", row.get("man_hours")))
+        row["regular_man_hours"] = _compact_number(regular_role_hours)
+        row["overtime_man_hours"] = 0
+        row["total_man_hours"] = _compact_number(regular_role_hours)
+        row["man_hours"] = row["total_man_hours"]
+        roles_by_key[role_key] = row
+    for record in accepted_records:
+        employee = timesheet_employees.get(str(record.get("employee_key") or ""), {})
+        role_name = (
+            str(employee.get("role") or record.get("role") or "Unspecified").strip()
+            or "Unspecified"
+        )
+        role_key = " ".join(role_name.casefold().split())
+        row = roles_by_key.get(role_key)
+        if row is None:
+            row = {
+                "role": role_name,
+                "employee_count": 0,
+                "present_person_days": 0,
+                "physical_manhours": 0,
+                "regular_man_hours": 0,
+                "overtime_man_hours": 0,
+                "total_man_hours": 0,
+                "man_hours": 0,
+            }
+            role_rows.append(row)
+            roles_by_key[role_key] = row
+        overtime_hours = _number(record.get("duration_hours"))
+        row["overtime_man_hours"] = _compact_number(
+            _number(row.get("overtime_man_hours")) + overtime_hours
+        )
+        row["total_man_hours"] = _compact_number(
+            _number(row.get("regular_man_hours"))
+            + _number(row.get("overtime_man_hours"))
+        )
+        row["man_hours"] = row["total_man_hours"]
+    manpower["roles"] = sorted(
+        role_rows,
+        key=lambda row: str(row.get("role") or "").casefold(),
+    )
+
+
 def decide_overtime(
     draft: dict[str, Any],
     decision: str,
@@ -450,26 +709,14 @@ def decide_overtime(
     regular_totals = regular_manpower.get("totals", {}) if isinstance(regular_manpower, Mapping) else {}
     regular_hours = _number(regular_totals.get("total_man_hours"))
     if decision == "keep":
-        overtime["status"] = "kept"
-        overtime["decided_by"] = actor
-        overtime["decided_at"] = datetime.now().isoformat(timespec="seconds")
-        draft["manpower"] = copy.deepcopy(regular_manpower)
-        regular_totals = draft["manpower"].get("totals", {})
-        safety = draft.get("safety") if isinstance(draft.get("safety"), dict) else {}
-        safety["total_manpower"] = int(_number(regular_totals.get("peak_headcount")))
-        safety["total_man_hours"] = _compact_number(regular_hours)
-        draft["safety"] = safety
-        state["effective"] = {
-            "source": "timesheet",
-            "peak_headcount": safety["total_manpower"],
-            "regular_man_hours": _compact_number(regular_hours),
-            "overtime_man_hours": None,
-            "total_man_hours": _compact_number(regular_hours),
-            "overtime_applied": False,
-            "total_hours_complete": False,
-            "note": "Reviewed overtime workbook was not applied.",
-        }
-        return state
+        return _keep_regular_workforce(
+            draft,
+            state,
+            overtime,
+            regular_manpower,
+            regular_hours,
+            actor=actor,
+        )
 
     coverage = preview.get("coverage") if isinstance(preview.get("coverage"), Mapping) else {}
     selected_populated_dates = [
@@ -488,177 +735,33 @@ def decide_overtime(
     record_decisions = _record_resolution_map(record_resolutions)
     if preview.get("requires_confirmation") and not confirm_exceptions:
         raise ValueError("Confirm overtime exceptions and attendance mismatches before applying OT.")
-    categories: dict[str, str] = {}
-    for key, row in people.items():
-        category = decisions.get(key) or str(row.get("category") or "")
-        if category not in {"direct", "indirect", "exclude"}:
-            raise ValueError(f"Choose Direct, Indirect, or Exclude for overtime employee {row.get('name') or key}.")
-        categories[key] = category
+    categories = _overtime_categories(people, decisions)
 
-    daily_ot: dict[str, dict[str, float]] = defaultdict(lambda: {"direct": 0.0, "indirect": 0.0})
-    for report_date in selected_populated_dates:
-        # A populated and reviewed sheet represents supplied OT data even when
-        # every accepted record for that date is later excluded by the user.
-        daily_ot[report_date]
-    accepted_records = []
-    for record in preview.get("records", []):
-        if not isinstance(record, Mapping):
-            continue
-        category = categories.get(str(record.get("employee_key") or ""), "")
-        if category == "exclude":
-            continue
-        if category not in {"direct", "indirect"}:
-            continue
-        record_id = str(record.get("record_id") or "")
-        record_decision = record_decisions.get(record_id)
-        if record.get("requires_review") and record_decision is None:
-            raise ValueError(
-                f"Choose Include or Exclude for reviewed overtime record {record_id or '(unknown)'}."
-            )
-        include_record = bool(record.get("included_in_total"))
-        if record_decision is not None:
-            include_record = record_decision["decision"] == "include"
-        if not include_record:
-            continue
-        raw_hours = (
-            record_decision.get("duration_hours")
-            if record_decision is not None and record_decision.get("duration_hours") not in (None, "")
-            else record.get("duration_hours", record.get("suggested_duration_hours"))
-        )
-        hours = _number(raw_hours)
-        if hours <= 0 or hours > 24:
-            raise ValueError(
-                f"Enter an overtime duration greater than 0 and no more than 24 hours for record {record_id or '(unknown)'}."
-            )
-        daily_ot[str(record.get("date") or "")][category] += hours
-        accepted = copy.deepcopy(dict(record))
-        accepted["category"] = category
-        accepted["duration_hours"] = _compact_number(hours)
-        accepted["review_decision"] = (
-            record_decision["decision"] if record_decision is not None else "source_confirmed"
-        )
-        accepted_records.append(accepted)
-
-    if not accepted_records:
-        raise ValueError(
-            "No confirmed overtime record remains to apply. Resolve the intervals/mappings or Keep Without OT."
-        )
-
+    daily_ot, accepted_records = _accepted_overtime_records(
+        preview,
+        categories,
+        record_decisions,
+        selected_populated_dates,
+    )
     overtime["status"] = "applied"
     overtime["decided_by"] = actor
     overtime["decided_at"] = datetime.now().isoformat(timespec="seconds")
     draft["manpower"] = copy.deepcopy(regular_manpower)
     regular_totals = draft["manpower"].get("totals", {})
 
-    daily_rows = {
-        str(row.get("date") or ""): row
-        for row in draft["manpower"].get("daily", [])
-        if isinstance(row, dict)
-    }
-    for report_date, category_hours in daily_ot.items():
-        row = daily_rows.get(report_date)
-        if row is None:
-            row = {
-                "date": report_date,
-                "direct_headcount": 0,
-                "indirect_headcount": 0,
-                "total_headcount": 0,
-                "direct_man_hours": 0,
-                "indirect_man_hours": 0,
-                "total_man_hours": 0,
-                "source": "timesheet_kn_v1",
-            }
-            draft["manpower"].setdefault("daily", []).append(row)
-            daily_rows[report_date] = row
-        regular_direct = _number(row.get("direct_man_hours"))
-        regular_indirect = _number(row.get("indirect_man_hours"))
-        row["regular_man_hours"] = _compact_number(regular_direct + regular_indirect)
-        row["direct_overtime_man_hours"] = _compact_number(category_hours["direct"])
-        row["indirect_overtime_man_hours"] = _compact_number(category_hours["indirect"])
-        row["overtime_man_hours"] = _compact_number(category_hours["direct"] + category_hours["indirect"])
-        row["overtime_supplied"] = True
-        row["direct_man_hours"] = _compact_number(regular_direct + category_hours["direct"])
-        row["indirect_man_hours"] = _compact_number(regular_indirect + category_hours["indirect"])
-        row["total_man_hours"] = _compact_number(row["direct_man_hours"] + row["indirect_man_hours"])
     not_supplied_dates = [
         str(value) for value in coverage.get("not_supplied_dates", []) if str(value)
     ]
-    for report_date in not_supplied_dates:
-        row = daily_rows.get(report_date)
-        if row is None:
-            continue
-        regular_direct = _number(row.get("direct_man_hours"))
-        regular_indirect = _number(row.get("indirect_man_hours"))
-        row["regular_man_hours"] = _compact_number(regular_direct + regular_indirect)
-        row["direct_overtime_man_hours"] = None
-        row["indirect_overtime_man_hours"] = None
-        row["overtime_man_hours"] = None
-        row["overtime_supplied"] = False
-        row["hours_complete"] = False
-    draft["manpower"]["daily"] = sorted(draft["manpower"].get("daily", []), key=lambda row: row.get("date", ""))
-    direct_ot = sum(values["direct"] for values in daily_ot.values())
-    indirect_ot = sum(values["indirect"] for values in daily_ot.values())
-    total_ot = direct_ot + indirect_ot
-    totals = draft["manpower"].setdefault("totals", {})
-    totals["regular_direct_man_hours"] = totals.get("direct_man_hours", 0)
-    totals["regular_indirect_man_hours"] = totals.get("indirect_man_hours", 0)
-    totals["regular_man_hours"] = _compact_number(regular_hours)
-    totals["direct_overtime_man_hours"] = _compact_number(direct_ot)
-    totals["indirect_overtime_man_hours"] = _compact_number(indirect_ot)
-    totals["overtime_man_hours"] = _compact_number(total_ot)
-    totals["direct_man_hours"] = _compact_number(_number(totals.get("direct_man_hours")) + direct_ot)
-    totals["indirect_man_hours"] = _compact_number(_number(totals.get("indirect_man_hours")) + indirect_ot)
-    totals["total_man_hours"] = _compact_number(regular_hours + total_ot)
-    totals["overtime_coverage_complete"] = not not_supplied_dates
-    totals["overtime_supplied_dates"] = copy.deepcopy(selected_populated_dates)
-    totals["overtime_not_supplied_dates"] = copy.deepcopy(not_supplied_dates)
-    totals["hours_complete"] = bool(totals.get("hours_complete")) and not not_supplied_dates
-
-    timesheet_employees = {
-        str(row.get("employee_key") or ""): row
-        for row in timesheet.get("preview", {}).get("employees", [])
-        if isinstance(row, Mapping) and row.get("employee_key")
-    }
-    role_rows = [row for row in draft["manpower"].get("roles", []) if isinstance(row, dict)]
-    roles_by_key: dict[str, dict[str, Any]] = {}
-    for row in role_rows:
-        role_name = str(row.get("role") or "Unspecified").strip() or "Unspecified"
-        role_key = " ".join(role_name.casefold().split())
-        regular_role_hours = _number(row.get("physical_manhours", row.get("man_hours")))
-        row["regular_man_hours"] = _compact_number(regular_role_hours)
-        row["overtime_man_hours"] = 0
-        row["total_man_hours"] = _compact_number(regular_role_hours)
-        row["man_hours"] = row["total_man_hours"]
-        roles_by_key[role_key] = row
-    for record in accepted_records:
-        employee = timesheet_employees.get(str(record.get("employee_key") or ""), {})
-        role_name = str(employee.get("role") or record.get("role") or "Unspecified").strip() or "Unspecified"
-        role_key = " ".join(role_name.casefold().split())
-        row = roles_by_key.get(role_key)
-        if row is None:
-            row = {
-                "role": role_name,
-                "employee_count": 0,
-                "present_person_days": 0,
-                "physical_manhours": 0,
-                "regular_man_hours": 0,
-                "overtime_man_hours": 0,
-                "total_man_hours": 0,
-                "man_hours": 0,
-            }
-            role_rows.append(row)
-            roles_by_key[role_key] = row
-        overtime_hours = _number(record.get("duration_hours"))
-        row["overtime_man_hours"] = _compact_number(
-            _number(row.get("overtime_man_hours")) + overtime_hours
-        )
-        row["total_man_hours"] = _compact_number(
-            _number(row.get("regular_man_hours")) + _number(row.get("overtime_man_hours"))
-        )
-        row["man_hours"] = row["total_man_hours"]
-    draft["manpower"]["roles"] = sorted(
-        role_rows, key=lambda row: str(row.get("role") or "").casefold()
+    _apply_daily_overtime(draft["manpower"], daily_ot, not_supplied_dates)
+    totals, total_ot = _apply_overtime_totals(
+        draft["manpower"],
+        daily_ot,
+        regular_hours=regular_hours,
+        selected_populated_dates=selected_populated_dates,
+        not_supplied_dates=not_supplied_dates,
     )
+
+    _apply_role_overtime(draft["manpower"], timesheet, accepted_records)
     overtime["accepted_records"] = accepted_records
     overtime["resolutions"] = decisions
     overtime["record_resolutions"] = record_decisions
