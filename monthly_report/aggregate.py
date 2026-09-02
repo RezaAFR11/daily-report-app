@@ -8,6 +8,7 @@ import re
 import unicodedata
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -994,28 +995,30 @@ def _constraint_register(constraints: Iterable[Mapping[str, Any]]) -> list[dict[
     return result
 
 
-def aggregate_monthly_records(
+@dataclass
+class _PeriodFacts:
+    """Mutable collection used only while folding selected Daily Reports."""
+
+    activities: list[dict[str, Any]] = field(default_factory=list)
+    constraints: list[dict[str, Any]] = field(default_factory=list)
+    remarks: list[dict[str, Any]] = field(default_factory=list)
+    weather_daily: list[dict[str, Any]] = field(default_factory=list)
+    constraint_daily: list[dict[str, Any]] = field(default_factory=list)
+    daily_manpower: list[dict[str, Any]] = field(default_factory=list)
+    role_rows: list[dict[str, Any]] = field(default_factory=list)
+    planned_next_week: list[dict[str, Any]] = field(default_factory=list)
+    planned_next_month: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _select_period_records(
     records: Iterable[Mapping[str, Any]],
     *,
     date_from: str,
     date_to: str,
-    project_no: str | None = None,
-    project_title: str | None = None,
-    expected_dates: Iterable[str] | None = None,
-    work_hours_policy: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Aggregate canonical records for one project and inclusive date range.
-
-    When several revisions exist for a date, the highest revision wins; its
-    generated timestamp and report ID are deterministic tie-breakers.
-    """
-
-    date_from = _iso_date(date_from, "date_from")
-    date_to = _iso_date(date_to, "date_to")
-    if date_from > date_to:
-        raise ValueError("date_from cannot be after date_to.")
-    effective_hours_policy = _normalise_work_hours_policy(work_hours_policy)
-
+    project_no: str | None,
+    project_title: str | None,
+) -> tuple[list[tuple[str, Mapping[str, Any]]], int, list[str], list[str]]:
+    """Filter records and select the latest deterministic revision per date."""
     wanted_no = _normalise_text(project_no) if project_no is not None else None
     wanted_title = _normalise_text(project_title) if project_title is not None else None
     groups: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
@@ -1046,23 +1049,37 @@ def aggregate_monthly_records(
     if wanted_no is None and wanted_title is None:
         nonempty_projects = {pair for pair in seen_projects if any(pair)}
         if len(nonempty_projects) > 1:
-            raise ValueError("A project_no or project_title filter is required for mixed-project records.")
+            raise ValueError(
+                "A project_no or project_title filter is required for mixed-project records."
+            )
 
     selected: list[tuple[str, Mapping[str, Any]]] = []
-    duplicate_dates = []
-    superseded_records = []
+    duplicate_dates: list[str] = []
+    superseded_records: list[str] = []
     for report_date in sorted(groups):
         candidates = groups[report_date]
         chosen = max(candidates, key=_record_sort_key)
         selected.append((report_date, chosen))
-        if len(candidates) > 1:
-            duplicate_dates.append(report_date)
-            superseded_records.extend(
-                str(candidate.get("report_id", ""))
-                for candidate in candidates
-                if candidate is not chosen
-            )
+        if len(candidates) <= 1:
+            continue
+        duplicate_dates.append(report_date)
+        superseded_records.extend(
+            str(candidate.get("report_id", ""))
+            for candidate in candidates
+            if candidate is not chosen
+        )
 
+    return selected, ignored_invalid, duplicate_dates, superseded_records
+
+
+def _period_coverage(
+    selected: list[tuple[str, Mapping[str, Any]]],
+    *,
+    date_from: str,
+    date_to: str,
+    expected_dates: Iterable[str] | None,
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Resolve expected, covered, missing, and unexpected period dates."""
     if expected_dates is None:
         expected = _date_sequence(date_from, date_to)
     else:
@@ -1076,16 +1093,261 @@ def aggregate_monthly_records(
     covered_set = set(covered)
     missing = [value for value in expected if value not in covered_set]
     extra = [value for value in covered if value not in expected_set]
+    return expected, covered, missing, extra
 
-    activities = []
-    constraints = []
-    remarks = []
-    weather_daily = []
-    constraint_daily = []
-    daily_manpower = []
-    role_rows = []
-    planned_next_week = []
-    planned_next_month = []
+
+def _append_area_activities(
+    facts: _PeriodFacts,
+    *,
+    area: Mapping[str, Any],
+    area_index: int,
+    area_name: str,
+    report_date: str,
+    source_report_id: str,
+) -> None:
+    status_map = _activity_status_map(area)
+    descriptions = _iter_text_values(area.get("activities_today"))
+    for activity_index, description in enumerate(descriptions):
+        description = _clean_period_text(description)
+        if not description:
+            continue
+        area_meta = reporting_activity_area(area_name, description)
+        item = {
+            "date": report_date,
+            "area": area_name,
+            "source_area": area_meta["source_area"],
+            "reporting_area": area_meta["reporting_area"],
+            "area_mapping_method": area_meta["method"],
+            "area_mapping_confidence": area_meta["confidence"],
+            "area_review_required": bool(area_meta["review_required"]),
+            "description": description,
+            "source_report_id": source_report_id,
+            "source_path": f"$.areas[{area_index}].activities_today[{activity_index}]",
+        }
+        status = status_map.get(_normalise_text(description))
+        if status:
+            item["status"] = status
+        facts.activities.append(item)
+
+
+def _append_area_constraints(
+    facts: _PeriodFacts,
+    *,
+    area: Mapping[str, Any],
+    area_index: int,
+    area_name: str,
+    area_meta: Mapping[str, Any],
+    report_date: str,
+    source_report_id: str,
+) -> None:
+    for constraint_index, fact in enumerate(_iter_constraint_facts(area.get("constraints"))):
+        text = _clean_period_text(fact.get("text"))
+        if not text:
+            continue
+        constraint = {
+            "date": report_date,
+            "area": area_name,
+            "source_area": area_meta["source_area"],
+            "reporting_area": area_meta["reporting_area"],
+            "area_mapping_method": area_meta["method"],
+            "text": text,
+            "source_report_id": source_report_id,
+            "source_path": f"$.areas[{area_index}].constraints[{constraint_index}]",
+        }
+        for key in ("status", "action", "pic", "target_date", "closed_date"):
+            if fact.get(key):
+                constraint[key] = fact[key]
+        facts.constraints.append(constraint)
+
+
+def _append_area_remarks(
+    facts: _PeriodFacts,
+    *,
+    area: Mapping[str, Any],
+    area_index: int,
+    area_name: str,
+    area_meta: Mapping[str, Any],
+    report_date: str,
+    source_report_id: str,
+) -> None:
+    for remark_index, text in enumerate(_iter_text_values(area.get("remarks"))):
+        text = _clean_period_text(text)
+        if not text:
+            continue
+        facts.remarks.append({
+            "date": report_date,
+            "area": area_name,
+            "source_area": area_meta["source_area"],
+            "reporting_area": area_meta["reporting_area"],
+            "area_mapping_method": area_meta["method"],
+            "text": text,
+            "source_report_id": source_report_id,
+            "source_path": f"$.areas[{area_index}].remarks[{remark_index}]",
+        })
+
+
+def _append_area_lookahead(
+    facts: _PeriodFacts,
+    *,
+    area: Mapping[str, Any],
+    area_index: int,
+    area_name: str,
+    report_date: str,
+    source_report_id: str,
+) -> None:
+    # Activity Tomorrow remains separate because it is not automatically a
+    # next-week or next-month commitment.
+    targets = (
+        ("planned_next_week", facts.planned_next_week),
+        ("next_week_activities", facts.planned_next_week),
+        ("planned_next_month", facts.planned_next_month),
+        ("next_month_activities", facts.planned_next_month),
+    )
+    for key, target in targets:
+        for plan_index, description in enumerate(_iter_text_values(area.get(key))):
+            area_meta = reporting_activity_area(area_name, description)
+            target.append({
+                "source_date": report_date,
+                "area": area_name,
+                "source_area": area_meta["source_area"],
+                "reporting_area": area_meta["reporting_area"],
+                "area_mapping_method": area_meta["method"],
+                "description": description,
+                "source_report_id": source_report_id,
+                "source_path": f"$.areas[{area_index}].{key}[{plan_index}]",
+            })
+
+
+def _append_area_facts(
+    facts: _PeriodFacts,
+    areas: Any,
+    *,
+    report_date: str,
+    source_report_id: str,
+) -> None:
+    if not isinstance(areas, list):
+        return
+    for area_index, area in enumerate(areas):
+        if not isinstance(area, Mapping):
+            continue
+        area_name = _clean_text(area.get("id")) or "Unspecified"
+        area_meta = reporting_activity_area(area_name, "")
+        _append_area_activities(
+            facts,
+            area=area,
+            area_index=area_index,
+            area_name=area_name,
+            report_date=report_date,
+            source_report_id=source_report_id,
+        )
+        _append_area_constraints(
+            facts,
+            area=area,
+            area_index=area_index,
+            area_name=area_name,
+            area_meta=area_meta,
+            report_date=report_date,
+            source_report_id=source_report_id,
+        )
+        _append_area_remarks(
+            facts,
+            area=area,
+            area_index=area_index,
+            area_name=area_name,
+            area_meta=area_meta,
+            report_date=report_date,
+            source_report_id=source_report_id,
+        )
+        _append_area_lookahead(
+            facts,
+            area=area,
+            area_index=area_index,
+            area_name=area_name,
+            report_date=report_date,
+            source_report_id=source_report_id,
+        )
+
+
+def _append_global_constraints(
+    facts: _PeriodFacts,
+    payload: Mapping[str, Any],
+    *,
+    report_date: str,
+    source_report_id: str,
+) -> None:
+    for field_name in ("global_constraints", "constraints"):
+        for constraint_index, fact in enumerate(
+            _iter_constraint_facts(payload.get(field_name))
+        ):
+            text = _clean_period_text(fact.get("text"))
+            if not text:
+                continue
+            constraint = {
+                "date": report_date,
+                "area": "General",
+                "source_area": "General",
+                "reporting_area": "General",
+                "area_mapping_method": "source_fallback",
+                "text": text,
+                "source_report_id": source_report_id,
+                "source_path": f"$.{field_name}[{constraint_index}]",
+            }
+            for key in ("status", "action", "pic", "target_date", "closed_date"):
+                if fact.get(key):
+                    constraint[key] = fact[key]
+            facts.constraints.append(constraint)
+
+
+def _append_global_remarks(
+    facts: _PeriodFacts,
+    payload: Mapping[str, Any],
+    *,
+    report_date: str,
+    source_report_id: str,
+) -> None:
+    for field_name in ("global_remarks", "remarks"):
+        for remark_index, text in enumerate(_iter_text_values(payload.get(field_name))):
+            text = _clean_period_text(text)
+            if not text:
+                continue
+            facts.remarks.append({
+                "date": report_date,
+                "area": "General",
+                "source_area": "General",
+                "reporting_area": "General",
+                "area_mapping_method": "source_fallback",
+                "text": text,
+                "source_report_id": source_report_id,
+                "source_path": f"$.{field_name}[{remark_index}]",
+            })
+
+
+def _daily_constraint_status(
+    payload: Mapping[str, Any],
+    day_constraints: list[dict[str, Any]],
+) -> str:
+    status = _normalise_text(payload.get("constraint_status"))
+    real_constraints_supplied = any(
+        not _is_no_constraint_text(row.get("text")) for row in day_constraints
+    )
+    explicit_none_reported = any(
+        _clean_text(row.get("text")) and _is_no_constraint_text(row.get("text"))
+        for row in day_constraints
+    )
+    if real_constraints_supplied:
+        return "reported"
+    if status in {"none_reported", "reported", "not_supplied"}:
+        return status
+    return "none_reported" if explicit_none_reported else "not_supplied"
+
+
+def _collect_period_facts(
+    selected: list[tuple[str, Mapping[str, Any]]],
+    *,
+    work_hours_policy: Mapping[str, Any],
+) -> _PeriodFacts:
+    """Fold selected Daily Reports into period-level fact collections."""
+    facts = _PeriodFacts()
     for report_date, record in selected:
         payload = _payload(record)
         source_report_id = str(record.get("report_id") or "")
@@ -1093,180 +1355,80 @@ def aggregate_monthly_records(
         if weather_item is not None:
             weather_item["source_report_id"] = source_report_id
             weather_item["source_path"] = "$.weather"
-            weather_daily.append(weather_item)
-        constraint_count_before = len(constraints)
-        areas = payload.get("areas")
-        if not isinstance(areas, list):
-            areas = []
-        for area_index, area in enumerate(areas):
-            if not isinstance(area, Mapping):
-                continue
-            area_name = _clean_text(area.get("id")) or "Unspecified"
-            status_map = _activity_status_map(area)
-            for activity_index, description in enumerate(_iter_text_values(area.get("activities_today"))):
-                description = _clean_period_text(description)
-                if not description:
-                    continue
-                area_meta = reporting_activity_area(area_name, description)
-                item = {
-                    "date": report_date,
-                    "area": area_name,
-                    "source_area": area_meta["source_area"],
-                    "reporting_area": area_meta["reporting_area"],
-                    "area_mapping_method": area_meta["method"],
-                    "area_mapping_confidence": area_meta["confidence"],
-                    "area_review_required": bool(area_meta["review_required"]),
-                    "description": description,
-                    "source_report_id": source_report_id,
-                    "source_path": f"$.areas[{area_index}].activities_today[{activity_index}]",
-                }
-                status = status_map.get(_normalise_text(description))
-                if status:
-                    item["status"] = status
-                activities.append(item)
-            constraint_area_meta = reporting_activity_area(area_name, "")
-            for constraint_index, fact in enumerate(
-                _iter_constraint_facts(area.get("constraints"))
-            ):
-                text = _clean_period_text(fact.get("text"))
-                if not text:
-                    continue
-                constraint = {
-                    "date": report_date,
-                    "area": area_name,
-                    "source_area": constraint_area_meta["source_area"],
-                    "reporting_area": constraint_area_meta["reporting_area"],
-                    "area_mapping_method": constraint_area_meta["method"],
-                    "text": text,
-                    "source_report_id": source_report_id,
-                    "source_path": f"$.areas[{area_index}].constraints[{constraint_index}]",
-                }
-                for field in ("status", "action", "pic", "target_date", "closed_date"):
-                    if fact.get(field):
-                        constraint[field] = fact[field]
-                constraints.append(constraint)
-            for remark_index, text in enumerate(_iter_text_values(area.get("remarks"))):
-                text = _clean_period_text(text)
-                if not text:
-                    continue
-                remarks.append({
-                    "date": report_date,
-                    "area": area_name,
-                    "source_area": constraint_area_meta["source_area"],
-                    "reporting_area": constraint_area_meta["reporting_area"],
-                    "area_mapping_method": constraint_area_meta["method"],
-                    "text": text,
-                    "source_report_id": source_report_id,
-                    "source_path": f"$.areas[{area_index}].remarks[{remark_index}]",
-                })
+            facts.weather_daily.append(weather_item)
 
-            # Explicit period look-ahead is intentionally separate from Activity Tomorrow.
-            # A Daily Report tomorrow item is not automatically a next-week/month commitment.
-            for key, target in (("planned_next_week", planned_next_week), ("next_week_activities", planned_next_week),
-                                ("planned_next_month", planned_next_month), ("next_month_activities", planned_next_month)):
-                for plan_index, description in enumerate(_iter_text_values(area.get(key))):
-                    lookahead_area_meta = reporting_activity_area(area_name, description)
-                    target.append({
-                        "source_date": report_date,
-                        "area": area_name,
-                        "source_area": lookahead_area_meta["source_area"],
-                        "reporting_area": lookahead_area_meta["reporting_area"],
-                        "area_mapping_method": lookahead_area_meta["method"],
-                        "description": description,
-                        "source_report_id": source_report_id,
-                        "source_path": f"$.areas[{area_index}].{key}[{plan_index}]",
-                    })
-        for field in ("global_constraints", "constraints"):
-            for constraint_index, fact in enumerate(
-                _iter_constraint_facts(payload.get(field))
-            ):
-                text = _clean_period_text(fact.get("text"))
-                if not text:
-                    continue
-                constraint = {
-                    "date": report_date,
-                    "area": "General",
-                    "source_area": "General",
-                    "reporting_area": "General",
-                    "area_mapping_method": "source_fallback",
-                    "text": text,
-                    "source_report_id": source_report_id,
-                    "source_path": f"$.{field}[{constraint_index}]",
-                }
-                for fact_field in ("status", "action", "pic", "target_date", "closed_date"):
-                    if fact.get(fact_field):
-                        constraint[fact_field] = fact[fact_field]
-                constraints.append(constraint)
-        for field in ("global_remarks", "remarks"):
-            for remark_index, text in enumerate(_iter_text_values(payload.get(field))):
-                text = _clean_period_text(text)
-                if not text:
-                    continue
-                remarks.append({
-                    "date": report_date,
-                    "area": "General",
-                    "source_area": "General",
-                    "reporting_area": "General",
-                    "area_mapping_method": "source_fallback",
-                    "text": text,
-                    "source_report_id": source_report_id,
-                    "source_path": f"$.{field}[{remark_index}]",
-                })
-
-        constraint_state = _normalise_text(payload.get("constraint_status"))
-        day_constraint_rows = [
+        constraint_count_before = len(facts.constraints)
+        _append_area_facts(
+            facts,
+            payload.get("areas"),
+            report_date=report_date,
+            source_report_id=source_report_id,
+        )
+        _append_global_constraints(
+            facts,
+            payload,
+            report_date=report_date,
+            source_report_id=source_report_id,
+        )
+        _append_global_remarks(
+            facts,
+            payload,
+            report_date=report_date,
+            source_report_id=source_report_id,
+        )
+        day_constraints = [
             row
-            for row in constraints[constraint_count_before:]
+            for row in facts.constraints[constraint_count_before:]
             if isinstance(row, Mapping)
         ]
-        real_constraints_supplied = any(
-            not _is_no_constraint_text(row.get("text"))
-            for row in day_constraint_rows
-        )
-        explicit_none_reported = any(
-            _clean_text(row.get("text")) and _is_no_constraint_text(row.get("text"))
-            for row in day_constraint_rows
-        )
-        if real_constraints_supplied:
-            constraint_state = "reported"
-        elif constraint_state not in {"none_reported", "reported", "not_supplied"}:
-            constraint_state = "none_reported" if explicit_none_reported else "not_supplied"
-        constraint_daily.append({"date": report_date, "status": constraint_state})
+        facts.constraint_daily.append({
+            "date": report_date,
+            "status": _daily_constraint_status(payload, day_constraints),
+        })
 
         day, day_roles = _daily_manpower(
             payload,
             report_date,
-            work_hours_policy=effective_hours_policy,
+            work_hours_policy=work_hours_policy,
         )
-        daily_manpower.append(day)
-        role_rows.extend(day_roles)
+        facts.daily_manpower.append(day)
+        facts.role_rows.extend(day_roles)
+    return facts
 
-    constraint_register_source = list(constraints)
-    activities = _dedupe_entries(activities, "date", "area", "description")
-    constraints = [
-        row
-        for row in _dedupe_entries(constraints, "date", "area", "text")
-        if not _is_no_constraint_text(row.get("text"))
-    ]
-    remarks = _dedupe_entries(remarks, "date", "area", "text")
 
-    activities_by_area: dict[str, list[dict[str, str]]] = defaultdict(list)
-    activities_by_reporting_area: dict[str, list[dict[str, str]]] = defaultdict(list)
+def _activity_indexes(
+    activities: list[dict[str, Any]],
+) -> tuple[dict[str, list[dict[str, str]]], dict[str, list[dict[str, str]]]]:
+    """Index activity rows by source area and normalized reporting area."""
+    by_source_area: dict[str, list[dict[str, str]]] = defaultdict(list)
+    by_reporting_area: dict[str, list[dict[str, str]]] = defaultdict(list)
     for item in activities:
         row = {"date": item["date"], "description": item["description"]}
         if item.get("status"):
             row["status"] = item["status"]
-        activities_by_area[item["area"]].append(row)
-        activities_by_reporting_area[
+        by_source_area[item["area"]].append(row)
+        by_reporting_area[
             _clean_text(item.get("reporting_area")) or item["area"]
         ].append(dict(row))
+    return by_source_area, by_reporting_area
 
-    # Top-level explicit period look-ahead fields are also accepted when present.
+
+def _append_top_level_lookahead(
+    selected: list[tuple[str, Mapping[str, Any]]],
+    planned_next_week: list[dict[str, Any]],
+    planned_next_month: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Add explicit report-level look-ahead rows to area-level rows."""
+    targets = (
+        ("planned_next_week", planned_next_week),
+        ("next_week_activities", planned_next_week),
+        ("planned_next_month", planned_next_month),
+        ("next_month_activities", planned_next_month),
+    )
     for report_date, record in selected:
         payload = _payload(record)
         source_report_id = str(record.get("report_id") or "")
-        for key, target in (("planned_next_week", planned_next_week), ("next_week_activities", planned_next_week),
-                            ("planned_next_month", planned_next_month), ("next_month_activities", planned_next_month)):
+        for key, target in targets:
             for plan_index, description in enumerate(_iter_text_values(payload.get(key))):
                 target.append({
                     "source_date": report_date,
@@ -1278,42 +1440,50 @@ def aggregate_monthly_records(
                     "source_report_id": source_report_id,
                     "source_path": f"$.{key}[{plan_index}]",
                 })
-    planned_next_week = _dedupe_entries(planned_next_week, "source_date", "area", "description")
-    planned_next_month = _dedupe_entries(planned_next_month, "source_date", "area", "description")
-
-    tomorrow_activities = []
-    last_report_date = covered[-1] if covered else None
-    if selected:
-        last_date, last_record = selected[-1]
-        areas = _payload(last_record).get("areas")
-        if isinstance(areas, list):
-            for area in areas:
-                if not isinstance(area, Mapping):
-                    continue
-                area_name = _clean_text(area.get("id")) or "Unspecified"
-                for description in _iter_text_values(area.get("activities_tomorrow")):
-                    area_meta = reporting_activity_area(area_name, description)
-                    tomorrow_activities.append({
-                        "source_date": last_date,
-                        "area": area_name,
-                        "source_area": area_meta["source_area"],
-                        "reporting_area": area_meta["reporting_area"],
-                        "area_mapping_method": area_meta["method"],
-                        "description": description,
-                        "source_report_id": str(last_record.get("report_id") or ""),
-                        "source_path": f"$.areas[{areas.index(area)}].activities_tomorrow",
-                    })
-    tomorrow_activities = _dedupe_entries(
-        tomorrow_activities, "source_date", "area", "description"
+    return (
+        _dedupe_entries(planned_next_week, "source_date", "area", "description"),
+        _dedupe_entries(planned_next_month, "source_date", "area", "description"),
     )
 
-    constraint_reporting = {
-        "daily": constraint_daily,
-        "none_reported_dates": [row["date"] for row in constraint_daily if row["status"] == "none_reported"],
-        "reported_dates": [row["date"] for row in constraint_daily if row["status"] == "reported"],
-        "not_supplied_dates": [row["date"] for row in constraint_daily if row["status"] == "not_supplied"],
-    }
 
+def _latest_tomorrow_activities(
+    selected: list[tuple[str, Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Return tomorrow activities only from the latest selected Daily Report."""
+    tomorrow_activities: list[dict[str, Any]] = []
+    if not selected:
+        return tomorrow_activities
+
+    last_date, last_record = selected[-1]
+    areas = _payload(last_record).get("areas")
+    if not isinstance(areas, list):
+        return tomorrow_activities
+    for area in areas:
+        if not isinstance(area, Mapping):
+            continue
+        area_name = _clean_text(area.get("id")) or "Unspecified"
+        for description in _iter_text_values(area.get("activities_tomorrow")):
+            area_meta = reporting_activity_area(area_name, description)
+            tomorrow_activities.append({
+                "source_date": last_date,
+                "area": area_name,
+                "source_area": area_meta["source_area"],
+                "reporting_area": area_meta["reporting_area"],
+                "area_mapping_method": area_meta["method"],
+                "description": description,
+                "source_report_id": str(last_record.get("report_id") or ""),
+                "source_path": f"$.areas[{areas.index(area)}].activities_tomorrow",
+            })
+    return _dedupe_entries(
+        tomorrow_activities,
+        "source_date",
+        "area",
+        "description",
+    )
+
+
+def _role_totals(role_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Summarize person-days and parsed hours by normalized role."""
     role_summary: dict[str, dict[str, Any]] = {}
     for row in role_rows:
         role = row["role"]
@@ -1340,73 +1510,91 @@ def aggregate_monthly_records(
             else:
                 summary["missing_hours_count"] += 1
             summary["hours_complete"] = False
-        else:
-            summary["parsed_hours_count"] += 1
-            if row["man_hours"] == 0:
-                summary["zero_hours_count"] += 1
-            summary["man_hours"] += float(row["man_hours"])
+            continue
+        summary["parsed_hours_count"] += 1
+        if row["man_hours"] == 0:
+            summary["zero_hours_count"] += 1
+        summary["man_hours"] += float(row["man_hours"])
+
     roles = sorted(role_summary.values(), key=lambda row: _normalise_text(row["role"]))
     for row in roles:
         row["man_hours"] = round(row["man_hours"], 2)
+    return roles
 
-    supplied_manpower_days = [day for day in daily_manpower if day.get("supplied")]
-    manpower_supplied_dates = [day["date"] for day in supplied_manpower_days]
-    manpower_not_supplied_dates = [
-        day["date"] for day in daily_manpower if not day.get("supplied")
-    ]
 
-    def supplied_sum(field: str) -> float | None:
-        if not supplied_manpower_days:
-            return None
-        return round(
-            sum(float(day[field]) for day in supplied_manpower_days if day.get(field) is not None),
-            2,
-        )
-
-    def supplied_average(field: str) -> float | None:
-        total = supplied_sum(field)
-        if total is None or not supplied_manpower_days:
-            return None
-        return round(total / len(supplied_manpower_days), 2)
-
-    headcount_complete = (
-        bool(expected)
-        and not missing
-        and len(supplied_manpower_days) == len(daily_manpower)
+def _supplied_manpower_sum(
+    supplied_days: list[dict[str, Any]],
+    field: str,
+) -> float | None:
+    if not supplied_days:
+        return None
+    return round(
+        sum(float(day[field]) for day in supplied_days if day.get(field) is not None),
+        2,
     )
+
+
+def _supplied_manpower_average(
+    supplied_days: list[dict[str, Any]],
+    field: str,
+) -> float | None:
+    total = _supplied_manpower_sum(supplied_days, field)
+    if total is None or not supplied_days:
+        return None
+    return round(total / len(supplied_days), 2)
+
+
+def _manpower_summary(
+    daily_manpower: list[dict[str, Any]],
+    *,
+    expected: list[str],
+    covered: list[str],
+    missing: list[str],
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Build manpower totals, coverage, and identity-review metadata."""
+    supplied_days = [day for day in daily_manpower if day.get("supplied")]
+    supplied_dates = [day["date"] for day in supplied_days]
+    not_supplied_dates = [day["date"] for day in daily_manpower if not day.get("supplied")]
+    headcount_complete = bool(expected) and not missing and len(supplied_days) == len(daily_manpower)
     hours_complete = (
         headcount_complete
-        and bool(supplied_manpower_days)
-        and all(day["hours_complete"] for day in supplied_manpower_days)
+        and bool(supplied_days)
+        and all(day["hours_complete"] for day in supplied_days)
     )
     peak_values = [
         int(day["total_headcount"])
-        for day in supplied_manpower_days
+        for day in supplied_days
         if day.get("total_headcount") is not None
     ]
-    manpower_identity_review = [
+    identity_review = [
         {"date": day["date"], **row}
         for day in daily_manpower
         for row in day.get("identity_review", [])
         if isinstance(row, Mapping)
     ]
-    manpower_totals = {
-        "direct_person_days": supplied_sum("direct_headcount"),
-        "indirect_person_days": supplied_sum("indirect_headcount"),
-        "total_person_days": supplied_sum("total_headcount"),
-        "direct_man_hours": supplied_sum("direct_man_hours"),
-        "indirect_man_hours": supplied_sum("indirect_man_hours"),
-        "total_man_hours": supplied_sum("total_man_hours"),
-        "known_direct_man_hours": supplied_sum("direct_man_hours"),
-        "known_indirect_man_hours": supplied_sum("indirect_man_hours"),
-        "known_total_man_hours": supplied_sum("total_man_hours"),
+    totals = {
+        "direct_person_days": _supplied_manpower_sum(supplied_days, "direct_headcount"),
+        "indirect_person_days": _supplied_manpower_sum(supplied_days, "indirect_headcount"),
+        "total_person_days": _supplied_manpower_sum(supplied_days, "total_headcount"),
+        "direct_man_hours": _supplied_manpower_sum(supplied_days, "direct_man_hours"),
+        "indirect_man_hours": _supplied_manpower_sum(supplied_days, "indirect_man_hours"),
+        "total_man_hours": _supplied_manpower_sum(supplied_days, "total_man_hours"),
+        "known_direct_man_hours": _supplied_manpower_sum(supplied_days, "direct_man_hours"),
+        "known_indirect_man_hours": _supplied_manpower_sum(supplied_days, "indirect_man_hours"),
+        "known_total_man_hours": _supplied_manpower_sum(supplied_days, "total_man_hours"),
         "peak_headcount": max(peak_values) if peak_values else None,
-        "average_daily_direct_headcount": supplied_average("direct_headcount"),
-        "average_daily_indirect_headcount": supplied_average("indirect_headcount"),
-        "average_daily_headcount": supplied_average("total_headcount"),
+        "average_daily_direct_headcount": _supplied_manpower_average(
+            supplied_days, "direct_headcount"
+        ),
+        "average_daily_indirect_headcount": _supplied_manpower_average(
+            supplied_days, "indirect_headcount"
+        ),
+        "average_daily_headcount": _supplied_manpower_average(
+            supplied_days, "total_headcount"
+        ),
         "average_headcount_denominator": "manpower_supplied_days",
-        "manpower_supplied_day_count": len(supplied_manpower_days),
-        "manpower_not_supplied_day_count": len(manpower_not_supplied_dates),
+        "manpower_supplied_day_count": len(supplied_days),
+        "manpower_not_supplied_day_count": len(not_supplied_dates),
         "covered_daily_report_count": len(daily_manpower),
         "expected_day_count": len(expected),
         "headcount_complete": headcount_complete,
@@ -1421,14 +1609,14 @@ def aggregate_monthly_records(
             int(day.get("cross_category_duplicate_count") or 0) for day in daily_manpower
         ),
         "identity_review_required": any(
-            row.get("severity") == "warning" for row in manpower_identity_review
+            row.get("severity") == "warning" for row in identity_review
         ),
     }
-    manpower_coverage = {
+    coverage = {
         "expected_dates": list(expected),
         "daily_report_covered_dates": list(covered),
         "missing_daily_report_dates": list(missing),
-        "supplied_dates": manpower_supplied_dates,
+        "supplied_dates": supplied_dates,
         "reported_dates": [
             day["date"] for day in daily_manpower if day.get("manpower_status") == "reported"
         ],
@@ -1437,11 +1625,116 @@ def aggregate_monthly_records(
             for day in daily_manpower
             if day.get("manpower_status") == "none_reported"
         ],
-        "not_supplied_dates": manpower_not_supplied_dates,
-        "supplied_day_count": len(supplied_manpower_days),
+        "not_supplied_dates": not_supplied_dates,
+        "supplied_day_count": len(supplied_days),
         "headcount_complete": headcount_complete,
         "hours_complete": hours_complete,
     }
+    return totals, coverage, identity_review
+
+
+def _work_hours_method(policy: Mapping[str, Any]) -> str:
+    if policy["mode"] == "elapsed_less_break":
+        return (
+            "explicit man_hours takes precedence; otherwise use elapsed shift range minus "
+            f"{policy['break_minutes']:g} break minute(s) when elapsed time is at least "
+            f"{policy['deduct_when_elapsed_gte_minutes']:g} minute(s); exact employee IDs take identity "
+            "precedence, followed only by exact normalized names; no fuzzy identity merge is used"
+        )
+    return (
+        "explicit man_hours takes precedence; otherwise use elapsed shift range without "
+        "break deduction; exact employee IDs take identity precedence, followed only by exact "
+        "normalized names; same-day direct/area assignment takes category precedence and the "
+        "authoritative or longest supplied shift is retained; no fuzzy identity merge is used"
+    )
+
+
+def aggregate_monthly_records(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    date_from: str,
+    date_to: str,
+    project_no: str | None = None,
+    project_title: str | None = None,
+    expected_dates: Iterable[str] | None = None,
+    work_hours_policy: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Aggregate canonical records for one project and inclusive date range.
+
+    When several revisions exist for a date, the highest revision wins; its
+    generated timestamp and report ID are deterministic tie-breakers.
+    """
+
+    date_from = _iso_date(date_from, "date_from")
+    date_to = _iso_date(date_to, "date_to")
+    if date_from > date_to:
+        raise ValueError("date_from cannot be after date_to.")
+    effective_hours_policy = _normalise_work_hours_policy(work_hours_policy)
+    (
+        selected,
+        ignored_invalid,
+        duplicate_dates,
+        superseded_records,
+    ) = _select_period_records(
+        records,
+        date_from=date_from,
+        date_to=date_to,
+        project_no=project_no,
+        project_title=project_title,
+    )
+    expected, covered, missing, extra = _period_coverage(
+        selected,
+        date_from=date_from,
+        date_to=date_to,
+        expected_dates=expected_dates,
+    )
+
+    facts = _collect_period_facts(
+        selected,
+        work_hours_policy=effective_hours_policy,
+    )
+    constraint_register_source = list(facts.constraints)
+    activities = _dedupe_entries(facts.activities, "date", "area", "description")
+    constraints = [
+        row
+        for row in _dedupe_entries(facts.constraints, "date", "area", "text")
+        if not _is_no_constraint_text(row.get("text"))
+    ]
+    remarks = _dedupe_entries(facts.remarks, "date", "area", "text")
+
+    activities_by_area, activities_by_reporting_area = _activity_indexes(activities)
+    planned_next_week, planned_next_month = _append_top_level_lookahead(
+        selected,
+        facts.planned_next_week,
+        facts.planned_next_month,
+    )
+    tomorrow_activities = _latest_tomorrow_activities(selected)
+    last_report_date = covered[-1] if covered else None
+
+    constraint_reporting = {
+        "daily": facts.constraint_daily,
+        "none_reported_dates": [
+            row["date"]
+            for row in facts.constraint_daily
+            if row["status"] == "none_reported"
+        ],
+        "reported_dates": [
+            row["date"] for row in facts.constraint_daily if row["status"] == "reported"
+        ],
+        "not_supplied_dates": [
+            row["date"]
+            for row in facts.constraint_daily
+            if row["status"] == "not_supplied"
+        ],
+    }
+
+    roles = _role_totals(facts.role_rows)
+    manpower_totals, manpower_coverage, manpower_identity_review = _manpower_summary(
+        facts.daily_manpower,
+        expected=expected,
+        covered=covered,
+        missing=missing,
+    )
 
     if selected:
         latest_payload = _payload(selected[-1][1])
@@ -1464,20 +1757,7 @@ def aggregate_monthly_records(
         for report_date, record in selected
     ]
     constraints_register = _constraint_register(constraint_register_source)
-    if effective_hours_policy["mode"] == "elapsed_less_break":
-        hours_method = (
-            "explicit man_hours takes precedence; otherwise use elapsed shift range minus "
-            f"{effective_hours_policy['break_minutes']:g} break minute(s) when elapsed time is at least "
-            f"{effective_hours_policy['deduct_when_elapsed_gte_minutes']:g} minute(s); exact employee IDs take identity "
-            "precedence, followed only by exact normalized names; no fuzzy identity merge is used"
-        )
-    else:
-        hours_method = (
-            "explicit man_hours takes precedence; otherwise use elapsed shift range without "
-            "break deduction; exact employee IDs take identity precedence, followed only by exact "
-            "normalized names; same-day direct/area assignment takes category precedence and the "
-            "authoritative or longest supplied shift is retained; no fuzzy identity merge is used"
-        )
+    hours_method = _work_hours_method(effective_hours_policy)
 
     return {
         "schema_version": 1,
@@ -1516,10 +1796,10 @@ def aggregate_monthly_records(
         "constraints": constraints,
         "constraint_register": constraints_register,
         "remarks": remarks,
-        "weather": weather_daily,
+        "weather": facts.weather_daily,
         "constraint_reporting": constraint_reporting,
         "manpower": {
-            "daily": daily_manpower,
+            "daily": facts.daily_manpower,
             "totals": manpower_totals,
             "roles": roles,
             "coverage": manpower_coverage,
