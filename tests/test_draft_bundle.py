@@ -97,6 +97,52 @@ class DraftBundleTests(unittest.TestCase):
             ]
             self.assertEqual(len(bundled_names), 1)
 
+    def test_signature_is_portable_across_export_and_import(self):
+        report = _report()
+        report['sign_offs'] = [{
+            'label': 'Prepared By',
+            'name': 'Tester',
+            'role': 'Engineer',
+            'sig': '',
+            'sig_filename': 'signature.jpg',
+        }]
+
+        with tempfile.TemporaryDirectory() as source_dir:
+            with open(os.path.join(source_dir, 'signature.jpg'), 'wb') as output:
+                output.write(_image_bytes('JPEG', size=(500, 180)))
+            with patch(
+                'daily_report_app.get_temp_photos_dir',
+                return_value=source_dir,
+            ):
+                exported = self.client.post('/export_draft_bundle', json=report)
+
+        self.assertEqual(exported.status_code, 200)
+        self.assertEqual(exported.headers['X-Draft-Signature-Count'], '1')
+        self.assertEqual(exported.headers['X-Draft-Missing-Signatures'], '0')
+
+        bundle = io.BytesIO(exported.data)
+        with tempfile.TemporaryDirectory() as target_dir:
+            with patch(
+                'daily_report_app.get_temp_photos_dir',
+                return_value=target_dir,
+            ):
+                imported = self.client.post(
+                    '/import_draft_bundle',
+                    data={'file': (bundle, 'signature-draft.zip')},
+                    content_type='multipart/form-data',
+                )
+
+            self.assertEqual(imported.status_code, 200)
+            payload = imported.get_json()
+            self.assertEqual(payload['imported_signatures'], 1)
+            self.assertEqual(payload['missing_signatures'], [])
+            sign_off = payload['data']['sign_offs'][0]
+            self.assertEqual(sign_off['sig'], '')
+            self.assertRegex(sign_off['sig_filename'], r'^[a-f0-9]{32}\.jpg$')
+            self.assertTrue(
+                os.path.isfile(os.path.join(target_dir, sign_off['sig_filename']))
+            )
+
     def test_import_zip_compresses_photo_and_rewrites_reference(self):
         report = _report({
             'img_data': '',

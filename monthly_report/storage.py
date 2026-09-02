@@ -30,6 +30,8 @@ _DATA_URI_BASE64 = re.compile(
 )
 _PLAIN_BASE64 = re.compile(r"^[A-Za-z0-9+/\r\n]+={0,2}$")
 _DROP_INLINE_KEYS = {"img_data", "image_data", "signature_data"}
+_DROP_PATH_KEYS = {"photo_path", "sig_path", "_photo_path", "_sig_path"}
+_MEDIA_FILENAME_KEYS = ("photo_filename", "sig_filename")
 
 
 def _safe_component(value: Any, label: str) -> str:
@@ -225,14 +227,16 @@ class _Sanitizer:
                 if key in _DROP_INLINE_KEYS or _is_inline_base64(raw_value, key=key):
                     continue
                 # Filesystem paths are accepted only through trusted function args.
-                if key == "photo_path":
+                if key in _DROP_PATH_KEYS:
                     continue
                 cleaned[key] = self.clean(raw_value)
 
-            if "photo_filename" in value:
-                filename = _safe_photo_filename(value.get("photo_filename"))
+            for filename_key in _MEDIA_FILENAME_KEYS:
+                if filename_key not in value:
+                    continue
+                filename = _safe_photo_filename(value.get(filename_key))
                 if filename:
-                    cleaned["photo_filename"] = filename
+                    cleaned[filename_key] = filename
                     source = self._photo_source(filename)
                     if source is not None:
                         asset = _copy_hashed_asset(source, self.canonical_dir / "assets")
@@ -357,8 +361,8 @@ def archive_final_daily_record(
     """Archive an immutable canonical JSON record for a generated daily report.
 
     Inline base64 images/signatures are removed.  If ``photo_base_dir`` or a
-    ``photo_paths`` mapping is supplied, referenced photos are copied once to a
-    content-addressed asset directory and their hashes are recorded.
+    ``photo_paths`` mapping is supplied, referenced photos and signatures are
+    copied once to a content-addressed asset directory and hashed.
     """
 
     if not isinstance(payload, Mapping):

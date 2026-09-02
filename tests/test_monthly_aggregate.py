@@ -142,6 +142,37 @@ class CanonicalDailyStorageTests(unittest.TestCase):
                     },
                 )
 
+    def test_archive_hashes_filename_based_signature_media(self):
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as media_dir:
+            signature_bytes = b'stable-signature-test-bytes'
+            signature_path = Path(media_dir, 'prepared-signature.jpg')
+            signature_path.write_bytes(signature_bytes)
+            payload = {
+                'date': '2026-07-31',
+                'project_no': 'P-001',
+                'project_title': 'Reactivation',
+                'areas': [],
+                'sign_offs': [{
+                    'label': 'Prepared By',
+                    'sig': '',
+                    'sig_filename': signature_path.name,
+                }],
+            }
+
+            record = archive_final_daily_record(
+                temp_dir,
+                'nafis',
+                payload,
+                photo_paths={signature_path.name: signature_path},
+            )
+
+        sign_off = record['payload']['sign_offs'][0]
+        self.assertEqual(sign_off['sig_filename'], signature_path.name)
+        self.assertEqual(
+            sign_off['asset']['sha256'],
+            hashlib.sha256(signature_bytes).hexdigest(),
+        )
+
     def test_revisions_are_automatic_and_records_remain_immutable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             payload = {

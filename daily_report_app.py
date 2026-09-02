@@ -637,7 +637,8 @@ def _prepare_pdf_photo(raw, target_width, target_height):
     render_width = 720
     render_height = max(1, round(render_width * target_height / target_width))
 
-    with Image.open(io.BytesIO(raw)) as source:
+    image_source = io.BytesIO(raw) if isinstance(raw, (bytes, bytearray)) else raw
+    with Image.open(image_source) as source:
         source.load()
         oriented = ImageOps.exif_transpose(source)
         fitted = ImageOps.fit(
@@ -657,6 +658,43 @@ def _prepare_pdf_photo(raw, target_width, target_height):
 
         output = io.BytesIO()
         fitted.save(output, format='JPEG', quality=88, optimize=True)
+        output.seek(0)
+        return output
+
+
+def _decode_pdf_data_uri(value, max_bytes):
+    """Decode a legacy image data URI without allowing an unbounded allocation."""
+    if not isinstance(value, str) or ',' not in value:
+        return None
+    encoded = value.split(',', 1)[1]
+    if len(encoded) > ((max_bytes + 2) // 3) * 4 + 4:
+        return None
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    return decoded if len(decoded) <= max_bytes else None
+
+
+def _prepare_pdf_signature(source_data):
+    """Normalize a signature into a small RGB raster before ReportLab embeds it."""
+    image_source = (
+        io.BytesIO(source_data)
+        if isinstance(source_data, (bytes, bytearray))
+        else source_data
+    )
+    with Image.open(image_source) as source:
+        source.load()
+        oriented = ImageOps.exif_transpose(source)
+        oriented.thumbnail((1200, 600), Image.Resampling.LANCZOS)
+        if oriented.mode in ('RGBA', 'LA') or 'transparency' in oriented.info:
+            rgba = oriented.convert('RGBA')
+            normalized = Image.new('RGB', rgba.size, 'white')
+            normalized.paste(rgba, mask=rgba.getchannel('A'))
+        else:
+            normalized = oriented.convert('RGB')
+        output = io.BytesIO()
+        normalized.save(output, format='JPEG', quality=88, optimize=True)
         output.seek(0)
         return output
 
@@ -759,15 +797,25 @@ def _pdf_activity_cell(lines, label, styles):
     return parts
 
 
-def _pdf_signature_cell(signature_data, column_width):
-    """Decode one optional signature image, falling back to an empty cell."""
-    if signature_data and ',' in signature_data:
+def _pdf_signature_source_cell(source_data, column_width):
+    """Render one trusted path or bounded byte source as a signature cell."""
+    if source_data:
         try:
-            image = io.BytesIO(base64.b64decode(signature_data.split(',')[1]))
-            return RLImage(image, width=min(column_width - 10*mm, 42*mm), height=20*mm)
+            image = _prepare_pdf_signature(source_data)
+            return RLImage(
+                image,
+                width=min(column_width - 10*mm, 42*mm),
+                height=20*mm,
+            )
         except Exception:
             pass
     return Spacer(1, 20*mm)
+
+
+def _pdf_signature_cell(signature_data, column_width):
+    """Decode one legacy inline signature, falling back to an empty cell."""
+    source = _decode_pdf_data_uri(signature_data, PHOTO_MAX_INPUT_BYTES)
+    return _pdf_signature_source_cell(source, column_width)
 
 
 def _overall_progress_text_styles(white):
@@ -1002,7 +1050,11 @@ def _pdf_sign_off_rows(sign_offs, styles, column_width):
             for item in sign_offs
         ],
         [
-            _pdf_signature_cell(item.get('sig', ''), column_width)
+            (
+                _pdf_signature_source_cell(item.get('_sig_path'), column_width)
+                if item.get('_sig_path')
+                else _pdf_signature_cell(item.get('sig', ''), column_width)
+            )
             for item in sign_offs
         ],
         [Paragraph('_' * 22, styles['body_s']) for item in sign_offs],
@@ -1069,13 +1121,23 @@ def _build_sign_off_flowables(
 
 def _pdf_photo_image(image_data, box_width, box_height, photo_inset):
     """Decode and crop one optional photo for a documentation card."""
-    if not image_data or ',' not in image_data:
+    source = _decode_pdf_data_uri(image_data, PHOTO_MAX_INPUT_BYTES)
+    return _pdf_photo_source_image(
+        source,
+        box_width,
+        box_height,
+        photo_inset,
+    )
+
+
+def _pdf_photo_source_image(source, box_width, box_height, photo_inset):
+    """Crop one trusted path or bounded byte source for a photo card."""
+    if not source:
         return ''
     try:
-        raw_photo = base64.b64decode(image_data.split(',')[1])
         photo_width = box_width - 4*mm - 2*photo_inset
         photo_height = box_height - 2*photo_inset
-        image_bytes = _prepare_pdf_photo(raw_photo, photo_width, photo_height)
+        image_bytes = _prepare_pdf_photo(source, photo_width, photo_height)
         return RLImage(
             image_bytes,
             width=photo_width,
@@ -1100,11 +1162,20 @@ def _pdf_photo_card_content(
     return (
         Paragraph(f'<b>{_esc(card_title)}</b>', styles['sm_s']),
         Paragraph(_esc(description), styles['ital_s']),
-        _pdf_photo_image(
-            photo.get('img_data', ''),
-            box_width,
-            box_height,
-            photo_inset,
+        (
+            _pdf_photo_source_image(
+                photo.get('_photo_path'),
+                box_width,
+                box_height,
+                photo_inset,
+            )
+            if photo.get('_photo_path')
+            else _pdf_photo_image(
+                photo.get('img_data', ''),
+                box_width,
+                box_height,
+                photo_inset,
+            )
         ),
     )
 
@@ -2104,9 +2175,35 @@ app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'gpa-daily-report-s3cr3t-2026')
 _REPORT_PDF_MAX_FILE_BYTES = MONTHLY_PDF_IMPORT_LIMITS.max_bytes
 _REPORT_UPLOAD_REQUEST_BYTES = _REPORT_PDF_MAX_FILE_BYTES + (2 * 1024 * 1024)
+
+
+def _positive_env_bytes(name, default):
+    """Read a positive byte limit while keeping a safe default for bad env values."""
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+DAILY_SAVE_DRAFT_MAX_BYTES = _positive_env_bytes(
+    'DAILY_SAVE_DRAFT_MAX_BYTES',
+    32 * 1024 * 1024,
+)
+DAILY_GENERATE_MAX_BYTES = _positive_env_bytes(
+    'DAILY_GENERATE_MAX_BYTES',
+    48 * 1024 * 1024,
+)
+DAILY_PREVIEW_MAX_BYTES = _positive_env_bytes(
+    'DAILY_PREVIEW_MAX_BYTES',
+    48 * 1024 * 1024,
+)
 app.config['MAX_CONTENT_LENGTH'] = max(
-    int(os.environ.get('MAX_UPLOAD_BYTES', _REPORT_UPLOAD_REQUEST_BYTES)),
+    _positive_env_bytes('MAX_UPLOAD_BYTES', _REPORT_UPLOAD_REQUEST_BYTES),
     _REPORT_UPLOAD_REQUEST_BYTES,
+    DAILY_SAVE_DRAFT_MAX_BYTES,
+    DAILY_GENERATE_MAX_BYTES,
+    DAILY_PREVIEW_MAX_BYTES,
 )
 
 
@@ -2122,6 +2219,28 @@ def request_entity_too_large(_error):
     if request.path in ('/export_draft_bundle', '/import_draft_bundle'):
         return jsonify({'error': 'Draft bundle exceeds the 50 MB upload limit.'}), 413
     return jsonify({'error': 'Request is too large.'}), 413
+
+
+def _daily_json_request(max_bytes, endpoint_name):
+    """Reject oversized Daily JSON before Flask reads and decodes its body."""
+    content_length = request.content_length
+    if content_length is not None and content_length > max_bytes:
+        max_mb = max_bytes / (1024 * 1024)
+        return None, (
+            jsonify({
+                'error': (
+                    f'{endpoint_name} JSON payload is too large '
+                    f'(maximum {max_mb:g} MB). Upload photos/signatures first '
+                    'and send their filenames.'
+                ),
+                'max_bytes': max_bytes,
+            }),
+            413,
+        )
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return None, (jsonify({'error': 'Invalid report data'}), 400)
+    return payload, None
 
 SCRIPT_DIR        = os.path.dirname(os.path.abspath(__file__))
 # Keep mutable data outside the deployed source when DATA_DIR is configured.
@@ -2159,6 +2278,48 @@ def _atomic_write_json(path, value, *, ensure_ascii=True, indent=None):
     try:
         with open(temporary_path, 'w', encoding='utf-8') as handle:
             json.dump(value, handle, ensure_ascii=ensure_ascii, indent=indent)
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
+
+
+def _atomic_write_text(path, serialized):
+    """Replace one UTF-8 file only after its full contents reach disk."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    temporary_path = os.path.join(
+        directory,
+        f'.{os.path.basename(path)}.{uuid.uuid4().hex}.tmp',
+    )
+    try:
+        with open(temporary_path, 'x', encoding='utf-8') as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
+
+
+def _atomic_write_bytes(path, contents):
+    """Publish media bytes atomically so readers never see a partial image."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    temporary_path = os.path.join(
+        directory,
+        f'.{os.path.basename(path)}.{uuid.uuid4().hex}.tmp',
+    )
+    try:
+        with open(temporary_path, 'xb') as handle:
+            handle.write(contents)
         os.replace(temporary_path, path)
     finally:
         if os.path.exists(temporary_path):
@@ -3356,6 +3517,17 @@ def _iter_report_photos(report):
                 yield area_name, photo_index, photo
 
 
+def _iter_report_signatures(report):
+    """Yield mutable sign-off rows while preserving legacy report structures."""
+    sign_offs = report.get('sign_offs', []) if isinstance(report, dict) else []
+    if not isinstance(sign_offs, list):
+        return
+    for sign_index, sign_off in enumerate(sign_offs):
+        if isinstance(sign_off, dict):
+            label = str(sign_off.get('label') or f'Sign-off {sign_index + 1}')
+            yield label, sign_index, sign_off
+
+
 def _decode_photo_data_url(value):
     """Decode a legacy inline image while enforcing the normal photo limit."""
     if not isinstance(value, str) or ',' not in value:
@@ -3449,6 +3621,35 @@ def _prepare_photo_for_draft_bundle(
     return True, ''
 
 
+def _prepare_signature_for_draft_bundle(
+    sign_off,
+    temp_dir,
+    bundled_photos,
+    digest_names,
+):
+    """Rewrite one valid signature to the same portable media bundle."""
+    media = {
+        'img_data': sign_off.get('sig'),
+        'photo_filename': sign_off.get('sig_filename'),
+    }
+    raw, reason = _read_photo_for_draft_export(media, temp_dir)
+    if raw is None:
+        return False, reason.replace('Photo', 'Signature').replace('photo', 'signature')
+
+    bundle_name, reason = _store_photo_in_draft_bundle(
+        raw,
+        bundled_photos,
+        digest_names,
+    )
+    if bundle_name is None:
+        return False, reason
+
+    sign_off['sig_filename'] = bundle_name
+    sign_off['sig'] = ''
+    sign_off.pop('signature_missing', None)
+    return True, ''
+
+
 def _write_draft_bundle(portable, manifest, bundled_photos):
     """Serialize draft JSON, manifest, and prepared photos into one ZIP stream."""
     output = io.BytesIO()
@@ -3468,7 +3669,7 @@ def _write_draft_bundle(portable, manifest, bundled_photos):
 
 
 def _build_draft_bundle(report, username):
-    """Create a portable ZIP payload containing report.json and its photos."""
+    """Create a portable ZIP containing report JSON, photos, and signatures."""
     if not isinstance(report, dict):
         raise ValueError('Invalid report data')
 
@@ -3477,6 +3678,9 @@ def _build_draft_bundle(report, username):
     bundled_photos = {}
     digest_names = {}
     missing = []
+    bundled_photo_names = set()
+    bundled_signature_names = set()
+    missing_signatures = []
 
     for area_name, photo_index, photo in _iter_report_photos(portable):
         filename = str(photo.get('photo_filename') or '')
@@ -3488,6 +3692,7 @@ def _build_draft_bundle(report, username):
             digest_names,
         )
         if prepared:
+            bundled_photo_names.add(photo['photo_filename'])
             continue
 
         if filename or inline:
@@ -3500,12 +3705,36 @@ def _build_draft_bundle(report, username):
             # Preserve the original reference so no legacy report data is silently lost.
             photo['photo_missing'] = True
 
+    for label, sign_index, sign_off in _iter_report_signatures(portable):
+        filename = str(sign_off.get('sig_filename') or '')
+        inline = sign_off.get('sig')
+        prepared, reason = _prepare_signature_for_draft_bundle(
+            sign_off,
+            temp_dir,
+            bundled_photos,
+            digest_names,
+        )
+        if prepared:
+            bundled_signature_names.add(sign_off['sig_filename'])
+            continue
+
+        if filename or inline:
+            missing_signatures.append({
+                'label': label,
+                'signature': sign_index + 1,
+                'filename': filename,
+                'reason': reason or 'Signature data is unavailable',
+            })
+            sign_off['signature_missing'] = True
+
     manifest = {
         'format': 'gpa-daily-report-bundle',
         'version': 1,
         'created_at': datetime.now().isoformat(timespec='seconds'),
-        'photo_count': len(bundled_photos),
+        'photo_count': len(bundled_photo_names),
         'missing_photos': missing,
+        'signature_count': len(bundled_signature_names),
+        'missing_signatures': missing_signatures,
     }
     return _write_draft_bundle(portable, manifest, bundled_photos), manifest
 
@@ -3752,8 +3981,24 @@ def _restore_imported_photo(photo, raw, source_key, prepared):
     return True, ''
 
 
+def _restore_imported_signature(sign_off, raw, source_key, prepared):
+    """Rewrite one imported signature after compression and deduplication."""
+    imported_filename, reason = _prepare_imported_photo(
+        raw,
+        source_key,
+        prepared,
+    )
+    if imported_filename is None:
+        return False, reason
+
+    sign_off['sig_filename'] = imported_filename
+    sign_off['sig'] = ''
+    sign_off.pop('signature_missing', None)
+    return True, ''
+
+
 def _import_draft_photos(report, username, archive=None, members=None):
-    """Store imported photos for the current user and rewrite their references."""
+    """Store imported photos/signatures and rewrite their local references."""
     imported = copy.deepcopy(report)
     temp_dir = get_temp_photos_dir(username)
     members = members or {}
@@ -3761,6 +4006,8 @@ def _import_draft_photos(report, username, archive=None, members=None):
     missing = []
     source_cache = {}
     restored_count = 0
+    restored_signature_count = 0
+    missing_signatures = []
 
     for area_name, photo_index, photo in _iter_report_photos(imported):
         filename = str(photo.get('photo_filename') or '')
@@ -3796,9 +4043,51 @@ def _import_draft_photos(report, username, archive=None, members=None):
             ))
             photo['photo_missing'] = True
 
+    for label, sign_index, sign_off in _iter_report_signatures(imported):
+        filename = str(sign_off.get('sig_filename') or '')
+        inline = sign_off.get('sig')
+        raw, source_key, reason = _resolve_imported_photo_source(
+            archive,
+            members,
+            temp_dir,
+            filename,
+            inline,
+            source_cache,
+        )
+
+        if raw is not None:
+            restored, import_reason = _restore_imported_signature(
+                sign_off,
+                raw,
+                source_key,
+                prepared,
+            )
+            if import_reason:
+                reason = import_reason
+            if restored:
+                restored_signature_count += 1
+                continue
+
+        if filename or inline:
+            if reason:
+                reason = reason.replace('Photo', 'Signature').replace('photo', 'signature')
+            missing_signatures.append({
+                'label': label,
+                'signature': sign_index + 1,
+                'filename': filename,
+                'reason': reason or 'Signature data is unavailable',
+            })
+            sign_off['signature_missing'] = True
+
     _write_imported_photos(prepared, temp_dir)
 
-    return imported, restored_count, missing
+    return (
+        imported,
+        restored_count,
+        missing,
+        restored_signature_count,
+        missing_signatures,
+    )
 
 
 @app.route('/export_draft_bundle', methods=['POST'])
@@ -3822,6 +4111,10 @@ def export_draft_bundle():
     )
     response.headers['X-Draft-Photo-Count'] = str(manifest['photo_count'])
     response.headers['X-Draft-Missing-Photos'] = str(len(manifest['missing_photos']))
+    response.headers['X-Draft-Signature-Count'] = str(manifest['signature_count'])
+    response.headers['X-Draft-Missing-Signatures'] = str(
+        len(manifest['missing_signatures'])
+    )
     return response
 
 
@@ -3834,7 +4127,13 @@ def import_draft_bundle():
     archive = None
     try:
         report, archive, members = _parse_uploaded_draft(upload)
-        imported, photo_count, missing = _import_draft_photos(
+        (
+            imported,
+            photo_count,
+            missing,
+            signature_count,
+            missing_signatures,
+        ) = _import_draft_photos(
             report,
             session['username'],
             archive=archive,
@@ -3853,27 +4152,36 @@ def import_draft_bundle():
         'data': imported,
         'imported_photos': photo_count,
         'missing_photos': missing,
+        'imported_signatures': signature_count,
+        'missing_signatures': missing_signatures,
     })
 
 def resolve_photos(d, username):
-    """Replace photo_filename references with actual base64 img_data for PDF generation."""
+    """Resolve uploaded media to private paths on an isolated render copy."""
+    resolved = copy.deepcopy(d)
     temp_dir = get_temp_photos_dir(username)
-    for area in d.get('areas', []):
+    for area in resolved.get('areas', []):
+        if not isinstance(area, dict):
+            continue
         for photo in area.get('photos', []):
+            if not isinstance(photo, dict):
+                continue
             if not photo.get('img_data') and photo.get('photo_filename'):
-                fname = photo['photo_filename']
-                if _SAFE_PHOTO.match(fname):
+                fname = str(photo['photo_filename'])
+                if _SAFE_PHOTO.fullmatch(fname):
                     fpath = os.path.join(temp_dir, fname)
                     if os.path.isfile(fpath):
-                        try:
-                            with open(fpath, 'rb') as f:
-                                raw = f.read()
-                            ext = fname.rsplit('.', 1)[-1].lower()
-                            mime = 'image/jpeg' if ext in ('jpg','jpeg') else f'image/{ext}'
-                            photo['img_data'] = f'data:{mime};base64,{base64.b64encode(raw).decode()}'
-                        except OSError:
-                            pass
-    return d
+                        photo['_photo_path'] = fpath
+    for sign_off in resolved.get('sign_offs', []):
+        if not isinstance(sign_off, dict):
+            continue
+        if not sign_off.get('sig') and sign_off.get('sig_filename'):
+            fname = str(sign_off['sig_filename'])
+            if _SAFE_PHOTO.fullmatch(fname):
+                fpath = os.path.join(temp_dir, fname)
+                if os.path.isfile(fpath):
+                    sign_off['_sig_path'] = fpath
+    return resolved
 
 
 def _store_temp_photo(raw, temp_dir):
@@ -3881,8 +4189,7 @@ def _store_temp_photo(raw, temp_dir):
     compressed = compress_photo_bytes(raw)
     filename = f'{uuid.uuid4().hex}.jpg'
     file_path = os.path.join(temp_dir, filename)
-    with open(file_path, 'wb') as handle:
-        handle.write(compressed)
+    _atomic_write_bytes(file_path, compressed)
     return {
         'ok': True,
         'photo_filename': filename,
@@ -3943,7 +4250,8 @@ def serve_temp_photo(filename):
 
 def _prepare_daily_pdf_download(payload, username):
     """Resolve report photos and render the PDF without changing archive data."""
-    # The PDF resolver embeds photos and mutates its input, so archive a copy.
+    # Archive the exact compact payload; the renderer receives an isolated copy
+    # with private paths that are never persisted in report JSON.
     canonical_payload = copy.deepcopy(payload)
     report = resolve_photos(payload, username)
     date_part = _safe_report_filename_part(report.get('date'), 'Report').replace(' ', '_')
@@ -3954,17 +4262,26 @@ def _prepare_daily_pdf_download(payload, username):
 
 
 def _collect_canonical_photo_paths(payload, username):
-    """Map safe temporary photo names to files used by the immutable archive."""
+    """Map safe temporary media names to files used by the immutable archive."""
     photo_paths = {}
     temp_photos_dir = get_temp_photos_dir(username)
+    filenames = []
     for area in payload.get('areas', []):
+        if not isinstance(area, dict):
+            continue
         for photo in area.get('photos', []):
-            photo_name = str(photo.get('photo_filename') or '')
-            if not _SAFE_PHOTO.match(photo_name):
-                continue
-            photo_path = os.path.join(temp_photos_dir, photo_name)
-            if os.path.isfile(photo_path):
-                photo_paths[photo_name] = photo_path
+            if isinstance(photo, dict):
+                filenames.append(photo.get('photo_filename'))
+    for sign_off in payload.get('sign_offs', []):
+        if isinstance(sign_off, dict):
+            filenames.append(sign_off.get('sig_filename'))
+    for raw_name in filenames:
+        photo_name = str(raw_name or '')
+        if not _SAFE_PHOTO.fullmatch(photo_name):
+            continue
+        photo_path = os.path.join(temp_photos_dir, photo_name)
+        if os.path.isfile(photo_path):
+            photo_paths[photo_name] = photo_path
     return photo_paths
 
 
@@ -4083,9 +4400,12 @@ def _daily_pdf_download_response(
 def generate():
     """Generate a Daily PDF while treating both local archives as best effort."""
     username = session['username']
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict):
-        return jsonify({'error': 'Invalid report data'}), 400
+    payload, error_response = _daily_json_request(
+        DAILY_GENERATE_MAX_BYTES,
+        'Generate',
+    )
+    if error_response:
+        return error_response
 
     try:
         canonical_payload, report, filename, pdf_buffer = (
@@ -4123,9 +4443,15 @@ def generate():
 @login_required
 def save_draft():
     username = session['username']
-    data = request.json
-    _atomic_write_json(get_draft_file(username), data)
-    save_draft_snapshot(username, data)
+    data, error_response = _daily_json_request(
+        DAILY_SAVE_DRAFT_MAX_BYTES,
+        'Save draft',
+    )
+    if error_response:
+        return error_response
+    serialized = json.dumps(data)
+    _atomic_write_text(get_draft_file(username), serialized)
+    save_draft_snapshot(username, serialized=serialized)
     log_activity(username, 'draft_saved', f"day={data.get('day_no','')} date={data.get('date','')}")
     ts = datetime.now().strftime('%H:%M')
     return jsonify({'ok':True, 'saved_at': ts})
@@ -4133,8 +4459,14 @@ def save_draft():
 @app.route('/preview', methods=['POST'])
 @login_required
 def preview():
+    payload, error_response = _daily_json_request(
+        DAILY_PREVIEW_MAX_BYTES,
+        'Preview',
+    )
+    if error_response:
+        return error_response
     try:
-        d = resolve_photos(request.json, session['username'])
+        d = resolve_photos(payload, session['username'])
         cfg = load_config()
         buf = generate_pdf(d, None, cfg)
         return send_file(buf, mimetype='application/pdf')
@@ -4378,12 +4710,26 @@ def log_activity(username, action, details=''):
 # ── Versioned draft snapshot ──────────────────────────────────────────────────
 _SNAPSHOT_FILENAME = re.compile(r'^\d{8}_\d{6}\.json$')
 
-def save_draft_snapshot(username, data):
+def save_draft_snapshot(username, data=None, *, serialized=None):
     snap_dir = os.path.join(get_user_dir(username), 'drafts')
     os.makedirs(snap_dir, exist_ok=True)
+    if serialized is None:
+        serialized = json.dumps(data)
+    snaps = sorted(
+        name for name in os.listdir(snap_dir)
+        if _SNAPSHOT_FILENAME.fullmatch(name)
+    )
+    if snaps:
+        latest_path = os.path.join(snap_dir, snaps[-1])
+        try:
+            with open(latest_path, encoding='utf-8') as latest:
+                if latest.read() == serialized:
+                    return False
+        except OSError:
+            pass
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     snap_file = os.path.join(snap_dir, f'{ts}.json')
-    _atomic_write_json(snap_file, data)
+    _atomic_write_text(snap_file, serialized)
     # Keep only last 20 snapshots
     snaps = sorted(
         name for name in os.listdir(snap_dir)
@@ -4394,6 +4740,7 @@ def save_draft_snapshot(username, data):
             os.remove(os.path.join(snap_dir, old))
         except OSError:
             pass
+    return True
 
 def get_draft_snapshots(username):
     snap_dir = os.path.join(get_user_dir(username), 'drafts')
