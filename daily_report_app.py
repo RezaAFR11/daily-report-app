@@ -3567,6 +3567,31 @@ def logo_status():
 ROMAN_MONTH = {1:'I',2:'II',3:'III',4:'IV',5:'V',6:'VI',
                7:'VII',8:'VIII',9:'IX',10:'X',11:'XI',12:'XII'}
 
+LETTER_DOCX_MIMETYPE = (
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+)
+LETTER_TYPE_LABELS = {
+    'pekerja': 'Permohonan Masuk Pekerja',
+    'alat_berat': 'Permohonan Alat Berat',
+    'sticker': 'Permohonan Sticker',
+    'phk': 'PHK',
+    'umum': 'Surat Umum',
+}
+
+
+def _normalize_letter_type(value):
+    """Use the general-letter behavior for unknown legacy/client values."""
+    letter_type = str(value or 'umum')
+    if letter_type == 'sp' or letter_type in LETTER_TYPE_LABELS:
+        return letter_type
+    return 'umum'
+
+
+def _letter_type_label(letter_type, data):
+    if letter_type == 'sp':
+        return f"SP{data.get('sp_level', '3')}"
+    return LETTER_TYPE_LABELS[letter_type]
+
 # ── Letter storage helpers ────────────────────────────────────────────────────
 def get_letters_dir(username):
     d = os.path.join(get_user_dir(username), 'letters')
@@ -3589,6 +3614,67 @@ def next_letter_seq():
     cfg['letter_seq_no'] = seq + 1
     save_config(cfg)
     return seq
+
+
+def _resolve_letter_storage_path(username, filename):
+    """Resolve a basename only when it remains inside the user's letter folder."""
+    filename = str(filename or '')
+    if not filename or filename != os.path.basename(filename):
+        return None
+
+    letters_dir = os.path.realpath(get_letters_dir(username))
+    candidate = os.path.realpath(os.path.join(letters_dir, filename))
+    try:
+        if os.path.commonpath([letters_dir, candidate]) != letters_dir:
+            return None
+    except ValueError:
+        return None
+    return candidate
+
+
+def get_owned_letter_path(username, filename):
+    """Resolve only a letter filename recorded in the current user's index."""
+    filename = str(filename or '')
+    candidate = _resolve_letter_storage_path(username, filename)
+    if candidate is None:
+        return None
+    if not any(
+        row.get('filename') == filename
+        for row in get_letters_index(username)
+    ):
+        return None
+    return candidate
+
+
+def archive_generated_letter(username, filename, document_bytes, entry):
+    """Atomically store a generated DOCX and then add its index entry."""
+    letter_path = _resolve_letter_storage_path(username, filename)
+    if letter_path is None:
+        raise ValueError('Unsafe letter filename')
+
+    temporary_path = f'{letter_path}.{uuid.uuid4().hex}.tmp'
+    try:
+        with open(temporary_path, 'wb') as output:
+            output.write(document_bytes)
+        os.replace(temporary_path, letter_path)
+    finally:
+        if os.path.exists(temporary_path):
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
+
+    indexed_entry = dict(entry)
+    indexed_entry['size_kb'] = round(len(document_bytes) / 1024, 1)
+    try:
+        append_letter_index(username, indexed_entry)
+    except Exception:
+        try:
+            os.remove(letter_path)
+        except OSError:
+            pass
+        raise
+    return letter_path
 
 # ── Activity log ──────────────────────────────────────────────────────────────
 def log_activity(username, action, details=''):
@@ -3934,7 +4020,7 @@ def _configure_letter_document(doc):
 
 def _render_letter_content(doc, d, cfg, seq_str, subject):
     """Dispatch letter data to the matching content generator."""
-    letter_type = d.get('letter_type', 'umum')
+    letter_type = _normalize_letter_type(d.get('letter_type'))
     if letter_type == 'sp':
         _gen_letter_sp(doc, d, cfg, seq_str)
         return
@@ -3972,6 +4058,25 @@ def generate_letter_docx(d, cfg):
     buf.seek(0)
     return buf, seq_str
 
+
+def _build_letter_archive_metadata(data, seq_str):
+    """Build a safe filename and index row for one generated letter."""
+    letter_type = _normalize_letter_type(data.get('letter_type'))
+    type_label = _letter_type_label(letter_type, data)
+    safe_sequence = _safe_report_filename_part(seq_str, 'letter')
+    safe_label = _safe_report_filename_part(type_label, 'Surat Umum')
+    filename = f'{safe_sequence}_{safe_label}.docx'
+    entry = {
+        'filename': filename,
+        'type': letter_type,
+        'type_label': type_label,
+        'subject': data.get('subject', type_label),
+        'seq_str': seq_str,
+        'date': data.get('date', ''),
+        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
+    }
+    return filename, entry
+
 # ── Letter routes ─────────────────────────────────────────────────────────────
 @app.route('/letters')
 @login_required
@@ -3990,71 +4095,82 @@ def letters_page():
 @login_required
 def generate_letter():
     if not DOCX_OK:
-        return jsonify({'error':'python-docx not installed. Run: pip install python-docx'}), 500
+        return jsonify({
+            'error': 'python-docx not installed. Run: pip install python-docx',
+        }), 500
+
     username = session['username']
-    d        = request.json
-    cfg      = load_config()
-    d.setdefault('date', datetime.now().strftime('%d %B %Y'))
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Invalid letter data'}), 400
+
+    data.setdefault('date', datetime.now().strftime('%d %B %Y'))
     try:
-        buf, seq_str = generate_letter_docx(d, cfg)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    letter_type = d.get('letter_type','umum')
-    type_labels = {
-        'pekerja':   'Permohonan Masuk Pekerja',
-        'alat_berat':'Permohonan Alat Berat',
-        'sticker':   'Permohonan Sticker',
-        'sp':        f"SP{d.get('sp_level','3')}",
-        'phk':       'PHK',
-        'umum':      'Surat Umum',
-    }
-    type_label = type_labels.get(letter_type, letter_type)
-    subject    = d.get('subject', type_label)
-    safe_seq   = seq_str.replace('/','-')
-    fname      = f"{safe_seq}_{type_label}.docx"
-    ldir  = get_letters_dir(username)
-    fpath = os.path.join(ldir, fname)
-    with open(fpath, 'wb') as output:
-        output.write(buf.getvalue())
-    append_letter_index(username, {
-        'filename':     fname,
-        'type':         letter_type,
-        'type_label':   type_label,
-        'subject':      subject,
-        'seq_str':      seq_str,
-        'date':         d.get('date',''),
-        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
-        'size_kb':      round(os.path.getsize(fpath)/1024, 1),
-    })
-    log_activity(username, 'letter_generated', f'{type_label} - {seq_str}')
-    buf.seek(0)
-    return send_file(buf, as_attachment=True, download_name=fname,
-        mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+        document, seq_str = generate_letter_docx(data, load_config())
+        filename, entry = _build_letter_archive_metadata(data, seq_str)
+        archive_generated_letter(
+            username,
+            filename,
+            document.getvalue(),
+            entry,
+        )
+    except Exception as exc:
+        app.logger.exception('Could not generate letter for user %s', username)
+        return jsonify({'error': str(exc)}), 500
+
+    log_activity(
+        username,
+        'letter_generated',
+        f"{entry['type_label']} - {seq_str}",
+    )
+    document.seek(0)
+    return send_file(
+        document,
+        as_attachment=True,
+        download_name=filename,
+        mimetype=LETTER_DOCX_MIMETYPE,
+    )
 
 @app.route('/letters/download/<path:filename>')
 @login_required
 def download_letter(filename):
     username = session['username']
-    fpath = os.path.join(get_letters_dir(username), filename)
-    if not os.path.isfile(fpath):
+    letter_path = get_owned_letter_path(username, filename)
+    if not letter_path or not os.path.isfile(letter_path):
         return 'Not found', 404
-    return send_file(fpath, as_attachment=True, download_name=filename,
-        mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    return send_file(
+        letter_path,
+        as_attachment=True,
+        download_name=os.path.basename(filename),
+        mimetype=LETTER_DOCX_MIMETYPE,
+    )
 
 @app.route('/letters/delete', methods=['POST'])
 @login_required
 def delete_letter():
     username = session['username']
-    fname = request.json.get('filename','')
-    fpath = os.path.join(get_letters_dir(username), fname)
-    if os.path.isfile(fpath): os.remove(fpath)
-    letters = [l for l in get_letters_index(username) if l.get('filename') != fname]
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Invalid letter data'}), 400
+
+    filename = str(data.get('filename') or '').strip()
+    letter_path = get_owned_letter_path(username, filename)
+    if not letter_path:
+        return jsonify({'error': 'Letter not found'}), 404
+    if os.path.isfile(letter_path):
+        os.remove(letter_path)
+
+    letters = [
+        letter
+        for letter in get_letters_index(username)
+        if letter.get('filename') != filename
+    ]
     _atomic_write_json(
         os.path.join(get_letters_dir(username), 'index.json'),
         letters,
         indent=2,
     )
-    return jsonify({'ok':True})
+    return jsonify({'ok': True})
 
 # ── Yesterday crew ────────────────────────────────────────────────────────────
 @app.route('/load_yesterday')

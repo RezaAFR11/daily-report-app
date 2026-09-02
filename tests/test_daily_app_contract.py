@@ -372,6 +372,102 @@ class LetterContractTests(IsolatedDailyAppTestCase):
             os.path.exists(os.path.join(daily_report_app.get_letters_dir('worker'), filename))
         )
 
+    def test_letter_route_rejects_invalid_json(self):
+        response = self.client.post(
+            '/letters/generate',
+            data='not-json',
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['error'], 'Invalid letter data')
+
+    def test_unknown_letter_type_uses_safe_general_letter_fallback(self):
+        generated = BytesIO(b'fallback-docx-contract')
+        sequence = '0002/GPA-KN/IX/2026'
+        with (
+            patch.object(
+                daily_report_app,
+                'generate_letter_docx',
+                return_value=(generated, sequence),
+            ),
+            patch.object(daily_report_app, 'log_activity'),
+        ):
+            response = self.client.post(
+                '/letters/generate',
+                json={
+                    'letter_type': '../unsupported',
+                    'subject': 'Fallback Contract Letter',
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        index = daily_report_app.get_letters_index('worker')
+        self.assertEqual(index[0]['type'], 'umum')
+        self.assertEqual(index[0]['type_label'], 'Surat Umum')
+        self.assertNotIn('/', index[0]['filename'])
+        self.assertNotIn('\\', index[0]['filename'])
+
+    def test_letter_archive_removes_orphan_when_index_write_fails(self):
+        filename = 'Atomic Letter Contract.docx'
+        with (
+            patch.object(
+                daily_report_app,
+                'append_letter_index',
+                side_effect=OSError('index unavailable'),
+            ),
+            self.assertRaises(OSError),
+        ):
+            daily_report_app.archive_generated_letter(
+                'worker',
+                filename,
+                b'atomic-docx-contract',
+                {'filename': filename, 'type': 'umum'},
+            )
+
+        letter_path = os.path.join(
+            daily_report_app.get_letters_dir('worker'),
+            filename,
+        )
+        self.assertFalse(os.path.exists(letter_path))
+        remaining_files = os.listdir(os.path.dirname(letter_path))
+        self.assertFalse(
+            any(name.endswith('.tmp') for name in remaining_files)
+        )
+
+    def test_letter_download_and_delete_reject_path_traversal(self):
+        letters_dir = daily_report_app.get_letters_dir('worker')
+        allowed_name = 'Allowed Letter.docx'
+        allowed_path = os.path.join(letters_dir, allowed_name)
+        outside_path = os.path.join(os.path.dirname(letters_dir), 'secret.docx')
+        with open(allowed_path, 'wb') as handle:
+            handle.write(b'allowed-letter')
+        with open(outside_path, 'wb') as handle:
+            handle.write(b'secret-letter')
+        daily_report_app.append_letter_index(
+            'worker',
+            {'filename': allowed_name, 'type': 'umum'},
+        )
+
+        allowed = self.client.get(
+            f'/letters/download/{quote(allowed_name, safe="")}'
+        )
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(allowed.data, b'allowed-letter')
+        allowed.close()
+
+        traversal = self.client.get('/letters/download/..%2Fsecret.docx')
+        traversal.get_data()
+        traversal.close()
+        deletion = self.client.post(
+            '/letters/delete',
+            json={'filename': '../secret.docx'},
+        )
+
+        self.assertEqual(traversal.status_code, 404)
+        self.assertEqual(deletion.status_code, 404)
+        self.assertTrue(os.path.isfile(outside_path))
+
 
 class FieldSubmissionContractTests(IsolatedDailyAppTestCase):
     def setUp(self):
