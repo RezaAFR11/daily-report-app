@@ -4857,6 +4857,124 @@ def _apply_structured_source(
         draft["include_s_curve"] = True
 
 
+def _empty_uploaded_pdf_error(report_type: str) -> str:
+    """Return the existing user-facing error for an empty PDF compilation."""
+    if report_type == "weekly":
+        return (
+            "None of the uploaded PDFs could be included in this Weekly Report. "
+            "Check the project, period, text layer, and file warnings."
+        )
+    return "None of the uploaded PDFs could be included. Check the project, period, text layer, and file warnings."
+
+
+def _apply_uploaded_pdf_period(
+    records: list[dict[str, Any]],
+    warnings: list[Any],
+    *,
+    report_type: str,
+    date_from: datetime,
+    date_to: datetime,
+) -> tuple[list[dict[str, Any]], datetime, datetime]:
+    """Apply the rolling Weekly window while preserving Monthly input records."""
+    if report_type != "weekly":
+        return records, date_from, date_to
+
+    # The first day is derived from report content, not browser selection order
+    # or the provisional dates in the form.
+    date_from, date_to = _rolling_week_period(records)
+    end_text = date_to.strftime("%Y-%m-%d")
+    in_window: list[dict[str, Any]] = []
+    for record in records:
+        report_date = _record_date(record)
+        if report_date <= end_text:
+            in_window.append(record)
+            continue
+        source = record.get("source") if isinstance(record.get("source"), dict) else {}
+        warnings.append(
+            f"{source.get('filename') or 'report.pdf'}: date {report_date} is outside the "
+            f"rolling 7-day period ending {end_text}; file excluded."
+        )
+    return in_window, date_from, date_to
+
+
+def _build_uploaded_pdf_draft(
+    records: list[dict[str, Any]],
+    warnings: list[Any],
+    *,
+    project_no: str,
+    project_title: str,
+    date_from: datetime,
+    date_to: datetime,
+    report_mode: str,
+    report_type: str,
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate and aggregate normalized PDF records into an editable draft."""
+    photo_limits = periodic_photo_limits(report_type)
+    warnings.extend(_bound_record_photo_candidates(records, limits=photo_limits))
+    source_issues = _source_validation_issues(warnings)
+    review_warnings = _compact_review_warnings(warnings)
+
+    source_validation = build_source_validation(
+        records,
+        selected_project_no=project_no,
+        selected_project_title=project_title,
+        issues=source_issues,
+    )
+    provisional_records = _provisional_project_records(
+        records,
+        source_validation,
+        project_no=project_no,
+        project_title=project_title,
+    )
+    aggregated = aggregate_monthly_records(
+        provisional_records,
+        date_from=date_from.strftime("%Y-%m-%d"),
+        date_to=date_to.strftime("%Y-%m-%d"),
+        project_no=project_no,
+        expected_dates=_expected_dates(date_from, date_to),
+        work_hours_policy=_project_work_hours_policy(
+            config,
+            project_no=project_no,
+            project_title=project_title,
+        ),
+    )
+    selected_ids = {
+        str(item.get("report_id") or "")
+        for item in aggregated.get("source_records", [])
+        if isinstance(item, dict)
+    }
+    selected_records = [
+        record
+        for record in provisional_records
+        if not selected_ids or str(record.get("report_id") or "") in selected_ids
+    ]
+    draft = _prepare_draft(
+        aggregated,
+        project_no=project_no,
+        project_title=project_title,
+        date_from=date_from.strftime("%Y-%m-%d"),
+        date_to=date_to.strftime("%Y-%m-%d"),
+        report_mode=report_mode,
+        source_method="uploaded_pdf",
+        source_manifest=_source_manifest(selected_records, "uploaded_pdf"),
+        report_context=_latest_report_context(selected_records),
+        extra_warnings=review_warnings,
+        report_type=report_type,
+    )
+    draft["source_validation"] = source_validation
+    draft["_source_records"] = copy.deepcopy(records)
+    draft["photo_documentation"] = _photo_references_for_records(
+        selected_records,
+        limits=photo_limits,
+    )
+    draft["photo_coverage"] = _photo_coverage_metadata(
+        selected_records,
+        draft["photo_documentation"],
+    )
+    return draft
+
+
 def _render(
     draft: dict[str, Any],
     config: dict[str, Any],
@@ -5439,89 +5557,28 @@ def register_monthly_routes(
                 records.append(record)
 
             if not records:
-                error = (
-                    "None of the uploaded PDFs could be included in this Weekly Report. "
-                    "Check the project, period, text layer, and file warnings."
-                    if kind == "weekly"
-                    else "None of the uploaded PDFs could be included. Check the project, period, text layer, and file warnings."
-                )
-                return jsonify({"error": error, "warnings": warnings}), 400
+                return jsonify({
+                    "error": _empty_uploaded_pdf_error(kind),
+                    "warnings": warnings,
+                }), 400
 
-            if kind == "weekly":
-                # The first day is derived from report content, not browser
-                # selection order or the provisional dates in the form.
-                start, end = _rolling_week_period(records)
-                end_text = end.strftime("%Y-%m-%d")
-                in_window: list[dict[str, Any]] = []
-                for record in records:
-                    report_date = _record_date(record)
-                    if report_date <= end_text:
-                        in_window.append(record)
-                    else:
-                        source = record.get("source") if isinstance(record.get("source"), dict) else {}
-                        warnings.append(
-                            f"{source.get('filename') or 'report.pdf'}: date {report_date} is outside the "
-                            f"rolling 7-day period ending {end_text}; file excluded."
-                        )
-                records = in_window
-
-            photo_limits = periodic_photo_limits(kind)
-            warnings.extend(_bound_record_photo_candidates(records, limits=photo_limits))
-            source_issues = _source_validation_issues(warnings)
-            warnings = _compact_review_warnings(warnings)
-
-            source_validation = build_source_validation(
+            records, start, end = _apply_uploaded_pdf_period(
                 records,
-                selected_project_no=project_no,
-                selected_project_title=project_title,
-                issues=source_issues,
-            )
-            provisional_records = _provisional_project_records(
-                records,
-                source_validation,
-                project_no=project_no,
-                project_title=project_title,
-            )
-            aggregated = aggregate_monthly_records(
-                provisional_records,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                project_no=project_no,
-                expected_dates=_expected_dates(start, end),
-                work_hours_policy=_project_work_hours_policy(
-                    config_provider(), project_no=project_no, project_title=project_title
-                ),
-            )
-            selected_ids = {
-                str(item.get("report_id") or "")
-                for item in aggregated.get("source_records", [])
-                if isinstance(item, dict)
-            }
-            selected_records = [
-                record for record in provisional_records
-                if not selected_ids or str(record.get("report_id") or "") in selected_ids
-            ]
-            source_manifest = _source_manifest(selected_records, "uploaded_pdf")
-            draft = _prepare_draft(
-                aggregated,
-                project_no=project_no,
-                project_title=project_title,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                report_mode=mode,
-                source_method="uploaded_pdf",
-                source_manifest=source_manifest,
-                report_context=_latest_report_context(selected_records),
-                extra_warnings=warnings,
+                warnings,
                 report_type=kind,
+                date_from=start,
+                date_to=end,
             )
-            draft["source_validation"] = source_validation
-            draft["_source_records"] = copy.deepcopy(records)
-            draft["photo_documentation"] = _photo_references_for_records(
-                selected_records, limits=photo_limits
-            )
-            draft["photo_coverage"] = _photo_coverage_metadata(
-                selected_records, draft["photo_documentation"]
+            draft = _build_uploaded_pdf_draft(
+                records,
+                warnings,
+                project_no=project_no,
+                project_title=project_title,
+                date_from=start,
+                date_to=end,
+                report_mode=mode,
+                report_type=kind,
+                config=config_provider(),
             )
             # Reusing the random upload-session ID closes the crash window
             # between saving the draft and writing the small result tombstone.
@@ -5682,87 +5739,27 @@ def register_monthly_routes(
 
             if not records:
                 _remove_draft_assets(data_dir, session["username"], pending_draft_id)
-                error = (
-                    "None of the uploaded PDFs could be included in this Weekly Report. "
-                    "Check the project, period, text layer, and file warnings."
-                    if kind == "weekly"
-                    else "None of the uploaded PDFs could be included. Check the project, period, text layer, and file warnings."
-                )
                 return jsonify({
-                    "error": error,
+                    "error": _empty_uploaded_pdf_error(kind),
                     "warnings": warnings,
                 }), 400
-            if kind == "weekly":
-                start, end = _rolling_week_period(records)
-                end_text = end.strftime("%Y-%m-%d")
-                in_window = []
-                for record in records:
-                    report_date = _record_date(record)
-                    if report_date <= end_text:
-                        in_window.append(record)
-                    else:
-                        source = record.get("source") if isinstance(record.get("source"), dict) else {}
-                        warnings.append(
-                            f"{source.get('filename') or 'report.pdf'}: date {report_date} is outside the "
-                            f"rolling 7-day period ending {end_text}; file excluded."
-                        )
-                records = in_window
-            photo_limits = periodic_photo_limits(kind)
-            warnings.extend(_bound_record_photo_candidates(records, limits=photo_limits))
-            source_issues = _source_validation_issues(warnings)
-            warnings = _compact_review_warnings(warnings)
-            source_validation = build_source_validation(
+            records, start, end = _apply_uploaded_pdf_period(
                 records,
-                selected_project_no=project_no,
-                selected_project_title=project_title,
-                issues=source_issues,
-            )
-            provisional_records = _provisional_project_records(
-                records,
-                source_validation,
-                project_no=project_no,
-                project_title=project_title,
-            )
-            aggregated = aggregate_monthly_records(
-                provisional_records,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                project_no=project_no,
-                expected_dates=_expected_dates(start, end),
-                work_hours_policy=_project_work_hours_policy(
-                    config, project_no=project_no, project_title=project_title
-                ),
-            )
-            selected_ids = {
-                str(item.get("report_id") or "")
-                for item in aggregated.get("source_records", [])
-                if isinstance(item, dict)
-            }
-            selected_records = [
-                record for record in provisional_records
-                if not selected_ids or str(record.get("report_id") or "") in selected_ids
-            ]
-            manifest = _source_manifest(selected_records, "uploaded_pdf")
-            draft = _prepare_draft(
-                aggregated,
-                project_no=project_no,
-                project_title=project_title,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                report_mode=mode,
-                source_method="uploaded_pdf",
-                source_manifest=manifest,
-                report_context=_latest_report_context(selected_records),
-                extra_warnings=warnings,
+                warnings,
                 report_type=kind,
+                date_from=start,
+                date_to=end,
             )
-            draft["source_validation"] = source_validation
-            draft["_source_records"] = copy.deepcopy(records)
-            draft["photo_documentation"] = _photo_references_for_records(
-                selected_records, limits=photo_limits
-            )
-            draft["photo_coverage"] = _photo_coverage_metadata(
-                selected_records, draft["photo_documentation"]
+            draft = _build_uploaded_pdf_draft(
+                records,
+                warnings,
+                project_no=project_no,
+                project_title=project_title,
+                date_from=start,
+                date_to=end,
+                report_mode=mode,
+                report_type=kind,
+                config=config,
             )
             draft_id = _save_draft(
                 data_dir,
