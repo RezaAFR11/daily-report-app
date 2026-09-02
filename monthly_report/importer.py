@@ -2051,46 +2051,42 @@ def _deduplicate_warnings(warnings: Sequence[dict[str, Any]]) -> list[dict[str, 
     return result
 
 
-def parse_daily_report_pages(
-    pages: Sequence[str],
-    *,
-    known_projects: Iterable[Mapping[str, Any]] = (),
-    source_metadata: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Parse already-extracted page text into a reviewable daily envelope.
-
-    ``pages`` must contain one string per PDF page.  The function performs no
-    I/O and is useful for deterministic re-parsing and tests.  It intentionally
-    does not accept a combined list of PDF byte payloads.
-    """
-
+def _normalise_extracted_pages(pages: Sequence[str]) -> list[str]:
     if isinstance(pages, (str, bytes, bytearray)) or not isinstance(pages, Sequence):
         raise PDFValidationError("pages must be a sequence of page text strings")
-    normalized_pages: list[str] = []
+    normalized: list[str] = []
     for page in pages:
         if not isinstance(page, str):
             raise PDFValidationError("every extracted page must be text")
-        normalized_pages.append(_normalize_page_text(page))
+        normalized.append(_normalize_page_text(page))
+    return normalized
 
+
+def _extract_report_identity(
+    pages: Sequence[str],
+    *,
+    filename: str,
+    known_projects: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Extract identity fields and their deterministic provenance."""
     warnings: list[dict[str, Any]] = []
     provenance: dict[str, dict[str, Any]] = {}
-
     report_date, date_provenance, date_warnings = _extract_date(
-        normalized_pages,
-        filename=str((source_metadata or {}).get("filename") or ""),
+        pages,
+        filename=filename,
     )
     warnings.extend(date_warnings)
     if date_provenance:
         provenance["date"] = date_provenance
 
-    day_no, day_provenance, day_warnings = _extract_day_number(normalized_pages)
+    day_no, day_provenance, day_warnings = _extract_day_number(pages)
     warnings.extend(day_warnings)
     if day_provenance:
         provenance["day_no"] = day_provenance
 
     extracted: dict[str, str] = {}
     for field in ("project_no", "project_title", "customer", "location", "equipment"):
-        value, field_provenance = _extract_labeled_value(normalized_pages, field)
+        value, field_provenance = _extract_labeled_value(pages, field)
         extracted[field] = value or ""
         if field_provenance:
             provenance[field] = field_provenance
@@ -2101,7 +2097,6 @@ def parse_daily_report_pages(
         known_projects,
     )
     warnings.extend(project_warnings)
-
     if project_match and project_match.get("method") == "exact_project_no":
         candidate = project_match["candidate"]
         title_match = (
@@ -2127,21 +2122,33 @@ def parse_daily_report_pages(
                     field="project_title",
                 )
             )
+    return {
+        "report_date": report_date,
+        "day_no": day_no,
+        "extracted": extracted,
+        "project_id": project_id,
+        "project_match": project_match,
+        "provenance": provenance,
+        "warnings": warnings,
+    }
 
+
+def _extract_report_content(
+    pages: Sequence[str],
+    *,
+    document_context: Sequence[Any],
+) -> dict[str, Any]:
+    """Extract normalized sections and content while preserving warning order."""
+    warnings: list[dict[str, Any]] = []
     sections, section_matches, ignored_chrome = _collect_sections(
-        normalized_pages,
-        document_context=(
-            extracted.get("project_title"),
-            extracted.get("project_no"),
-            extracted.get("customer"),
-        ),
+        pages,
+        document_context=document_context,
     )
     layout_profile = _detect_layout_profile(sections, section_matches)
     areas, indirect_manpower, manpower_extraction, manpower_warnings = (
         _extract_daily_content(sections)
     )
     # Keep the table-shape profile distinct from the overall layout profile.
-    # Older callers already consume ``profile`` as the manpower parser shape.
     manpower_extraction["manpower_profile"] = manpower_extraction.get("profile")
     manpower_extraction["layout_profile"] = layout_profile
     if layout_profile == LAYOUT_PROFILE_UNKNOWN:
@@ -2152,6 +2159,7 @@ def parse_daily_report_pages(
                 field="layout",
             )
         )
+
     _apply_photo_activity_statuses(areas, sections.get("photo_documentation", ""))
     weather = _extract_weather(sections.get("weather", ""))
     overall_progress, progress_warnings = _extract_overall_progress(
@@ -2177,76 +2185,151 @@ def parse_daily_report_pages(
                 field="areas",
             )
         )
+    return {
+        "sections": sections,
+        "section_matches": section_matches,
+        "ignored_chrome": ignored_chrome,
+        "layout_profile": layout_profile,
+        "areas": areas,
+        "indirect_manpower": indirect_manpower,
+        "manpower_extraction": manpower_extraction,
+        "weather": weather,
+        "overall_progress": overall_progress,
+        "constraint_status": constraint_status,
+        "warnings": warnings,
+    }
 
+
+def _import_confidence(
+    *,
+    report_date: str | None,
+    day_no: str | None,
+    extracted: Mapping[str, str],
+    provenance: Mapping[str, Mapping[str, Any]],
+    warnings: list[dict[str, Any]],
+) -> tuple[bool, dict[str, float], float]:
     critical_values = {
         "date": report_date or "",
         "day_no": day_no or "",
         "project_no": extracted["project_no"],
     }
     for field, value in critical_values.items():
-        if not value:
-            warnings.append(
-                _warning(
-                    f"missing_{field}",
-                    f"Critical field '{field}' was not deterministically extracted",
-                    severity="error",
-                    field=field,
-                )
+        if value:
+            continue
+        warnings.append(
+            _warning(
+                f"missing_{field}",
+                f"Critical field '{field}' was not deterministically extracted",
+                severity="error",
+                field=field,
             )
+        )
 
     field_scores = {
         "date": _field_confidence(report_date or "", provenance.get("date")),
         "day_no": _field_confidence(day_no or "", provenance.get("day_no")),
-        "project_no": _field_confidence(extracted["project_no"], provenance.get("project_no")),
+        "project_no": _field_confidence(
+            extracted["project_no"], provenance.get("project_no")
+        ),
         "project_title": _field_confidence(
             extracted["project_title"], provenance.get("project_title")
         ),
     }
     weights = {"date": 2, "day_no": 2, "project_no": 2, "project_title": 1}
-    overall = sum(field_scores[key] * weights[key] for key in weights) / sum(weights.values())
+    overall = sum(
+        field_scores[key] * weights[key] for key in weights
+    ) / sum(weights.values())
     critical_complete = all(critical_values.values())
     if not critical_complete:
         overall = min(overall, 0.69)
+    return critical_complete, field_scores, overall
 
-    warnings = _deduplicate_warnings(warnings)
-    has_error = any(warning.get("severity") == "error" for warning in warnings)
-    manpower_completeness = manpower_extraction.get("completeness", {})
-    direct_meta = manpower_completeness.get("direct_by_area", {})
-    indirect_meta = manpower_completeness.get("global_indirect", {})
-    manpower_row_count = sum(
+
+def _manpower_report_status(
+    areas: Sequence[Mapping[str, Any]],
+    indirect_manpower: Sequence[Mapping[str, Any]],
+    extraction: Mapping[str, Any],
+) -> str:
+    completeness = extraction.get("completeness", {})
+    direct_meta = completeness.get("direct_by_area", {})
+    indirect_meta = completeness.get("global_indirect", {})
+    row_count = sum(
         len(area.get("manpower", [])) + len(area.get("indirect_manpower", []))
         for area in areas
         if isinstance(area, Mapping)
     ) + len(indirect_manpower)
-    manpower_table_found = bool(
-        direct_meta.get("table_found") or indirect_meta.get("table_found")
-    )
-    manpower_status = (
-        "reported"
-        if manpower_row_count
-        else "none_reported"
-        if manpower_table_found
-        else "not_supplied"
-    )
-    unmapped_notes = manpower_extraction.get("unmapped_notes", [])
-    global_remarks = "; ".join(dict.fromkeys(
+    table_found = bool(direct_meta.get("table_found") or indirect_meta.get("table_found"))
+    if row_count:
+        return "reported"
+    return "none_reported" if table_found else "not_supplied"
+
+
+def _unmapped_note_text(extraction: Mapping[str, Any], *, kind: str) -> str:
+    unmapped_notes = extraction.get("unmapped_notes", [])
+    return "; ".join(dict.fromkeys(
         _note_text(item.get("text"))
         for item in unmapped_notes
         if isinstance(item, Mapping)
-        and item.get("kind") == "remark"
+        and item.get("kind") == kind
         and _note_text(item.get("text"))
     ))
-    global_constraints = "; ".join(dict.fromkeys(
-        _note_text(item.get("text"))
-        for item in unmapped_notes
-        if isinstance(item, Mapping)
-        and item.get("kind") == "constraint"
-        and _note_text(item.get("text"))
-    ))
+
+
+def parse_daily_report_pages(
+    pages: Sequence[str],
+    *,
+    known_projects: Iterable[Mapping[str, Any]] = (),
+    source_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Parse already-extracted page text into a reviewable daily envelope.
+
+    ``pages`` must contain one string per PDF page.  The function performs no
+    I/O and is useful for deterministic re-parsing and tests.  It intentionally
+    does not accept a combined list of PDF byte payloads.
+    """
+
+    normalized_pages = _normalise_extracted_pages(pages)
+    identity = _extract_report_identity(
+        normalized_pages,
+        filename=str((source_metadata or {}).get("filename") or ""),
+        known_projects=known_projects,
+    )
+    report_date = identity["report_date"]
+    day_no = identity["day_no"]
+    extracted = identity["extracted"]
+    provenance = identity["provenance"]
+    warnings = list(identity["warnings"])
+    content = _extract_report_content(
+        normalized_pages,
+        document_context=(
+            extracted.get("project_title"),
+            extracted.get("project_no"),
+            extracted.get("customer"),
+        ),
+    )
+    warnings.extend(content["warnings"])
+    critical_complete, field_scores, overall = _import_confidence(
+        report_date=report_date,
+        day_no=day_no,
+        extracted=extracted,
+        provenance=provenance,
+        warnings=warnings,
+    )
+
+    warnings = _deduplicate_warnings(warnings)
+    has_error = any(warning.get("severity") == "error" for warning in warnings)
+    areas = content["areas"]
+    indirect_manpower = content["indirect_manpower"]
+    manpower_extraction = content["manpower_extraction"]
+    manpower_status = _manpower_report_status(
+        areas,
+        indirect_manpower,
+        manpower_extraction,
+    )
     data = {
         "date": report_date or "",
         "day_no": day_no or "",
-        "layout_profile": layout_profile,
+        "layout_profile": content["layout_profile"],
         "project_no": extracted["project_no"],
         "project_title": extracted["project_title"],
         "location": extracted["location"],
@@ -2256,14 +2339,17 @@ def parse_daily_report_pages(
         "prepared_by": "",
         "checked_by": "",
         "approved_by": "",
-        "global_remarks": global_remarks,
-        "global_constraints": global_constraints,
-        "weather": weather,
-        "constraint_status": constraint_status,
+        "global_remarks": _unmapped_note_text(manpower_extraction, kind="remark"),
+        "global_constraints": _unmapped_note_text(
+            manpower_extraction,
+            kind="constraint",
+        ),
+        "weather": content["weather"],
+        "constraint_status": content["constraint_status"],
         "indirect_manpower": indirect_manpower,
         "manpower_status": manpower_status,
-        "show_overall_progress": bool(overall_progress),
-        "overall_progress": overall_progress,
+        "show_overall_progress": bool(content["overall_progress"]),
+        "overall_progress": content["overall_progress"],
         "areas": areas,
         "sign_offs": [],
     }
@@ -2276,7 +2362,7 @@ def parse_daily_report_pages(
         # approved for monthly aggregation.
         "status": "ready" if critical_complete and not has_error else "needs_review",
         "review_required": True,
-        "project_id": project_id,
+        "project_id": identity["project_id"],
         "report_date": report_date,
         "day_no": day_no,
         "data": data,
@@ -2288,15 +2374,15 @@ def parse_daily_report_pages(
         },
         "warnings": warnings,
         "extraction": {
-            "layout_profile": layout_profile,
+            "layout_profile": content["layout_profile"],
             "field_provenance": provenance,
-            "sections": sections,
-            "section_matches": section_matches,
+            "sections": content["sections"],
+            "section_matches": content["section_matches"],
             "normalization": {
-                "ignored_document_chrome": ignored_chrome,
+                "ignored_document_chrome": content["ignored_chrome"],
                 "unmapped_notes": manpower_extraction.get("unmapped_notes", []),
             },
-            "project_match": project_match,
+            "project_match": identity["project_match"],
             "manpower": manpower_extraction,
             "completeness": {
                 "manpower": manpower_extraction["completeness"],

@@ -946,53 +946,55 @@ def _attach_photo_contexts(
         candidate.pop("_bbox", None)
 
 
-def extract_pdf_photo_candidates(
+def _load_pdf_photo_pages(
     source: bytes | bytearray | memoryview | str | os.PathLike[str] | BinaryIO,
     *,
-    filename: str = "report.pdf",
-    limits: PhotoLimits = DEFAULT_PHOTO_LIMITS,
-    areas: Iterable[Mapping[str, Any]] | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Extract reviewable photographs from a Daily Report PDF.
-
-    Each returned item contains JSON-safe metadata plus a temporary ``content``
-    byte value.  ``store_photo_candidates`` removes that byte value before the
-    metadata is written to JSON.
-    """
-
+    filename: str,
+    limits: PhotoLimits,
+) -> tuple[list[Any] | None, list[str]]:
     try:
         from pypdf import PdfReader
     except ImportError:
-        return [], [f"{filename}: photo extraction requires pypdf."]
+        return None, [f"{filename}: photo extraction requires pypdf."]
 
     try:
         data = _read_source(source, maximum=limits.max_pdf_bytes)
         reader = PdfReader(io.BytesIO(data), strict=False)
         if getattr(reader, "is_encrypted", False):
-            return [], [f"{filename}: encrypted PDF photos were not processed."]
+            return None, [f"{filename}: encrypted PDF photos were not processed."]
+        return list(reader.pages), []
     except Exception:
-        return [], [f"{filename}: embedded photos could not be inspected safely."]
+        return None, [f"{filename}: embedded photos could not be inspected safely."]
 
-    pages = list(reader.pages)
+
+def _photo_section_pages(pages: list[Any]) -> tuple[set[int], set[int]]:
     heading_pages = {
         page_number
         for page_number, page in enumerate(pages, start=1)
         if _PHOTO_HEADING_RE.search(_page_text(page))
     }
-    # Photo grids can flow onto following pages without repeating the heading.
-    # In all supported Daily Report templates Photo Documentation is the final
-    # section, so its first heading safely anchors the remaining pages.
+    # The supported templates place Photo Documentation last, so the first
+    # heading safely anchors continuation pages that omit the heading.
     photo_pages = (
         set(range(min(heading_pages), len(pages) + 1))
         if heading_pages
         else set()
     )
+    return heading_pages, photo_pages
+
+
+def _scan_pdf_photo_images(
+    pages: list[Any],
+    photo_pages: set[int],
+    *,
+    filename: str,
+    limits: PhotoLimits,
+) -> tuple[list[dict[str, Any]], dict[str, set[int]], int, int]:
     candidates: list[dict[str, Any]] = []
     digest_pages: dict[str, set[int]] = {}
     normalized_cache: dict[str, tuple[bytes, int, int] | None] = {}
     skipped_unsafe = 0
     skipped_signature_like = 0
-
     for page_number, page in enumerate(pages, start=1):
         for raw, image_bbox in _iter_page_images_with_boxes(page):
             raw_digest = hashlib.sha256(raw).hexdigest()
@@ -1003,8 +1005,6 @@ def extract_pdf_photo_candidates(
                 skipped_unsafe += 1
                 continue
             content, width, height = normalized
-            # In split-layout reports SIGN-OFF and PHOTO DOCUMENTATION can share
-            # one page. Keep signature resources out of the activity appendix.
             if page_number in photo_pages and _looks_like_signature_or_line_art(content):
                 skipped_signature_like += 1
                 continue
@@ -1019,18 +1019,20 @@ def extract_pdf_photo_candidates(
                 "height": height,
                 "_bbox": image_bbox,
             })
+    return candidates, digest_pages, skipped_unsafe, skipped_signature_like
 
+
+def _filter_pdf_photo_candidates(
+    candidates: list[dict[str, Any]],
+    digest_pages: Mapping[str, set[int]],
+    photo_pages: set[int],
+    *,
+    filename: str,
+    limits: PhotoLimits,
+    skipped_unsafe: int,
+    skipped_signature_like: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
     warnings: list[str] = []
-    if not candidates:
-        if skipped_unsafe:
-            warnings.append(
-                f"{filename}: no reviewable photos were found; {skipped_unsafe} small or unsupported image(s) were ignored."
-            )
-        return [], warnings
-
-    # If the template labels photo pages, those pages are authoritative.  A
-    # digest also seen outside them is recurring artwork (normally a logo), so
-    # it must not appear in Appendix 6.6.
     useful: list[dict[str, Any]] = []
     seen: set[str] = set()
     duplicate_count = 0
@@ -1081,8 +1083,58 @@ def extract_pdf_photo_candidates(
             f"{filename}: {skipped_signature_like} signature/line-art image occurrence(s) were excluded from Photo Documentation."
         )
     if candidates and not useful:
-        warnings.append(f"{filename}: no useful Photo Documentation images remained after filtering.")
+        warnings.append(
+            f"{filename}: no useful Photo Documentation images remained after filtering."
+        )
+    return useful, warnings
 
+
+def extract_pdf_photo_candidates(
+    source: bytes | bytearray | memoryview | str | os.PathLike[str] | BinaryIO,
+    *,
+    filename: str = "report.pdf",
+    limits: PhotoLimits = DEFAULT_PHOTO_LIMITS,
+    areas: Iterable[Mapping[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Extract reviewable photographs from a Daily Report PDF.
+
+    Each returned item contains JSON-safe metadata plus a temporary ``content``
+    byte value.  ``store_photo_candidates`` removes that byte value before the
+    metadata is written to JSON.
+    """
+
+    pages, load_warnings = _load_pdf_photo_pages(
+        source,
+        filename=filename,
+        limits=limits,
+    )
+    if pages is None:
+        return [], load_warnings
+    heading_pages, photo_pages = _photo_section_pages(pages)
+    candidates, digest_pages, skipped_unsafe, skipped_signature_like = (
+        _scan_pdf_photo_images(
+            pages,
+            photo_pages,
+            filename=filename,
+            limits=limits,
+        )
+    )
+    if not candidates:
+        warnings: list[str] = []
+        if skipped_unsafe:
+            warnings.append(
+                f"{filename}: no reviewable photos were found; {skipped_unsafe} small or unsupported image(s) were ignored."
+            )
+        return [], warnings
+    useful, warnings = _filter_pdf_photo_candidates(
+        candidates,
+        digest_pages,
+        photo_pages,
+        filename=filename,
+        limits=limits,
+        skipped_unsafe=skipped_unsafe,
+        skipped_signature_like=skipped_signature_like,
+    )
     _attach_photo_contexts(useful, pages, heading_pages, areas)
     return useful, warnings
 
@@ -1228,6 +1280,91 @@ def _canonical_asset_source(
     return candidate_existing
 
 
+def _read_verified_canonical_photo(
+    record: Mapping[str, Any],
+    asset: Mapping[str, Any],
+    data_dir: str | os.PathLike[str],
+    *,
+    limits: PhotoLimits,
+) -> tuple[tuple[bytes, int, int] | None, str | None]:
+    """Verify one archived asset before decoding and normalizing it."""
+    digest_text = str(asset.get("sha256") or "").strip()
+    if not _CANONICAL_DIGEST_RE.fullmatch(digest_text):
+        return None, "canonical asset digest is invalid"
+    expected_digest = digest_text.lower()
+    try:
+        declared_size = int(asset.get("size_bytes"))
+    except (TypeError, ValueError):
+        declared_size = -1
+    if declared_size <= 0 or declared_size > limits.max_embedded_image_bytes:
+        return None, "canonical asset size is invalid or exceeds the limit"
+
+    try:
+        source = _canonical_asset_source(
+            data_dir,
+            record.get("_canonical_owner"),
+            asset.get("asset_path"),
+        )
+    except (OSError, ValueError) as exc:
+        return None, str(exc)
+
+    try:
+        actual_size = source.stat().st_size
+        if actual_size != declared_size:
+            return None, "canonical asset size does not match its metadata"
+        with source.open("rb") as handle:
+            raw = handle.read(limits.max_embedded_image_bytes + 1)
+    except OSError:
+        return None, "canonical photo asset could not be read"
+    if len(raw) != declared_size or len(raw) > limits.max_embedded_image_bytes:
+        return None, "canonical photo asset exceeds the read limit"
+    if hashlib.sha256(raw).hexdigest() != expected_digest:
+        return None, "canonical asset hash does not match its metadata"
+
+    normalized = _normalise_image(raw, limits)
+    if normalized is None:
+        return None, "photo is unsupported, unsafe, or outside the image limits"
+    return normalized, None
+
+
+def _canonical_photo_candidate(
+    record: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    photo: Mapping[str, Any],
+    *,
+    area_name: str,
+    asset_id: str,
+    content: bytes,
+    width: int,
+    height: int,
+) -> dict[str, Any]:
+    report_date = str(record.get("date") or payload.get("date") or "").strip()[:10]
+    source_label = " - ".join(
+        part for part in ("Stored JSON", report_date, area_name) if part
+    )
+    activity_description = str(
+        photo.get("activity_description") or photo.get("desc") or ""
+    ).strip()[:500]
+    activity_status = str(photo.get("activity_status") or "").strip()[:80]
+    display_caption = activity_description
+    if activity_status and activity_status.casefold() not in display_caption.casefold():
+        display_caption = f"{display_caption}{_photo_status_suffix(activity_status)}".strip()
+    return {
+        "asset_id": asset_id,
+        "content": content,
+        "source": source_label[:255],
+        "source_date": report_date,
+        "source_area": str(photo.get("area_id") or area_name)[:255],
+        "activity_id": str(photo.get("activity_id") or "")[:100],
+        "activity_description": activity_description,
+        "activity_status": activity_status,
+        "source_type": "daily_report_canonical",
+        "width": width,
+        "height": height,
+        "caption": display_caption[:500],
+    }
+
+
 def attach_canonical_photo_candidates(
     records: Iterable[dict[str, Any]],
     data_dir: str | os.PathLike[str],
@@ -1355,86 +1492,19 @@ def attach_canonical_photo_candidates(
                         )
                     continue
 
-                digest_text = str(asset.get("sha256") or "").strip()
-                if not _CANONICAL_DIGEST_RE.fullmatch(digest_text):
-                    add_warning(
-                        _canonical_photo_warning(
-                            record, area_name, photo_index, "canonical asset digest is invalid"
-                        )
-                    )
-                    continue
-                expected_digest = digest_text.lower()
-                try:
-                    declared_size = int(asset.get("size_bytes"))
-                except (TypeError, ValueError):
-                    declared_size = -1
-                if (
-                    declared_size <= 0
-                    or declared_size > limits.max_embedded_image_bytes
-                ):
-                    add_warning(
-                        _canonical_photo_warning(
-                            record, area_name, photo_index, "canonical asset size is invalid or exceeds the limit"
-                        )
-                    )
-                    continue
-
-                try:
-                    source = _canonical_asset_source(
-                        data_dir,
-                        record.get("_canonical_owner"),
-                        asset.get("asset_path"),
-                    )
-                except (OSError, ValueError) as exc:
-                    add_warning(
-                        _canonical_photo_warning(record, area_name, photo_index, str(exc))
-                    )
-                    continue
-
-                try:
-                    actual_size = source.stat().st_size
-                    if actual_size != declared_size:
-                        add_warning(
-                            _canonical_photo_warning(
-                                record,
-                                area_name,
-                                photo_index,
-                                "canonical asset size does not match its metadata",
-                            )
-                        )
-                        continue
-                    with source.open("rb") as handle:
-                        raw = handle.read(limits.max_embedded_image_bytes + 1)
-                except OSError:
-                    add_warning(
-                        _canonical_photo_warning(
-                            record, area_name, photo_index, "canonical photo asset could not be read"
-                        )
-                    )
-                    continue
-                if len(raw) != declared_size or len(raw) > limits.max_embedded_image_bytes:
-                    add_warning(
-                        _canonical_photo_warning(
-                            record, area_name, photo_index, "canonical photo asset exceeds the read limit"
-                        )
-                    )
-                    continue
-                if hashlib.sha256(raw).hexdigest() != expected_digest:
-                    add_warning(
-                        _canonical_photo_warning(
-                            record, area_name, photo_index, "canonical asset hash does not match its metadata"
-                        )
-                    )
-                    continue
-
-                normalized = _normalise_image(raw, limits)
+                normalized, rejection = _read_verified_canonical_photo(
+                    record,
+                    asset,
+                    data_dir,
+                    limits=limits,
+                )
                 if normalized is None:
                     add_warning(
                         _canonical_photo_warning(
                             record,
                             area_name,
                             photo_index,
-                            "photo is unsupported, unsafe, or outside the image limits",
+                            rejection or "canonical photo asset could not be verified",
                         )
                     )
                     continue
@@ -1484,31 +1554,18 @@ def attach_canonical_photo_candidates(
                     seen_assets.add(asset_id)
                     retained_assets += 1
                     total_asset_bytes += len(content)
-                report_date = str(record.get("date") or payload.get("date") or "").strip()[:10]
-                source_label = " - ".join(
-                    part for part in ("Stored JSON", report_date, area_name) if part
+                candidates.append(
+                    _canonical_photo_candidate(
+                        record,
+                        payload,
+                        photo,
+                        area_name=area_name,
+                        asset_id=asset_id,
+                        content=content,
+                        width=width,
+                        height=height,
+                    )
                 )
-                activity_description = str(
-                    photo.get("activity_description") or photo.get("desc") or ""
-                ).strip()[:500]
-                activity_status = str(photo.get("activity_status") or "").strip()[:80]
-                display_caption = activity_description
-                if activity_status and activity_status.casefold() not in display_caption.casefold():
-                    display_caption = f"{display_caption}{_photo_status_suffix(activity_status)}".strip()
-                candidates.append({
-                    "asset_id": asset_id,
-                    "content": content,
-                    "source": source_label[:255],
-                    "source_date": report_date,
-                    "source_area": str(photo.get("area_id") or area_name)[:255],
-                    "activity_id": str(photo.get("activity_id") or "")[:100],
-                    "activity_description": activity_description,
-                    "activity_status": activity_status,
-                    "source_type": "daily_report_canonical",
-                    "width": width,
-                    "height": height,
-                    "caption": display_caption[:500],
-                })
 
         record["_photo_candidates"] = store_photo_candidates(
             candidates,
