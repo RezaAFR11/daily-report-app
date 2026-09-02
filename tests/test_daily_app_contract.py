@@ -217,6 +217,16 @@ class LetterContractTests(IsolatedDailyAppTestCase):
         super().setUp()
         self.login_as('worker', is_admin=False)
 
+    @staticmethod
+    def _document_text(document_stream):
+        document_stream.seek(0)
+        document = daily_report_app.DocxDocument(document_stream)
+        parts = [paragraph.text for paragraph in document.paragraphs]
+        for table in document.tables:
+            for row in table.rows:
+                parts.extend(cell.text for cell in row.cells)
+        return '\n'.join(parts)
+
     def test_all_supported_letter_types_generate_docx_streams(self):
         config = copy.deepcopy(daily_report_app.DEFAULT_CONFIG)
         payloads = {
@@ -238,6 +248,87 @@ class LetterContractTests(IsolatedDailyAppTestCase):
                     )
                 self.assertTrue(document.getvalue().startswith(b'PK'))
                 self.assertRegex(sequence, r'^0001/GPA-KN/[IVX]+/\d{4}$')
+
+    def test_all_supported_letter_types_keep_identifying_content(self):
+        config = copy.deepcopy(daily_report_app.DEFAULT_CONFIG)
+        cases = {
+            'umum': (
+                {
+                    'subject': 'General Subject Marker',
+                    'body': 'General Body Marker',
+                },
+                ['General Subject Marker', 'General Body Marker'],
+            ),
+            'pekerja': (
+                {
+                    'subject': 'Worker Entry Marker',
+                    'workers': [
+                        {'name': 'Ahmad Contract', 'position': 'Electrician'},
+                    ],
+                },
+                ['Worker Entry Marker', 'Ahmad Contract', 'Electrician'],
+            ),
+            'alat_berat': (
+                {
+                    'subject': 'Equipment Request Marker',
+                    'date_use': '03 September 2026',
+                    'location_use': 'Boiler Area Contract',
+                    'equipment_use': 'Mobile Crane Contract',
+                },
+                [
+                    'Equipment Request Marker',
+                    '03 September 2026',
+                    'Boiler Area Contract',
+                    'Mobile Crane Contract',
+                ],
+            ),
+            'sticker': (
+                {
+                    'subject': 'Vehicle Sticker Marker',
+                    'vehicles': [
+                        {'type': 'Light Vehicle Contract', 'plate': 'KT 1234 QA'},
+                    ],
+                },
+                ['Vehicle Sticker Marker', 'Light Vehicle Contract', 'KT 1234 QA'],
+            ),
+            'sp': (
+                {
+                    'employee_name': 'Employee Warning Contract',
+                    'employee_position': 'Technician Contract',
+                    'sp_level': '2',
+                    'consequence': 'Warning Consequence Marker',
+                },
+                [
+                    'Employee Warning Contract',
+                    'Technician Contract',
+                    'Peringatan ke-2',
+                    'Warning Consequence Marker',
+                ],
+            ),
+            'phk': (
+                {
+                    'employee_name': 'Employee Termination Contract',
+                    'employee_position': 'Foreman Contract',
+                    'sp_reference': 'SP Reference Contract',
+                    'effective_date': '04 September 2026',
+                },
+                [
+                    'Employee Termination Contract',
+                    'Foreman Contract',
+                    'SP Reference Contract',
+                    '04 September 2026',
+                ],
+            ),
+        }
+
+        for letter_type, (payload, expected_fragments) in cases.items():
+            with self.subTest(letter_type=letter_type):
+                report = {'letter_type': letter_type, **payload}
+                with patch.object(daily_report_app, 'next_letter_seq', return_value=1):
+                    document, _ = daily_report_app.generate_letter_docx(report, config)
+                content = self._document_text(document)
+                for fragment in expected_fragments:
+                    self.assertIn(fragment, content)
 
     def test_letter_route_generates_downloads_indexes_and_deletes(self):
         generated = BytesIO(b'fake-docx-contract')

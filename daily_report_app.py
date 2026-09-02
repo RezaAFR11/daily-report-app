@@ -3650,43 +3650,89 @@ try:
 except ImportError:
     DOCX_OK = False
 
+
+def _add_letter_paragraph(
+    doc,
+    text=None,
+    *,
+    alignment=None,
+    font_size=11,
+    bold=False,
+    underline=False,
+):
+    """Add a consistently formatted paragraph to a generated letter."""
+    paragraph = doc.add_paragraph()
+    if alignment is not None:
+        paragraph.alignment = alignment
+    if text is None:
+        return paragraph
+
+    run = paragraph.add_run(text)
+    run.font.size = Pt(font_size)
+    if bold:
+        run.bold = True
+    if underline:
+        run.underline = True
+    return paragraph
+
+
+def _set_letter_cell(cell, text, *, font_size=None, bold=False):
+    """Set table-cell text and apply only the formatting requested by its caller."""
+    cell.text = text
+    if not cell.paragraphs[0].runs:
+        return
+
+    run = cell.paragraphs[0].runs[0]
+    if font_size is not None:
+        run.font.size = Pt(font_size)
+    if bold:
+        run.bold = True
+
+
+def _add_letter_rows(doc, rows):
+    """Render label/value rows used in letter metadata and request details."""
+    for label, value in rows:
+        _add_letter_paragraph(doc, f'{label}\t{value}')
+
+
 def _letter_header(doc, d, cfg, seq_str, subject):
-    from docx.shared import Pt, Cm
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
     dt_str = d.get('date', datetime.now().strftime('%d %B %Y'))
     site   = cfg.get('site_name', 'Mangkajang')
-    p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    run = p.add_run(f' {site}, {dt_str}')
-    run.font.size = Pt(11)
-    doc.add_paragraph()
-    for label, val in [('No', f': {seq_str}'), ('Perihal', f': {subject}')]:
-        p = doc.add_paragraph()
-        run = p.add_run(f'{label}\t{val}')
-        run.font.size = Pt(11)
-    doc.add_paragraph()
-    p = doc.add_paragraph(); p.add_run('Yth.').font.size = Pt(11)
+    _add_letter_paragraph(
+        doc,
+        f' {site}, {dt_str}',
+        alignment=WD_ALIGN_PARAGRAPH.RIGHT,
+    )
+    _add_letter_paragraph(doc)
+    _add_letter_rows(
+        doc,
+        [('No', f': {seq_str}'), ('Perihal', f': {subject}')],
+    )
+    _add_letter_paragraph(doc)
+    _add_letter_paragraph(doc, 'Yth.')
     recipient = d.get('recipient', 'PT Kertas Nusantara')
-    p = doc.add_paragraph()
-    run = p.add_run(recipient)
-    run.font.size = Pt(11); run.bold = True
+    _add_letter_paragraph(doc, recipient, bold=True)
     if d.get('recipient_type', 'kn') == 'kn':
-        p = doc.add_paragraph()
-        p.add_run('Mangkajang, Tanjung Redeb, Berau Kalimantan Timur').font.size = Pt(11)
+        _add_letter_paragraph(
+            doc,
+            'Mangkajang, Tanjung Redeb, Berau Kalimantan Timur',
+        )
         attn = d.get('attn', cfg.get('letter_kn_attn', ''))
-        p = doc.add_paragraph()
-        p.add_run(f'Up: {attn}').font.size = Pt(11)
+        _add_letter_paragraph(doc, f'Up: {attn}')
     else:
-        p = doc.add_paragraph(); p.add_run(d.get('recipient_pos','')).font.size = Pt(11)
-        p = doc.add_paragraph(); p.add_run('Di Tempat.').font.size = Pt(11)
-    doc.add_paragraph()
-    p = doc.add_paragraph(); p.add_run('Dengan Hormat,').font.size = Pt(11)
-    doc.add_paragraph()
+        _add_letter_paragraph(doc, d.get('recipient_pos', ''))
+        _add_letter_paragraph(doc, 'Di Tempat.')
+    _add_letter_paragraph(doc)
+    _add_letter_paragraph(doc, 'Dengan Hormat,')
+    _add_letter_paragraph(doc)
 
 def _letter_closing(doc, cfg):
-    p = doc.add_paragraph()
-    p.add_run('Demikian yang Kami Sampaikan. Atas Perhatian dan kerjasamanya, Kami Ucapkan Terimakasih.').font.size = Pt(11)
-    doc.add_paragraph()
+    _add_letter_paragraph(
+        doc,
+        'Demikian yang Kami Sampaikan. Atas Perhatian dan kerjasamanya, '
+        'Kami Ucapkan Terimakasih.',
+    )
+    _add_letter_paragraph(doc)
 
 def _letter_signoff_kn(doc, cfg):
     pm_name  = cfg.get('pm_name',  'Asril Naimy')
@@ -3694,55 +3740,52 @@ def _letter_signoff_kn(doc, cfg):
     table = doc.add_table(rows=4, cols=3)
     table.style = 'Table Grid'
     for i, h in enumerate(['PT. Garuda Prima Aksara','PT. Kertas Nusantara','PT. Kertas Nusantara']):
-        c = table.cell(0, i); c.text = h
-        c.paragraphs[0].runs[0].bold = True
-        c.paragraphs[0].runs[0].font.size = Pt(10)
+        _set_letter_cell(table.cell(0, i), h, font_size=10, bold=True)
     table.cell(1,0).text = pm_name
     for c in [table.cell(2,i) for i in range(3)]:
         c.text = ''
     for i, pos in enumerate([pm_title,'Safety PT. Kertas Nusantara','Security PT. Kertas Nusantara']):
-        c = table.cell(3,i); c.text = pos
-        c.paragraphs[0].runs[0].font.size = Pt(10)
+        _set_letter_cell(table.cell(3, i), pos, font_size=10)
 
 def _letter_signoff_internal(doc, cfg):
     pm_name  = cfg.get('pm_name',  'Asril Naimy')
     pm_title = cfg.get('pm_title', 'Project Manager')
-    p = doc.add_paragraph(); p.add_run('Hormat kami,').font.size = Pt(11)
-    for _ in range(3): doc.add_paragraph()
-    p = doc.add_paragraph()
-    run = p.add_run(f'    {pm_name}')
-    run.font.size = Pt(11); run.underline = True
-    p = doc.add_paragraph(); p.add_run(pm_title).font.size = Pt(11)
+    _add_letter_paragraph(doc, 'Hormat kami,')
+    for _ in range(3):
+        _add_letter_paragraph(doc)
+    _add_letter_paragraph(doc, f'    {pm_name}', underline=True)
+    _add_letter_paragraph(doc, pm_title)
 
 def _gen_letter_pekerja(doc, d, cfg, seq_str, subject):
     _letter_header(doc, d, cfg, seq_str, subject)
     body = d.get('body','Sehubungan adanya pengerjaan Electrical di PT. Garuda Prima Aksara Site PT. Kertas Nusantara. Oleh karena itu, kami meminta izin untuk masuk pekerja dan Induction sebagai berikut.')
-    p = doc.add_paragraph(); p.add_run(body).font.size = Pt(11)
-    doc.add_paragraph()
+    _add_letter_paragraph(doc, body)
+    _add_letter_paragraph(doc)
     workers = d.get('workers', [])
     table = doc.add_table(rows=1+len(workers), cols=2)
     table.style = 'Table Grid'
     for i, h in enumerate(['Nama','Posisi']):
-        c = table.rows[0].cells[i]; c.text = h
-        c.paragraphs[0].runs[0].bold = True; c.paragraphs[0].runs[0].font.size = Pt(11)
+        _set_letter_cell(table.rows[0].cells[i], h, font_size=11, bold=True)
     for i, w in enumerate(workers):
         row = table.rows[i+1].cells
-        row[0].text = w.get('name',''); row[1].text = w.get('position','')
-    doc.add_paragraph()
+        row[0].text = w.get('name', '')
+        row[1].text = w.get('position', '')
+    _add_letter_paragraph(doc)
     _letter_closing(doc, cfg)
     _letter_signoff_kn(doc, cfg)
 
 def _gen_letter_alat_berat(doc, d, cfg, seq_str, subject):
     _letter_header(doc, d, cfg, seq_str, subject)
     body = d.get('body','Sehubungan akan dilakukannya pengerjaan Electrical, dengan ini kami mengajukan permohonan untuk meminjam alat berat kepada pihak PT. Kertas Nusantara')
-    p = doc.add_paragraph(); p.add_run(body).font.size = Pt(11)
-    doc.add_paragraph()
-    for label, val in [('Hari/Tanggal', d.get('date_use','')),
-                       ('Lokasi',        d.get('location_use','')),
-                       ('Jenis Alat Berat', d.get('equipment_use',''))]:
-        p = doc.add_paragraph()
-        p.add_run(f'{label}\t\t: {val}').font.size = Pt(11)
-    doc.add_paragraph()
+    _add_letter_paragraph(doc, body)
+    _add_letter_paragraph(doc)
+    for label, value in [
+        ('Hari/Tanggal', d.get('date_use', '')),
+        ('Lokasi', d.get('location_use', '')),
+        ('Jenis Alat Berat', d.get('equipment_use', '')),
+    ]:
+        _add_letter_paragraph(doc, f'{label}\t\t: {value}')
+    _add_letter_paragraph(doc)
     _letter_closing(doc, cfg)
     pm_name = cfg.get('pm_name','Asril Naimy')
     table = doc.add_table(rows=2, cols=2)
@@ -3754,127 +3797,176 @@ def _gen_letter_alat_berat(doc, d, cfg, seq_str, subject):
 def _gen_letter_sticker(doc, d, cfg, seq_str, subject):
     _letter_header(doc, d, cfg, seq_str, subject)
     body = d.get('body','Sehubung dengan adanya penambahan kendaraan dari PT. Garuda Prima Aksara Site PT. Kertas Nusantara. Oleh Karena itu, kami meminta identitas kendaraan (Sticker) sebagai persyarataan izin masuk, adapun jenis Kendaraan yang digunakan')
-    p = doc.add_paragraph(); p.add_run(body).font.size = Pt(11)
-    doc.add_paragraph()
+    _add_letter_paragraph(doc, body)
+    _add_letter_paragraph(doc)
     vehicles = d.get('vehicles', [])
     table = doc.add_table(rows=1+len(vehicles), cols=3)
     table.style = 'Table Grid'
     for i, h in enumerate(['NO','JENIS KENDARAAN','NOMOR POLISI']):
-        c = table.rows[0].cells[i]; c.text = h
-        c.paragraphs[0].runs[0].bold = True
+        _set_letter_cell(table.rows[0].cells[i], h, bold=True)
     for i, v in enumerate(vehicles):
         row = table.rows[i+1].cells
-        row[0].text = str(i+1); row[1].text = v.get('type',''); row[2].text = v.get('plate','')
-    doc.add_paragraph()
+        row[0].text = str(i+1)
+        row[1].text = v.get('type', '')
+        row[2].text = v.get('plate', '')
+    _add_letter_paragraph(doc)
     _letter_closing(doc, cfg)
     _letter_signoff_kn(doc, cfg)
 
 def _gen_letter_umum(doc, d, cfg, seq_str, subject):
     _letter_header(doc, d, cfg, seq_str, subject)
-    p = doc.add_paragraph(); p.add_run(d.get('body','')).font.size = Pt(11)
-    doc.add_paragraph()
+    _add_letter_paragraph(doc, d.get('body', ''))
+    _add_letter_paragraph(doc)
     _letter_closing(doc, cfg)
     if d.get('recipient_type','kn') == 'kn':
         _letter_signoff_kn(doc, cfg)
     else:
         _letter_signoff_internal(doc, cfg)
 
+
+def _letter_employee_header(doc, d, cfg, seq_str, subject):
+    """Render the shared heading for warning and termination letters."""
+    dt_str = d.get('date', datetime.now().strftime('%d %B %Y'))
+    site = cfg.get('site_name', 'Mangkajang')
+    employee_name = d.get('employee_name', '')
+
+    _add_letter_paragraph(
+        doc,
+        f' {site}, {dt_str}',
+        alignment=WD_ALIGN_PARAGRAPH.RIGHT,
+    )
+    _add_letter_paragraph(doc)
+    _add_letter_rows(
+        doc,
+        [('No', f': {seq_str}'), ('Perihal', f': {subject}')],
+    )
+    _add_letter_paragraph(doc)
+    _add_letter_paragraph(doc, 'Yth.')
+    _add_letter_paragraph(doc, f'Sdr. {employee_name}')
+    _add_letter_paragraph(doc, d.get('employee_position', ''))
+    _add_letter_paragraph(doc, 'Di Tempat.')
+    _add_letter_paragraph(doc)
+    _add_letter_paragraph(doc, 'Dengan hormat,')
+    _add_letter_paragraph(doc)
+    return dt_str, employee_name
+
+
 def _gen_letter_sp(doc, d, cfg, seq_str):
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
     sp_level = str(d.get('sp_level','3'))
     sp_label = {'1':'Pertama','2':'Kedua','3':'Ketiga'}.get(sp_level,'Ketiga')
-    dt_str   = d.get('date', datetime.now().strftime('%d %B %Y'))
-    site     = cfg.get('site_name','Mangkajang')
-    emp_name = d.get('employee_name','')
-    emp_pos  = d.get('employee_position','')
-    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    p.add_run(f' {site}, {dt_str}').font.size = Pt(11)
-    doc.add_paragraph()
-    for label, val in [('No', f': {seq_str}'), ('Perihal', f': Peringatan ke-{sp_level}')]:
-        p = doc.add_paragraph(); p.add_run(f'{label}\t{val}').font.size = Pt(11)
-    doc.add_paragraph()
-    p = doc.add_paragraph(); p.add_run('Yth.').font.size = Pt(11)
-    p = doc.add_paragraph(); p.add_run(f'Sdr. {emp_name}').font.size = Pt(11)
-    p = doc.add_paragraph(); p.add_run(emp_pos).font.size = Pt(11)
-    p = doc.add_paragraph(); p.add_run('Di Tempat.').font.size = Pt(11)
-    doc.add_paragraph()
-    p = doc.add_paragraph(); p.add_run('Dengan hormat,').font.size = Pt(11)
-    doc.add_paragraph()
+    _letter_employee_header(
+        doc,
+        d,
+        cfg,
+        seq_str,
+        f'Peringatan ke-{sp_level}',
+    )
     body = d.get('body','Sehubungan dengan evaluasi kinerja dan kedisiplinan kerja, kami mencatat bahwa Saudara telah beberapa kali tidak hadir tanpa keterangan yang jelas dan dapat dipertanggungjawabkan.')
-    p = doc.add_paragraph(); p.add_run(body).font.size = Pt(11)
-    doc.add_paragraph()
+    _add_letter_paragraph(doc, body)
+    _add_letter_paragraph(doc)
     if sp_level == '3':
-        p = doc.add_paragraph(); p.add_run('Sebelumnya, perusahaan telah memberikan:').font.size = Pt(11)
-        p = doc.add_paragraph(); p.add_run('Peringatan Pertama (Lisan)').font.size = Pt(11)
-        p = doc.add_paragraph(); p.add_run('Peringatan Kedua (Lisan)').font.size = Pt(11)
-        doc.add_paragraph()
+        _add_letter_paragraph(doc, 'Sebelumnya, perusahaan telah memberikan:')
+        _add_letter_paragraph(doc, 'Peringatan Pertama (Lisan)')
+        _add_letter_paragraph(doc, 'Peringatan Kedua (Lisan)')
+        _add_letter_paragraph(doc)
     consequence = d.get('consequence','Apabila Saudara kembali tidak masuk kerja tanpa keterangan, perusahaan akan melakukan pemutusan hubungan kerja (PHK).')
-    p = doc.add_paragraph()
-    p.add_run(f'Oleh karena itu, perusahaan memberikan Surat Peringatan {sp_label} (SP{sp_level}) sebagai peringatan. {consequence}').font.size = Pt(11)
-    doc.add_paragraph()
-    p = doc.add_paragraph(); p.add_run('Demikian surat peringatan ini disampaikan untuk menjadi perhatian dan dilaksanakan sebagaimana mestinya.').font.size = Pt(11)
-    doc.add_paragraph()
+    _add_letter_paragraph(
+        doc,
+        f'Oleh karena itu, perusahaan memberikan Surat Peringatan {sp_label} '
+        f'(SP{sp_level}) sebagai peringatan. {consequence}',
+    )
+    _add_letter_paragraph(doc)
+    _add_letter_paragraph(
+        doc,
+        'Demikian surat peringatan ini disampaikan untuk menjadi perhatian dan '
+        'dilaksanakan sebagaimana mestinya.',
+    )
+    _add_letter_paragraph(doc)
     _letter_signoff_internal(doc, cfg)
 
 def _gen_letter_phk(doc, d, cfg, seq_str):
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    dt_str   = d.get('date', datetime.now().strftime('%d %B %Y'))
-    site     = cfg.get('site_name','Mangkajang')
-    emp_name = d.get('employee_name','')
-    emp_pos  = d.get('employee_position','')
-    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    p.add_run(f' {site}, {dt_str}').font.size = Pt(11)
-    doc.add_paragraph()
-    for label, val in [('No', f': {seq_str}'), ('Perihal', ': Surat Pemutusan Hubungan Kerja (PHK)')]:
-        p = doc.add_paragraph(); p.add_run(f'{label}\t{val}').font.size = Pt(11)
-    doc.add_paragraph()
-    p = doc.add_paragraph(); p.add_run('Yth.').font.size = Pt(11)
-    p = doc.add_paragraph(); p.add_run(f'Sdr. {emp_name}').font.size = Pt(11)
-    p = doc.add_paragraph(); p.add_run(emp_pos).font.size = Pt(11)
-    p = doc.add_paragraph(); p.add_run('Di Tempat.').font.size = Pt(11)
-    doc.add_paragraph()
-    p = doc.add_paragraph(); p.add_run('Dengan hormat,').font.size = Pt(11)
-    doc.add_paragraph()
+    dt_str, emp_name = _letter_employee_header(
+        doc,
+        d,
+        cfg,
+        seq_str,
+        'Surat Pemutusan Hubungan Kerja (PHK)',
+    )
     sp_ref = d.get('sp_reference','Surat Peringatan Ketiga (SP 3)')
     body   = d.get('body',f'Berdasarkan {sp_ref} yang telah diberikan kepada Saudara, dimana telah disepakati bahwa apabila Saudara kembali tidak masuk kerja tanpa keterangan, maka akan dilakukan Pemutusan Hubungan Kerja (PHK).')
-    p = doc.add_paragraph(); p.add_run(body).font.size = Pt(11)
-    doc.add_paragraph()
+    _add_letter_paragraph(doc, body)
+    _add_letter_paragraph(doc)
     eff_date = d.get('effective_date', dt_str)
-    p = doc.add_paragraph()
-    p.add_run(f'Sehubungan dengan hal tersebut, perusahaan dengan ini memutuskan untuk melakukan Pemutusan Hubungan Kerja (PHK) terhadap Saudara {emp_name}, terhitung sejak tanggal {eff_date}.').font.size = Pt(11)
-    doc.add_paragraph()
-    p = doc.add_paragraph()
-    p.add_run('Kami mengucapkan terima kasih atas kontribusi yang telah Saudara berikan selama bekerja di perusahaan. Segala hak dan kewajiban yang timbul akibat keputusan ini akan diselesaikan sesuai dengan ketentuan yang berlaku di perusahaan.').font.size = Pt(11)
-    doc.add_paragraph()
-    p = doc.add_paragraph()
-    p.add_run('Demikian surat ini dibuat untuk dapat dipahami dan dilaksanakan sebagaimana mestinya.').font.size = Pt(11)
-    doc.add_paragraph()
+    _add_letter_paragraph(
+        doc,
+        'Sehubungan dengan hal tersebut, perusahaan dengan ini memutuskan untuk '
+        'melakukan Pemutusan Hubungan Kerja (PHK) terhadap Saudara '
+        f'{emp_name}, terhitung sejak tanggal {eff_date}.',
+    )
+    _add_letter_paragraph(doc)
+    _add_letter_paragraph(
+        doc,
+        'Kami mengucapkan terima kasih atas kontribusi yang telah Saudara berikan '
+        'selama bekerja di perusahaan. Segala hak dan kewajiban yang timbul akibat '
+        'keputusan ini akan diselesaikan sesuai dengan ketentuan yang berlaku di '
+        'perusahaan.',
+    )
+    _add_letter_paragraph(doc)
+    _add_letter_paragraph(
+        doc,
+        'Demikian surat ini dibuat untuk dapat dipahami dan dilaksanakan '
+        'sebagaimana mestinya.',
+    )
+    _add_letter_paragraph(doc)
     _letter_signoff_internal(doc, cfg)
+
+
+def _configure_letter_document(doc):
+    """Apply the common page and font settings used by every letter type."""
+    for section in doc.sections:
+        section.top_margin = Cm(2.5)
+        section.bottom_margin = Cm(2.5)
+        section.left_margin = Cm(3)
+        section.right_margin = Cm(2.5)
+    doc.styles['Normal'].font.name = 'Times New Roman'
+    doc.styles['Normal'].font.size = Pt(11)
+
+
+def _render_letter_content(doc, d, cfg, seq_str, subject):
+    """Dispatch letter data to the matching content generator."""
+    letter_type = d.get('letter_type', 'umum')
+    if letter_type == 'sp':
+        _gen_letter_sp(doc, d, cfg, seq_str)
+        return
+    if letter_type == 'phk':
+        _gen_letter_phk(doc, d, cfg, seq_str)
+        return
+
+    generators = {
+        'pekerja': _gen_letter_pekerja,
+        'alat_berat': _gen_letter_alat_berat,
+        'sticker': _gen_letter_sticker,
+    }
+    generator = generators.get(letter_type, _gen_letter_umum)
+    generator(doc, d, cfg, seq_str, subject)
+
 
 def generate_letter_docx(d, cfg):
     from io import BytesIO
-    letter_type = d.get('letter_type','umum')
-    seq  = next_letter_seq()
-    dt   = datetime.now()
+
+    seq = next_letter_seq()
+    dt = datetime.now()
     seq_str = f"{seq:04d}/GPA-KN/{ROMAN_MONTH[dt.month]}/{dt.year}"
     doc = DocxDocument()
-    for section in doc.sections:
-        section.top_margin    = Cm(2.5)
-        section.bottom_margin = Cm(2.5)
-        section.left_margin   = Cm(3)
-        section.right_margin  = Cm(2.5)
-    doc.styles['Normal'].font.name = 'Times New Roman'
-    doc.styles['Normal'].font.size = Pt(11)
-    subject = d.get('subject','Permohonan')
-    dispatch = {
-        'pekerja':   _gen_letter_pekerja,
-        'alat_berat': _gen_letter_alat_berat,
-        'sticker':   _gen_letter_sticker,
-        'sp':        lambda dc, dd, cfg2, ss, sub: _gen_letter_sp(dc, dd, cfg2, ss),
-        'phk':       lambda dc, dd, cfg2, ss, sub: _gen_letter_phk(dc, dd, cfg2, ss),
-    }
-    fn = dispatch.get(letter_type, _gen_letter_umum)
-    fn(doc, d, cfg, seq_str, subject)
+    _configure_letter_document(doc)
+    _render_letter_content(
+        doc,
+        d,
+        cfg,
+        seq_str,
+        d.get('subject', 'Permohonan'),
+    )
+
     buf = BytesIO()
     doc.save(buf)
     buf.seek(0)
