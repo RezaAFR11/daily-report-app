@@ -770,110 +770,124 @@ def _pdf_signature_cell(signature_data, column_width):
     return Spacer(1, 20*mm)
 
 
-def _build_overall_progress_flowables(
-    report,
-    styles,
-    grey_line,
-    grey_background,
-    white,
-    section_gap,
-):
-    """Build the optional overall-progress section without mutating the report."""
-    flowables = [_PDFSectionMarker('overall_progress', [CondPageBreak(32*mm)])]
-    progress_rows = _normalise_overall_progress(report.get('overall_progress', []))
-    if not progress_rows:
-        flowables.append(Paragraph('No overall progress reported.', styles['ital_s']))
-        flowables.append(Spacer(1, section_gap))
-        return flowables
+def _overall_progress_text_styles(white):
+    """Create the compact paragraph styles used by the progress table."""
+    return {
+        'header': S(
+            'Normal',
+            fontSize=5.1,
+            leading=5.8,
+            fontName='Helvetica-Bold',
+            textColor=white,
+            alignment=1,
+            splitLongWords=1,
+        ),
+        'center': S(
+            'Normal',
+            fontSize=5.5,
+            leading=6.4,
+            alignment=1,
+            splitLongWords=1,
+        ),
+        'left': S(
+            'Normal',
+            fontSize=6,
+            leading=7,
+            splitLongWords=1,
+        ),
+        'total': S(
+            'Normal',
+            fontSize=5.5,
+            leading=6.4,
+            fontName='Helvetica-Bold',
+            alignment=1,
+            splitLongWords=1,
+        ),
+    }
 
-    progress_h = S(
-        'Normal',
-        fontSize=5.1,
-        leading=5.8,
-        fontName='Helvetica-Bold',
-        textColor=white,
-        alignment=1,
-        splitLongWords=1,
-    )
-    progress_c = S(
-        'Normal',
-        fontSize=5.5,
-        leading=6.4,
-        alignment=1,
-        splitLongWords=1,
-    )
-    progress_l = S(
-        'Normal',
-        fontSize=6,
-        leading=7,
-        splitLongWords=1,
-    )
-    progress_total = S(
-        'Normal',
-        fontSize=5.5,
-        leading=6.4,
-        fontName='Helvetica-Bold',
-        alignment=1,
-        splitLongWords=1,
-    )
 
-    def PH(value):
-        return Paragraph(_esc(value), progress_h)
+def _overall_progress_header_rows(text_styles):
+    def header(value):
+        return Paragraph(_esc(value), text_styles['header'])
 
-    def PC(value, left=False):
-        return Paragraph(_esc(value), progress_l if left else progress_c)
-
-    progress_data = [
+    return [
         [
-            PH('No.'), PH('Description'), PH('Duration'), PH('Weight Factor'),
-            PH('Start'), PH('Finish'), PH('Cumulative Previous'), '',
-            PH('This Period'), '', PH('Cumulative Up to This Month'), '', '',
+            header('No.'), header('Description'), header('Duration'),
+            header('Weight Factor'), header('Start'), header('Finish'),
+            header('Cumulative Previous'), '', header('This Period'), '',
+            header('Cumulative Up to This Month'), '', '',
         ],
         [
-            '', '', '', '', '', '', PH('Plan'), PH('Actual'), PH('Plan'),
-            PH('Actual'), PH('Plan'), PH('Actual'), PH('Deviation'),
+            '', '', '', '', '', '', header('Plan'), header('Actual'),
+            header('Plan'), header('Actual'), header('Plan'),
+            header('Actual'), header('Deviation'),
         ],
     ]
 
+
+def _overall_progress_deviation(row):
+    deviation = row.get('deviation', '')
+    if deviation:
+        return deviation
+    cumulative_plan = _progress_number(row.get('cumulative_to_date_plan'))
+    cumulative_actual = _progress_number(row.get('cumulative_to_date_actual'))
+    if cumulative_plan is None or cumulative_actual is None:
+        return ''
+    return f'{cumulative_actual - cumulative_plan:g}'
+
+
+def _overall_progress_body_rows(progress_rows, text_styles):
+    def cell(value, *, left=False):
+        style = text_styles['left'] if left else text_styles['center']
+        return Paragraph(_esc(value), style)
+
+    rows = []
     for index, row in enumerate(progress_rows, 1):
-        deviation = row.get('deviation', '')
-        if not deviation:
-            cumulative_plan = _progress_number(row.get('cumulative_to_date_plan'))
-            cumulative_actual = _progress_number(row.get('cumulative_to_date_actual'))
-            if cumulative_plan is not None and cumulative_actual is not None:
-                deviation = f'{cumulative_actual - cumulative_plan:g}'
-        progress_data.append([
-            PC(index),
-            PC(row.get('description', ''), left=True),
-            PC(row.get('duration', '')),
-            PC(_progress_percent_text(row.get('weight_factor', ''))),
-            PC(row.get('start', '')),
-            PC(row.get('finish', '')),
+        rows.append([
+            cell(index),
+            cell(row.get('description', ''), left=True),
+            cell(row.get('duration', '')),
+            cell(_progress_percent_text(row.get('weight_factor', ''))),
+            cell(row.get('start', '')),
+            cell(row.get('finish', '')),
             *[
-                PC(_progress_percent_text(row.get(field, '')))
+                cell(_progress_percent_text(row.get(field, '')))
                 for field in OVERALL_PROGRESS_PERCENT_FIELDS
             ],
-            PC(_progress_percent_text(deviation)),
+            cell(_progress_percent_text(_overall_progress_deviation(row))),
         ])
+    return rows
 
+
+def _overall_progress_total_row(progress_rows, text_styles):
     totals = _overall_progress_totals(progress_rows)
-    progress_data.append([
-        Paragraph('OVERALL PROGRESS', progress_total), '', '', '', '', '',
+    total_style = text_styles['total']
+    return [
+        Paragraph('OVERALL PROGRESS', total_style), '', '', '', '', '',
         *[
             Paragraph(
                 '' if totals.get(field) is None else f"{totals[field]:.2f}%",
-                progress_total,
+                total_style,
             )
             for field in OVERALL_PROGRESS_PERCENT_FIELDS
         ],
         Paragraph(
-            '' if totals.get('deviation') is None else f"{totals['deviation']:.2f}%",
-            progress_total,
+            '' if totals.get('deviation') is None
+            else f"{totals['deviation']:.2f}%",
+            total_style,
         ),
-    ])
+    ]
+
+
+def _overall_progress_table(progress_rows, styles, grey_line, grey_background, white):
+    """Build the complete two-row-header progress table."""
+    text_styles = _overall_progress_text_styles(white)
+    table_data = _overall_progress_header_rows(text_styles)
+    table_data.extend(_overall_progress_body_rows(progress_rows, text_styles))
+    table_data.append(_overall_progress_total_row(progress_rows, text_styles))
 
     progress_table = Table(
-        progress_data,
+        table_data,
         colWidths=[
             7*mm, 53*mm, 10*mm, 11*mm, 14*mm, 14*mm,
             10*mm, 10*mm, 10*mm, 10*mm, 10*mm, 10*mm, 11*mm,
@@ -900,56 +914,70 @@ def _build_overall_progress_flowables(
         ('LEFTPADDING', (0, 0), (-1, -1), 1.2),
         ('RIGHTPADDING', (0, 0), (-1, -1), 1.2),
     ]))
-    flowables.extend([progress_table, Spacer(1, section_gap)])
-    return flowables
+    return progress_table
 
 
-def _build_sign_off_flowables(
+def _build_overall_progress_flowables(
     report,
     styles,
     grey_line,
+    grey_background,
     white,
-    prepared_by,
-    checked_by,
-    approved_by,
     section_gap,
 ):
-    """Build the dynamic sign-off table, including legacy default signatories."""
-    sign_offs = report.get('sign_offs', [])
-    if not sign_offs:
-        sign_offs = [
-            {
-                'label': 'Prepared By',
-                'name': prepared_by,
-                'role': 'HSE / Administration',
-                'sig': '',
-            },
-            {
-                'label': 'Checked By',
-                'name': checked_by,
-                'role': 'Project Control',
-                'sig': '',
-            },
-            {
-                'label': 'Approved By',
-                'name': approved_by,
-                'role': 'Project Manager',
-                'sig': '',
-            },
-            {
-                'label': 'KN Representative',
-                'name': '',
-                'role': 'PT. Kertas Nusantara',
-                'sig': '',
-            },
-        ]
+    """Build the optional overall-progress section without mutating the report."""
+    flowables = [_PDFSectionMarker('overall_progress', [CondPageBreak(32*mm)])]
+    progress_rows = _normalise_overall_progress(report.get('overall_progress', []))
+    if not progress_rows:
+        flowables.append(Paragraph('No overall progress reported.', styles['ital_s']))
+        flowables.append(Spacer(1, section_gap))
+        return flowables
+    flowables.extend([
+        _overall_progress_table(
+            progress_rows,
+            styles,
+            grey_line,
+            grey_background,
+            white,
+        ),
+        Spacer(1, section_gap),
+    ])
+    return flowables
 
+
+def _default_pdf_sign_offs(prepared_by, checked_by, approved_by):
+    return [
+        {
+            'label': 'Prepared By',
+            'name': prepared_by,
+            'role': 'HSE / Administration',
+            'sig': '',
+        },
+        {
+            'label': 'Checked By',
+            'name': checked_by,
+            'role': 'Project Control',
+            'sig': '',
+        },
+        {
+            'label': 'Approved By',
+            'name': approved_by,
+            'role': 'Project Manager',
+            'sig': '',
+        },
+        {
+            'label': 'KN Representative',
+            'name': '',
+            'role': 'PT. Kertas Nusantara',
+            'sig': '',
+        },
+    ]
+
+
+def _pdf_sign_off_table(sign_offs, styles, grey_line, white):
+    """Build the dynamic signature grid for the report sign-off section."""
     column_count = len(sign_offs)
     column_width = CW / max(column_count, 1)
-
-    def _sig_cell(signature_data):
-        return _pdf_signature_cell(signature_data, column_width)
-
     heading_style = ParagraphStyle(
         '_sh',
         fontName='Helvetica-Bold',
@@ -965,11 +993,23 @@ def _build_sign_off_flowables(
         alignment=1,
     )
     sign_off_table = Table([
-        [Paragraph(_esc(item.get('label', '')), heading_style) for item in sign_offs],
-        [_sig_cell(item.get('sig', '')) for item in sign_offs],
+        [
+            Paragraph(_esc(item.get('label', '')), heading_style)
+            for item in sign_offs
+        ],
+        [
+            _pdf_signature_cell(item.get('sig', ''), column_width)
+            for item in sign_offs
+        ],
         [Paragraph('_' * 22, styles['body_s']) for item in sign_offs],
-        [Paragraph(_esc(item.get('name', '')), styles['bold_s']) for item in sign_offs],
-        [Paragraph(_esc(item.get('role', '')), role_style) for item in sign_offs],
+        [
+            Paragraph(_esc(item.get('name', '')), styles['bold_s'])
+            for item in sign_offs
+        ],
+        [
+            Paragraph(_esc(item.get('role', '')), role_style)
+            for item in sign_offs
+        ],
     ], colWidths=[column_width] * column_count)
     sign_off_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), styles['PRI']),
@@ -985,11 +1025,187 @@ def _build_sign_off_flowables(
         ('FONTSIZE', (0, 4), (-1, 4), 7.5),
         ('TEXTCOLOR', (0, 4), (-1, 4), colors.grey),
     ]))
+    return sign_off_table
+
+
+def _build_sign_off_flowables(
+    report,
+    styles,
+    grey_line,
+    white,
+    prepared_by,
+    checked_by,
+    approved_by,
+    section_gap,
+):
+    """Build the dynamic sign-off table, including legacy default signatories."""
+    sign_offs = report.get('sign_offs', [])
+    if not sign_offs:
+        sign_offs = _default_pdf_sign_offs(
+            prepared_by,
+            checked_by,
+            approved_by,
+        )
     return [
         _PDFSectionMarker('sign_off', [CondPageBreak(42*mm)]),
-        sign_off_table,
+        _pdf_sign_off_table(sign_offs, styles, grey_line, white),
         Spacer(1, section_gap),
     ]
+
+
+def _pdf_photo_image(image_data, box_width, box_height, photo_inset):
+    """Decode and crop one optional photo for a documentation card."""
+    if not image_data or ',' not in image_data:
+        return ''
+    try:
+        raw_photo = base64.b64decode(image_data.split(',')[1])
+        photo_width = box_width - 4*mm - 2*photo_inset
+        photo_height = box_height - 2*photo_inset
+        image_bytes = _prepare_pdf_photo(raw_photo, photo_width, photo_height)
+        return RLImage(
+            image_bytes,
+            width=photo_width,
+            height=photo_height,
+        )
+    except Exception:
+        return ''
+
+
+def _pdf_photo_card_content(
+    photo,
+    card_title,
+    styles,
+    box_width,
+    box_height,
+    photo_inset,
+):
+    description = _bounded_pdf_text(
+        photo.get('desc', ''),
+        PDF_PHOTO_CAPTION_MAX_CHARS,
+    )
+    return (
+        Paragraph(f'<b>{_esc(card_title)}</b>', styles['sm_s']),
+        Paragraph(_esc(description), styles['ital_s']),
+        _pdf_photo_image(
+            photo.get('img_data', ''),
+            box_width,
+            box_height,
+            photo_inset,
+        ),
+    )
+
+
+def _pdf_photo_row_text_heights(group, text_width):
+    """Align card borders using the tallest wrapped title and caption."""
+    title_height = max(
+        5*mm,
+        max(title.wrap(text_width, 100*mm)[1] for title, _, _ in group) + 2*mm,
+    )
+    caption_height = max(
+        6*mm,
+        max(caption.wrap(text_width, 100*mm)[1] for _, caption, _ in group) + 2*mm,
+    )
+    return title_height, caption_height
+
+
+def _pdf_photo_card(
+    content,
+    styles,
+    grey_line,
+    grey_background,
+    white,
+    box_width,
+    box_height,
+    photo_inset,
+    title_height,
+    caption_height,
+):
+    title, caption, photo_cell = content
+    card = Table(
+        [[title], [caption], [photo_cell]],
+        colWidths=[box_width - 4*mm],
+        rowHeights=[title_height, caption_height, box_height],
+    )
+    card.setStyle(TableStyle([
+        ('BOX', (0, 0), (-1, -1), 0.8, styles['PRI']),
+        ('LINEBELOW', (0, 0), (0, 0), 0.5, grey_line),
+        ('LINEBELOW', (0, 1), (0, 1), 0.5, grey_line),
+        ('BACKGROUND', (0, 0), (0, 0), styles['LB']),
+        ('BACKGROUND', (0, 1), (0, 1), grey_background),
+        # Matching the border colour hides PDF sub-pixel hairlines.
+        ('BACKGROUND', (0, 2), (0, 2), styles['PRI'] if photo_cell else white),
+        ('TOPPADDING', (0, 0), (-1, 1), 2),
+        ('BOTTOMPADDING', (0, 0), (-1, 1), 2),
+        ('LEFTPADDING', (0, 0), (-1, 1), 3),
+        ('RIGHTPADDING', (0, 0), (-1, 1), 3),
+        ('TOPPADDING', (0, 2), (-1, 2), photo_inset),
+        ('BOTTOMPADDING', (0, 2), (-1, 2), photo_inset),
+        ('LEFTPADDING', (0, 2), (-1, 2), photo_inset),
+        ('RIGHTPADDING', (0, 2), (-1, 2), photo_inset),
+        ('VALIGN', (0, 0), (-1, 1), 'MIDDLE'),
+    ]))
+    return card
+
+
+def _pdf_photo_area_grid(
+    photo_groups,
+    card_title,
+    styles,
+    grey_line,
+    grey_background,
+    white,
+    per_row,
+    box_width,
+    box_height,
+    photo_inset,
+):
+    """Build all aligned photo-card rows for one work area."""
+    rows = []
+    text_width = box_width - 10*mm
+    for photo_group in photo_groups:
+        group = [
+            _pdf_photo_card_content(
+                photo,
+                card_title,
+                styles,
+                box_width,
+                box_height,
+                photo_inset,
+            )
+            for _, photo in photo_group
+        ]
+        title_height, caption_height = _pdf_photo_row_text_heights(
+            group,
+            text_width,
+        )
+        row = [
+            _pdf_photo_card(
+                content,
+                styles,
+                grey_line,
+                grey_background,
+                white,
+                box_width,
+                box_height,
+                photo_inset,
+                title_height,
+                caption_height,
+            )
+            for content in group
+        ]
+        while len(row) < per_row:
+            row.append('')
+        rows.append(row)
+
+    area_grid = Table(rows, colWidths=[box_width] * per_row)
+    area_grid.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 2),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 2),
+        ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    return area_grid
 
 
 def _build_photo_documentation_flowables(
@@ -1022,7 +1238,6 @@ def _build_photo_documentation_flowables(
     box_width = (CW - 4*mm) / per_row
     box_height = 52*mm
     photo_inset = 0
-    text_width = box_width - 10*mm
 
     for raw_area_id, photo_groups in photo_sections:
         area_id = _bounded_pdf_text(raw_area_id, PDF_PHOTO_AREA_MAX_CHARS)
@@ -1031,89 +1246,18 @@ def _build_photo_documentation_flowables(
             Paragraph(_esc(area_id), styles['sub_s']),
             Spacer(1, 0.5*mm),
         ])
-        rows = []
-
-        for photo_group in photo_groups:
-            group = []
-            for _, photo in photo_group:
-                image_data = photo.get('img_data', '')
-                description = _bounded_pdf_text(
-                    photo.get('desc', ''),
-                    PDF_PHOTO_CAPTION_MAX_CHARS,
-                )
-                photo_cell = ''
-                if image_data and ',' in image_data:
-                    try:
-                        raw_photo = base64.b64decode(image_data.split(',')[1])
-                        photo_width = box_width - 4*mm - 2*photo_inset
-                        photo_height = box_height - 2*photo_inset
-                        image_bytes = _prepare_pdf_photo(
-                            raw_photo,
-                            photo_width,
-                            photo_height,
-                        )
-                        photo_cell = RLImage(
-                            image_bytes,
-                            width=photo_width,
-                            height=photo_height,
-                        )
-                    except Exception:
-                        photo_cell = ''
-
-                card_title = documentation_title or area_id
-                title = Paragraph(f'<b>{_esc(card_title)}</b>', styles['sm_s'])
-                caption = Paragraph(_esc(description), styles['ital_s'])
-                group.append((title, caption, photo_cell))
-
-            # Use the tallest wrapped text in the row to keep card borders aligned.
-            title_height = max(
-                5*mm,
-                max(title.wrap(text_width, 100*mm)[1] for title, _, _ in group) + 2*mm,
-            )
-            caption_height = max(
-                6*mm,
-                max(caption.wrap(text_width, 100*mm)[1] for _, caption, _ in group) + 2*mm,
-            )
-
-            row = []
-            for title, caption, photo_cell in group:
-                card = Table(
-                    [[title], [caption], [photo_cell]],
-                    colWidths=[box_width - 4*mm],
-                    rowHeights=[title_height, caption_height, box_height],
-                )
-                card.setStyle(TableStyle([
-                    ('BOX', (0, 0), (-1, -1), 0.8, styles['PRI']),
-                    ('LINEBELOW', (0, 0), (0, 0), 0.5, grey_line),
-                    ('LINEBELOW', (0, 1), (0, 1), 0.5, grey_line),
-                    ('BACKGROUND', (0, 0), (0, 0), styles['LB']),
-                    ('BACKGROUND', (0, 1), (0, 1), grey_background),
-                    # Matching the border colour hides PDF sub-pixel hairlines.
-                    ('BACKGROUND', (0, 2), (0, 2), styles['PRI'] if photo_cell else white),
-                    ('TOPPADDING', (0, 0), (-1, 1), 2),
-                    ('BOTTOMPADDING', (0, 0), (-1, 1), 2),
-                    ('LEFTPADDING', (0, 0), (-1, 1), 3),
-                    ('RIGHTPADDING', (0, 0), (-1, 1), 3),
-                    ('TOPPADDING', (0, 2), (-1, 2), photo_inset),
-                    ('BOTTOMPADDING', (0, 2), (-1, 2), photo_inset),
-                    ('LEFTPADDING', (0, 2), (-1, 2), photo_inset),
-                    ('RIGHTPADDING', (0, 2), (-1, 2), photo_inset),
-                    ('VALIGN', (0, 0), (-1, 1), 'MIDDLE'),
-                ]))
-                row.append(card)
-
-            while len(row) < per_row:
-                row.append('')
-            rows.append(row)
-
-        area_grid = Table(rows, colWidths=[box_width] * per_row)
-        area_grid.setStyle(TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 2),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 2),
-            ('TOPPADDING', (0, 0), (-1, -1), 2),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ]))
+        area_grid = _pdf_photo_area_grid(
+            photo_groups,
+            documentation_title or area_id,
+            styles,
+            grey_line,
+            grey_background,
+            white,
+            per_row,
+            box_width,
+            box_height,
+            photo_inset,
+        )
         flowables.extend([area_grid, Spacer(1, 2*mm)])
 
     return flowables
