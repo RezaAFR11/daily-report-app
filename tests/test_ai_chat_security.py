@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import httpx
+
 import daily_report_app
 
 
@@ -128,6 +130,115 @@ class AIChatSecurityTests(unittest.TestCase):
         self.assertEqual(second.get_json()["code"], "rate_limited")
         self.assertTrue(second.headers.get("Retry-After"))
         self.assertEqual(messages.create.call_count, 1)
+
+    def test_provider_failures_keep_stable_api_contracts(self):
+        provider_request = httpx.Request('POST', 'https://api.anthropic.test/messages')
+
+        def response_error(error_type, status_code, message):
+            response = httpx.Response(status_code, request=provider_request)
+            return error_type(message, response=response, body=None)
+
+        cases = [
+            (
+                daily_report_app._anthropic_mod.APITimeoutError(provider_request),
+                504,
+                'timeout',
+                True,
+            ),
+            (
+                response_error(
+                    daily_report_app._anthropic_mod.RateLimitError,
+                    429,
+                    'rate limited',
+                ),
+                429,
+                'rate_limited',
+                True,
+            ),
+            (
+                response_error(
+                    daily_report_app._anthropic_mod.AuthenticationError,
+                    401,
+                    'bad credentials',
+                ),
+                503,
+                'provider_authentication_failed',
+                False,
+            ),
+            (
+                response_error(
+                    daily_report_app._anthropic_mod.PermissionDeniedError,
+                    403,
+                    'permission denied',
+                ),
+                503,
+                'provider_authentication_failed',
+                False,
+            ),
+            (
+                daily_report_app._anthropic_mod.APIError(
+                    'provider failed',
+                    provider_request,
+                    body=None,
+                ),
+                502,
+                'provider_error',
+                True,
+            ),
+            (
+                ValueError('invalid model response'),
+                502,
+                'invalid_ai_response',
+                True,
+            ),
+            (
+                RuntimeError('unexpected failure'),
+                500,
+                'internal_error',
+                None,
+            ),
+        ]
+
+        for error, status_code, code, retryable in cases:
+            with self.subTest(error=type(error).__name__):
+                with (
+                    patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'sk-ant-test'}),
+                    patch('daily_report_app._AI_CHAT_COOLDOWN_SECONDS', 0),
+                    patch('daily_report_app._request_ai_chat', side_effect=error),
+                    patch('daily_report_app.app.logger.warning'),
+                    patch('daily_report_app.app.logger.exception'),
+                ):
+                    response = self.client.post(
+                        '/ai/chat',
+                        json={'message': 'prepare report'},
+                    )
+
+                payload = response.get_json()
+                self.assertEqual(response.status_code, status_code)
+                self.assertEqual(payload['code'], code)
+                if retryable is None:
+                    self.assertNotIn('retryable', payload)
+                else:
+                    self.assertIs(payload['retryable'], retryable)
+
+    def test_invalid_provider_json_falls_back_to_plain_reply(self):
+        with (
+            patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'sk-ant-test'}),
+            patch('daily_report_app._AI_CHAT_COOLDOWN_SECONDS', 0),
+            patch('daily_report_app._request_ai_chat', return_value='plain reply'),
+        ):
+            response = self.client.post(
+                '/ai/chat',
+                json={'message': 'prepare report'},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {
+            'reply': 'plain reply',
+            'updates': {},
+            'missing': [],
+            'ready': False,
+        })
 
     def test_ai_chat_template_does_not_insert_provider_text_as_html(self):
         template = (

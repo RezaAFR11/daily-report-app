@@ -4892,18 +4892,119 @@ def _extract_ai_json_payload(raw_response):
     return raw_response
 
 
-@app.route('/ai/chat', methods=['POST'])
-@login_required
-def ai_chat():
-    """Validate a bounded chat request and return structured Daily form updates."""
+def _ai_chat_access_error():
+    """Return a pre-provider access/size response, or None when allowed."""
     if not _anthropic_ai_allowed():
         return jsonify({
             'error': 'Only an administrator may use the paid AI assistant.',
             'code': 'permission_denied',
             'retryable': False,
         }), 403
-    if request.content_length is not None and request.content_length > _AI_CHAT_MAX_REQUEST_BYTES:
+    if (
+        request.content_length is not None
+        and request.content_length > _AI_CHAT_MAX_REQUEST_BYTES
+    ):
         return jsonify({'error': 'AI chat request is too large.'}), 413
+    return None
+
+
+def _prepare_ai_chat_payload(data, config):
+    """Validate client input and build bounded provider messages and context."""
+    if not isinstance(data, dict):
+        raise ValueError('Invalid AI chat request.')
+
+    user_message = str(data.get('message') or '').replace('\x00', '').strip()
+    if not user_message:
+        raise ValueError('Empty message')
+    if len(user_message) > _AI_CHAT_MAX_MESSAGE_CHARS:
+        raise ValueError(
+            f'Message exceeds {_AI_CHAT_MAX_MESSAGE_CHARS} characters.'
+        )
+
+    messages = _build_ai_chat_messages(data.get('history'), user_message)
+    current_form = _safe_ai_value(data.get('current_form') or {})
+    return messages, _build_ai_system_prompt(config, current_form)
+
+
+def _ai_chat_json_fallback(raw_response):
+    return jsonify({
+        'reply': raw_response[:8_000]
+        if raw_response
+        else 'Sorry, I had trouble formatting my response.',
+        'updates': {},
+        'missing': [],
+        'ready': False,
+    })
+
+
+def _ai_chat_provider_error_response(error, raw_response=''):
+    """Map provider/response failures to the stable legacy AI API contract."""
+    if isinstance(error, json.JSONDecodeError):
+        return _ai_chat_json_fallback(raw_response)
+    if isinstance(error, _anthropic_mod.APITimeoutError):
+        return jsonify({
+            'error': 'Claude request timed out.',
+            'code': 'timeout',
+            'retryable': True,
+        }), 504
+    if isinstance(error, _anthropic_mod.RateLimitError):
+        return _ai_rate_limit_response(
+            30,
+            'Claude rate limit was reached. Please retry later.',
+        )
+    if isinstance(
+        error,
+        (
+            _anthropic_mod.AuthenticationError,
+            _anthropic_mod.PermissionDeniedError,
+        ),
+    ):
+        app.logger.warning('Legacy AI chat authentication or permission failed')
+        return jsonify({
+            'error': 'Claude API authentication or permission failed.',
+            'code': 'provider_authentication_failed',
+            'retryable': False,
+        }), 503
+    if isinstance(error, _anthropic_mod.APIError):
+        app.logger.warning('Legacy AI chat provider request failed')
+        return jsonify({
+            'error': 'Claude API request failed.',
+            'code': 'provider_error',
+            'retryable': True,
+        }), 502
+    if isinstance(error, ValueError):
+        return jsonify({
+            'error': str(error),
+            'code': 'invalid_ai_response',
+            'retryable': True,
+        }), 502
+
+    app.logger.exception('Legacy AI chat failed unexpectedly')
+    return jsonify({
+        'error': 'AI assistant failed unexpectedly.',
+        'code': 'internal_error',
+    }), 500
+
+
+def _execute_ai_chat(api_key, system, messages):
+    """Call Claude and convert its response or exception to a Flask response."""
+    raw_response = ''
+    try:
+        raw_response = _request_ai_chat(api_key, system, messages)
+        raw_response = _extract_ai_json_payload(raw_response)
+        result = _normalise_ai_chat_result(json.loads(raw_response))
+        return jsonify(result)
+    except Exception as error:
+        return _ai_chat_provider_error_response(error, raw_response)
+
+
+@app.route('/ai/chat', methods=['POST'])
+@login_required
+def ai_chat():
+    """Validate a bounded chat request and return structured Daily form updates."""
+    access_error = _ai_chat_access_error()
+    if access_error is not None:
+        return access_error
 
     cfg = load_config()
     api_key = os.environ.get('ANTHROPIC_API_KEY', '').strip()
@@ -4914,54 +5015,20 @@ def ai_chat():
             'retryable': False,
         }), 503
 
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return jsonify({'error': 'Invalid AI chat request.'}), 400
-    user_msg = str(data.get('message') or '').replace('\x00', '').strip()
-    if not user_msg:
-        return jsonify({'error': 'Empty message'}), 400
-    if len(user_msg) > _AI_CHAT_MAX_MESSAGE_CHARS:
-        return jsonify({'error': f'Message exceeds {_AI_CHAT_MAX_MESSAGE_CHARS} characters.'}), 400
-
-    messages = _build_ai_chat_messages(data.get('history'), user_msg)
-    current_form = _safe_ai_value(data.get('current_form') or {})
-    system = _build_ai_system_prompt(cfg, current_form)
+    try:
+        messages, system = _prepare_ai_chat_payload(
+            request.get_json(silent=True),
+            cfg,
+        )
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
 
     username = str(session['username'])
     acquired, wait_seconds = _begin_ai_chat(username)
     if not acquired:
         return _ai_rate_limit_response(wait_seconds)
     try:
-        raw = _request_ai_chat(api_key, system, messages)
-        raw = _extract_ai_json_payload(raw)
-        result = _normalise_ai_chat_result(json.loads(raw))
-        return jsonify(result)
-    except json.JSONDecodeError:
-        return jsonify({
-            'reply': raw[:8_000] if 'raw' in dir() else 'Sorry, I had trouble formatting my response.',
-            'updates': {},
-            'missing': [],
-            'ready': False,
-        })
-    except _anthropic_mod.APITimeoutError:
-        return jsonify({'error': 'Claude request timed out.', 'code': 'timeout', 'retryable': True}), 504
-    except _anthropic_mod.RateLimitError:
-        return _ai_rate_limit_response(30, 'Claude rate limit was reached. Please retry later.')
-    except (_anthropic_mod.AuthenticationError, _anthropic_mod.PermissionDeniedError):
-        app.logger.warning('Legacy AI chat authentication or permission failed')
-        return jsonify({
-            'error': 'Claude API authentication or permission failed.',
-            'code': 'provider_authentication_failed',
-            'retryable': False,
-        }), 503
-    except _anthropic_mod.APIError:
-        app.logger.warning('Legacy AI chat provider request failed')
-        return jsonify({'error': 'Claude API request failed.', 'code': 'provider_error', 'retryable': True}), 502
-    except ValueError as exc:
-        return jsonify({'error': str(exc), 'code': 'invalid_ai_response', 'retryable': True}), 502
-    except Exception:
-        app.logger.exception('Legacy AI chat failed unexpectedly')
-        return jsonify({'error': 'AI assistant failed unexpectedly.', 'code': 'internal_error'}), 500
+        return _execute_ai_chat(api_key, system, messages)
     finally:
         _finish_ai_chat(username)
 
