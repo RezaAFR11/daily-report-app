@@ -112,7 +112,34 @@ class PDFGenerationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers['X-Report-Archive-Status'], 'failed')
+        self.assertEqual(response.headers['X-Report-Pdf-Archive-Status'], 'failed')
+        self.assertEqual(response.headers['X-Report-Json-Archive-Status'], 'saved')
+        self.assertEqual(response.headers['X-Report-ID'], 'test-r1')
+        self.assertEqual(response.headers['X-Report-Archive-ID'], '')
         self.assertTrue(response.data.startswith(b'%PDF'))
+
+    def test_canonical_archive_failure_does_not_block_pdf_archive_or_download(self):
+        fake_pdf = io.BytesIO(b'%PDF-1.4\nvalid test pdf\n%%EOF')
+        with (
+            patch('daily_report_app.generate_pdf', return_value=fake_pdf),
+            patch(
+                'daily_report_app.archive_final_daily_record',
+                side_effect=OSError('canonical storage unavailable'),
+            ),
+            patch('daily_report_app.archive_generated_report') as archive_pdf,
+            patch('daily_report_app.app.logger.exception'),
+        ):
+            response = self.client.post('/generate', json=MINIMAL_REPORT)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers['X-Report-Archive-Status'], 'failed')
+        self.assertEqual(response.headers['X-Report-Pdf-Archive-Status'], 'saved')
+        self.assertEqual(response.headers['X-Report-Json-Archive-Status'], 'failed')
+        self.assertEqual(response.headers['X-Report-ID'], '')
+        self.assertRegex(response.headers['X-Report-Archive-ID'], r'^[a-f0-9]{32}$')
+        self.assertTrue(response.data.startswith(b'%PDF'))
+        archive_entry = archive_pdf.call_args.args[3]
+        self.assertNotIn('canonical_report_id', archive_entry)
 
     def test_generate_rejects_invalid_json(self):
         response = self.client.post(

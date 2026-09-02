@@ -486,6 +486,16 @@ class GoogleDriveRouteTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(upload.call_args.args[0], old_pdf)
+            with open(os.path.join(reports_dir, 'index.json'), encoding='utf-8') as handle:
+                updated_rows = json.load(handle)
+            updated_old = next(
+                row for row in updated_rows if row['archive_id'] == 'a' * 32
+            )
+            untouched_new = next(
+                row for row in updated_rows if row['archive_id'] == 'b' * 32
+            )
+            self.assertEqual(updated_old['drive_file_id'], 'old-drive-file')
+            self.assertNotIn('drive_file_id', untouched_new)
 
 
 if __name__ == "__main__":

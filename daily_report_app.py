@@ -2218,6 +2218,15 @@ def _save_reports_index(username, rows):
     _atomic_write_json(index_path, rows, ensure_ascii=False, indent=2)
 
 
+def _report_index_update_matches(row, filename, report_id='', archive_id=''):
+    """Match an index update using the strongest identity supplied by callers."""
+    if archive_id:
+        return row.get('archive_id') == archive_id
+    if report_id:
+        return row.get('canonical_report_id') == report_id
+    return row.get('filename') == filename
+
+
 def update_report_index_entry(
     username,
     *,
@@ -2231,18 +2240,16 @@ def update_report_index_entry(
     updates = dict(updates or {})
     matched = False
     for row in rows:
-        if archive_id and row.get('archive_id') == archive_id:
-            row.update(updates)
-            matched = True
-            break
-        if not archive_id and report_id and row.get('canonical_report_id') == report_id:
-            row.update(updates)
-            matched = True
-            break
-        if not archive_id and not report_id and row.get('filename') == filename:
-            row.update(updates)
-            matched = True
-            break
+        if not _report_index_update_matches(
+            row,
+            filename,
+            report_id,
+            archive_id,
+        ):
+            continue
+        row.update(updates)
+        matched = True
+        break
     if not matched:
         return False
     _save_reports_index(username, rows)
@@ -3993,6 +4000,49 @@ def _daily_pdf_archive_entry(filename, report, archive_id, canonical_record):
     return entry
 
 
+def _archive_canonical_daily_report_best_effort(username, payload):
+    """Archive canonical JSON without blocking an otherwise valid PDF."""
+    try:
+        return _archive_canonical_daily_report(username, payload), False
+    except Exception:
+        app.logger.exception(
+            'Could not archive final JSON for user %s',
+            username,
+        )
+        return None, True
+
+
+def _archive_daily_pdf_best_effort(
+    username,
+    filename,
+    report,
+    pdf_bytes,
+    canonical_record,
+):
+    """Archive the generated PDF without blocking its download response."""
+    try:
+        archive_id = uuid.uuid4().hex
+        archive_entry = _daily_pdf_archive_entry(
+            filename,
+            report,
+            archive_id,
+            canonical_record,
+        )
+        archive_generated_report(
+            username,
+            filename,
+            pdf_bytes,
+            archive_entry,
+        )
+        return archive_id, False
+    except Exception:
+        app.logger.exception(
+            'Could not archive generated PDF for user %s',
+            username,
+        )
+        return '', True
+
+
 def _daily_pdf_download_response(
     pdf_buffer,
     filename,
@@ -4038,44 +4088,31 @@ def generate():
         return jsonify({'error': 'Invalid report data'}), 400
 
     try:
-        canonical_payload, d, fname, buf = _prepare_daily_pdf_download(payload, username)
-    except Exception as e:
-        app.logger.exception('PDF generation failed for user %s', username)
-        return jsonify({'error': f'PDF generation failed: {e}'}), 500
-
-    pdf_bytes = buf.getvalue()
-    archive_failed = False
-    json_archive_failed = False
-    pdf_archive_failed = False
-    canonical_record = None
-    pdf_archive_id = ''
-    try:
-        canonical_record = _archive_canonical_daily_report(username, canonical_payload)
-    except Exception:
-        archive_failed = True
-        json_archive_failed = True
-        app.logger.exception('Could not archive final JSON for user %s', username)
-
-    try:
-        pdf_archive_id = uuid.uuid4().hex
-        archive_entry = _daily_pdf_archive_entry(
-            fname,
-            d,
-            pdf_archive_id,
-            canonical_record,
+        canonical_payload, report, filename, pdf_buffer = (
+            _prepare_daily_pdf_download(payload, username)
         )
-        archive_generated_report(username, fname, pdf_bytes, archive_entry)
-    except Exception:
-        # A temporary My Reports problem must not block a valid PDF download.
-        archive_failed = True
-        pdf_archive_failed = True
-        pdf_archive_id = ''
-        app.logger.exception('Could not archive generated PDF for user %s', username)
+    except Exception as exc:
+        app.logger.exception('PDF generation failed for user %s', username)
+        return jsonify({'error': f'PDF generation failed: {exc}'}), 500
+
+    canonical_record, json_archive_failed = (
+        _archive_canonical_daily_report_best_effort(
+            username,
+            canonical_payload,
+        )
+    )
+    pdf_archive_id, pdf_archive_failed = _archive_daily_pdf_best_effort(
+        username,
+        filename,
+        report,
+        pdf_buffer.getvalue(),
+        canonical_record,
+    )
 
     return _daily_pdf_download_response(
-        buf,
-        fname,
-        archive_failed,
+        pdf_buffer,
+        filename,
+        json_archive_failed or pdf_archive_failed,
         pdf_archive_failed,
         json_archive_failed,
         canonical_record,
@@ -4118,36 +4155,49 @@ def load_draft_route():
 def get_config():
     return jsonify(load_config())
 
+
+_EDITABLE_CONFIG_FIELDS = (
+    'company_name', 'customer', 'project_no', 'project_title', 'location',
+    'equipment', 'prepared_by', 'checked_by', 'approved_by', 'areas',
+    'hours_options', 'show_logo_gpa', 'show_logo_kn', 'logo_gpa_w',
+    'logo_gpa_h', 'logo_gpa_y_off', 'logo_kn_w', 'logo_kn_h',
+    'logo_kn_y_off', 'manpower_db', 'site_name', 'pm_name', 'pm_title',
+    'letter_kn_attn', 'project_start_date',
+)
+
+
+def _apply_editable_config_updates(config, data):
+    """Apply only the settings intentionally exposed by the web form."""
+    for key in _EDITABLE_CONFIG_FIELDS:
+        if key in data:
+            config[key] = data[key]
+    if 'theme' in data:
+        config['theme'].update(data['theme'])
+
+
 @app.route('/save_config', methods=['POST'])
 @login_required
 def save_config_route():
     cfg = load_config()
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
-        return jsonify({'error':'Invalid settings data.'}), 400
+        return jsonify({'error': 'Invalid settings data.'}), 400
     if 'ai_api_key' in data:
         return jsonify({
             'error': 'Anthropic API keys must be configured with the ANTHROPIC_API_KEY environment variable.'
         }), 400
     if 'projects' in data:
         if not session.get('is_admin', False):
-            return jsonify({'error':'Only an admin can change Master Projects.'}), 403
+            return jsonify({
+                'error': 'Only an admin can change Master Projects.',
+            }), 403
         try:
             cfg['projects'] = normalize_projects(data['projects'], strict=True)
         except ValueError as exc:
-            return jsonify({'error':str(exc)}), 400
-    for k in ['company_name','customer','project_no','project_title','location','equipment',
-              'prepared_by','checked_by','approved_by','areas','hours_options',
-              'show_logo_gpa','show_logo_kn',
-              'logo_gpa_w','logo_gpa_h','logo_gpa_y_off',
-              'logo_kn_w','logo_kn_h','logo_kn_y_off',
-              'manpower_db',
-              'site_name','pm_name','pm_title','letter_kn_attn','project_start_date']:
-        if k in data: cfg[k] = data[k]
-    if 'theme' in data:
-        cfg['theme'].update(data['theme'])
+            return jsonify({'error': str(exc)}), 400
+    _apply_editable_config_updates(cfg, data)
     save_config(cfg)
-    return jsonify({'ok':True})
+    return jsonify({'ok': True})
 
 @app.route('/upload_logo', methods=['POST'])
 @login_required

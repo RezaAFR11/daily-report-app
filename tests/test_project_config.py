@@ -261,6 +261,19 @@ class ProjectConfigTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
 
+    def test_save_config_updates_only_exposed_fields_and_merges_theme(self):
+        response = self.client.post('/save_config', json={
+            'company_name': 'PT. Updated Company',
+            'theme': {'primary': '#112233'},
+            'unexpected_setting': 'must not be persisted',
+        })
+
+        self.assertEqual(response.status_code, 200)
+        config = load_config()
+        self.assertEqual(config['company_name'], 'PT. Updated Company')
+        self.assertEqual(config['theme']['primary'], '#112233')
+        self.assertNotIn('unexpected_setting', config)
+
     def test_project_titles_are_safely_serialized_into_page(self):
         malicious = '</script><script>alert("project")</script>'
         config = load_config()
