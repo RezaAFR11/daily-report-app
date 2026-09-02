@@ -974,10 +974,8 @@ def _default_pdf_sign_offs(prepared_by, checked_by, approved_by):
     ]
 
 
-def _pdf_sign_off_table(sign_offs, styles, grey_line, white):
-    """Build the dynamic signature grid for the report sign-off section."""
-    column_count = len(sign_offs)
-    column_width = CW / max(column_count, 1)
+def _pdf_sign_off_text_styles():
+    """Return the two small text styles unique to the sign-off grid."""
     heading_style = ParagraphStyle(
         '_sh',
         fontName='Helvetica-Bold',
@@ -992,7 +990,13 @@ def _pdf_sign_off_table(sign_offs, styles, grey_line, white):
         textColor=colors.grey,
         alignment=1,
     )
-    sign_off_table = Table([
+    return heading_style, role_style
+
+
+def _pdf_sign_off_rows(sign_offs, styles, column_width):
+    """Build sign-off cells without mixing them with table presentation."""
+    heading_style, role_style = _pdf_sign_off_text_styles()
+    return [
         [
             Paragraph(_esc(item.get('label', '')), heading_style)
             for item in sign_offs
@@ -1010,7 +1014,17 @@ def _pdf_sign_off_table(sign_offs, styles, grey_line, white):
             Paragraph(_esc(item.get('role', '')), role_style)
             for item in sign_offs
         ],
-    ], colWidths=[column_width] * column_count)
+    ]
+
+
+def _pdf_sign_off_table(sign_offs, styles, grey_line, white):
+    """Build the dynamic signature grid for the report sign-off section."""
+    column_count = len(sign_offs)
+    column_width = CW / max(column_count, 1)
+    sign_off_table = Table(
+        _pdf_sign_off_rows(sign_offs, styles, column_width),
+        colWidths=[column_width] * column_count,
+    )
     sign_off_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), styles['PRI']),
         ('TEXTCOLOR', (0, 0), (-1, 0), white),
@@ -1147,6 +1161,52 @@ def _pdf_photo_card(
     return card
 
 
+def _pdf_photo_card_row(
+    photo_group,
+    card_title,
+    styles,
+    grey_line,
+    grey_background,
+    white,
+    per_row,
+    box_width,
+    box_height,
+    photo_inset,
+):
+    """Build one height-aligned row of photo cards and empty trailing cells."""
+    contents = [
+        _pdf_photo_card_content(
+            photo,
+            card_title,
+            styles,
+            box_width,
+            box_height,
+            photo_inset,
+        )
+        for _, photo in photo_group
+    ]
+    title_height, caption_height = _pdf_photo_row_text_heights(
+        contents,
+        box_width - 10*mm,
+    )
+    row = [
+        _pdf_photo_card(
+            content,
+            styles,
+            grey_line,
+            grey_background,
+            white,
+            box_width,
+            box_height,
+            photo_inset,
+            title_height,
+            caption_height,
+        )
+        for content in contents
+    ]
+    return row + [''] * (per_row - len(row))
+
+
 def _pdf_photo_area_grid(
     photo_groups,
     card_title,
@@ -1160,42 +1220,21 @@ def _pdf_photo_area_grid(
     photo_inset,
 ):
     """Build all aligned photo-card rows for one work area."""
-    rows = []
-    text_width = box_width - 10*mm
-    for photo_group in photo_groups:
-        group = [
-            _pdf_photo_card_content(
-                photo,
-                card_title,
-                styles,
-                box_width,
-                box_height,
-                photo_inset,
-            )
-            for _, photo in photo_group
-        ]
-        title_height, caption_height = _pdf_photo_row_text_heights(
-            group,
-            text_width,
+    rows = [
+        _pdf_photo_card_row(
+            photo_group,
+            card_title,
+            styles,
+            grey_line,
+            grey_background,
+            white,
+            per_row,
+            box_width,
+            box_height,
+            photo_inset,
         )
-        row = [
-            _pdf_photo_card(
-                content,
-                styles,
-                grey_line,
-                grey_background,
-                white,
-                box_width,
-                box_height,
-                photo_inset,
-                title_height,
-                caption_height,
-            )
-            for content in group
-        ]
-        while len(row) < per_row:
-            row.append('')
-        rows.append(row)
+        for photo_group in photo_groups
+    ]
 
     area_grid = Table(rows, colWidths=[box_width] * per_row)
     area_grid.setStyle(TableStyle([
@@ -1208,17 +1247,8 @@ def _pdf_photo_area_grid(
     return area_grid
 
 
-def _build_photo_documentation_flowables(
-    report,
-    areas,
-    styles,
-    grey_line,
-    grey_background,
-    white,
-):
-    """Build independent photo grids so work areas never blend together."""
-    per_row = 3
-    photo_sections = _group_report_photos(areas, per_row)
+def _pdf_photo_section_intro(report, styles, photo_sections):
+    """Build the photo marker and optional documentation title."""
     flowables = [
         _PDFSectionMarker(
             'photo_documentation',
@@ -1234,21 +1264,71 @@ def _build_photo_documentation_flowables(
             Paragraph(_esc(documentation_title), styles['sub_s']),
             Spacer(1, 0.5*mm),
         ])
+    return flowables, documentation_title
 
+
+def _pdf_photo_area_flowables(
+    raw_area_id,
+    photo_groups,
+    documentation_title,
+    styles,
+    grey_line,
+    grey_background,
+    white,
+    per_row,
+    box_width,
+    box_height,
+    photo_inset,
+):
+    """Build one area heading and its independent photo grid."""
+    area_id = _bounded_pdf_text(raw_area_id, PDF_PHOTO_AREA_MAX_CHARS)
+    area_heading = Paragraph(_esc(area_id), styles['sub_s'])
+    area_grid = _pdf_photo_area_grid(
+        photo_groups,
+        documentation_title or area_id,
+        styles,
+        grey_line,
+        grey_background,
+        white,
+        per_row,
+        box_width,
+        box_height,
+        photo_inset,
+    )
+    return [
+        CondPageBreak(65*mm),
+        area_heading,
+        Spacer(1, 0.5*mm),
+        area_grid,
+        Spacer(1, 2*mm),
+    ]
+
+
+def _build_photo_documentation_flowables(
+    report,
+    areas,
+    styles,
+    grey_line,
+    grey_background,
+    white,
+):
+    """Build independent photo grids so work areas never blend together."""
+    per_row = 3
+    photo_sections = _group_report_photos(areas, per_row)
+    flowables, documentation_title = _pdf_photo_section_intro(
+        report,
+        styles,
+        photo_sections,
+    )
     box_width = (CW - 4*mm) / per_row
     box_height = 52*mm
     photo_inset = 0
 
     for raw_area_id, photo_groups in photo_sections:
-        area_id = _bounded_pdf_text(raw_area_id, PDF_PHOTO_AREA_MAX_CHARS)
-        flowables.extend([
-            CondPageBreak(65*mm),
-            Paragraph(_esc(area_id), styles['sub_s']),
-            Spacer(1, 0.5*mm),
-        ])
-        area_grid = _pdf_photo_area_grid(
+        flowables.extend(_pdf_photo_area_flowables(
+            raw_area_id,
             photo_groups,
-            documentation_title or area_id,
+            documentation_title,
             styles,
             grey_line,
             grey_background,
@@ -1257,8 +1337,7 @@ def _build_photo_documentation_flowables(
             box_width,
             box_height,
             photo_inset,
-        )
-        flowables.extend([area_grid, Spacer(1, 2*mm)])
+        ))
 
     return flowables
 
@@ -1375,6 +1454,44 @@ def _build_indirect_manpower_flowables(
     return [*section_marker('indirect_manpower'), table, Spacer(1, section_gap)]
 
 
+def _pdf_area_activity_columns(area, activity_cell):
+    """Return today/tomorrow cells in the order selected for one area."""
+    if area.get('activities_swapped'):
+        return [
+            activity_cell(
+                area.get('activities_tomorrow', []),
+                'Activity Tomorrow',
+            ),
+            activity_cell(area.get('activities_today', []), 'Activity Today'),
+        ]
+    return [
+        activity_cell(area.get('activities_today', []), 'Activity Today'),
+        activity_cell(
+            area.get('activities_tomorrow', []),
+            'Activity Tomorrow',
+        ),
+    ]
+
+
+def _pdf_area_activity_table(area, activity_cell, grey_line, grey_background):
+    """Build the paired activity table for one work area."""
+    table = Table(
+        [_pdf_area_activity_columns(area, activity_cell)],
+        colWidths=[CW * 0.55, CW * 0.45],
+    )
+    table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('BOX', (0, 0), (-1, -1), 0.5, grey_line),
+        ('INNERGRID', (0, 0), (-1, -1), 0.4, grey_line),
+        ('BACKGROUND', (0, 0), (-1, -1), grey_background),
+        ('TOPPADDING', (0, 0), (-1, -1), 3),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ('LEFTPADDING', (0, 0), (-1, -1), 4),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    return table
+
+
 def _build_area_activity_flowables(
     areas,
     styles,
@@ -1388,35 +1505,13 @@ def _build_area_activity_flowables(
     """Build paired today/tomorrow activity cards for every active area."""
     flowables = list(section_marker('area_activities', [CondPageBreak(32*mm)]))
     for area_index, area in enumerate(areas):
-        area_id = area.get('id', '')
-        blocks = list(area_heading(area_id))
-        if area.get('activities_swapped'):
-            columns = [
-                activity_cell(
-                    area.get('activities_tomorrow', []),
-                    'Activity Tomorrow',
-                ),
-                activity_cell(area.get('activities_today', []), 'Activity Today'),
-            ]
-        else:
-            columns = [
-                activity_cell(area.get('activities_today', []), 'Activity Today'),
-                activity_cell(
-                    area.get('activities_tomorrow', []),
-                    'Activity Tomorrow',
-                ),
-            ]
-        table = Table([columns], colWidths=[CW * 0.55, CW * 0.45])
-        table.setStyle(TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('BOX', (0, 0), (-1, -1), 0.5, grey_line),
-            ('INNERGRID', (0, 0), (-1, -1), 0.4, grey_line),
-            ('BACKGROUND', (0, 0), (-1, -1), grey_background),
-            ('TOPPADDING', (0, 0), (-1, -1), 3),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-            ('LEFTPADDING', (0, 0), (-1, -1), 4),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-        ]))
+        blocks = list(area_heading(area.get('id', '')))
+        table = _pdf_area_activity_table(
+            area,
+            activity_cell,
+            grey_line,
+            grey_background,
+        )
         blocks.extend([table, Spacer(1, 1*mm)])
         if blocks and isinstance(blocks[-1], Spacer):
             blocks.pop()
@@ -1426,6 +1521,65 @@ def _build_area_activity_flowables(
             flowables.append(Spacer(1, 2.5*mm))
     flowables.append(Spacer(1, section_gap))
     return flowables
+
+
+def _pdf_manpower_table(people, table_cell, column_widths, table_style):
+    """Build one consistently styled manpower table."""
+    rows = [['No.', 'Name', 'Role / Position', 'Working Hours']]
+    for index, person in enumerate(people, 1):
+        rows.append([
+            str(index),
+            table_cell(person.get('name', '')),
+            table_cell(person.get('role', '')),
+            table_cell(person.get('hours', ''), centered=True),
+        ])
+    table = Table(rows, colWidths=column_widths)
+    table.setStyle(base_ts(table_style))
+    return table
+
+
+def _pdf_area_manpower_blocks(
+    area,
+    styles,
+    area_heading,
+    table_cell,
+    column_widths,
+    table_style,
+):
+    """Build the direct and optional indirect manpower blocks for one area."""
+    area_id = area.get('id', '')
+    blocks = list(area_heading(area_id))
+
+    direct_manpower = area.get('manpower', [])
+    if direct_manpower:
+        blocks.extend([
+            _pdf_manpower_table(
+                direct_manpower,
+                table_cell,
+                column_widths,
+                table_style,
+            ),
+            Spacer(1, 1*mm),
+        ])
+
+    indirect_manpower = area.get('indirect_manpower', [])
+    if indirect_manpower:
+        blocks.append(
+            Paragraph(f'Indirect Manpower — {_esc(area_id)}', styles['sub_s'])
+        )
+        blocks.extend([
+            _pdf_manpower_table(
+                indirect_manpower,
+                table_cell,
+                column_widths,
+                table_style,
+            ),
+            Spacer(1, 1*mm),
+        ])
+
+    if blocks and isinstance(blocks[-1], Spacer):
+        blocks.pop()
+    return blocks
 
 
 def _build_area_manpower_flowables(
@@ -1446,41 +1600,14 @@ def _build_area_manpower_flowables(
     ]
 
     for area_index, area in enumerate(areas):
-        area_id = area.get('id', '')
-        blocks = list(area_heading(area_id))
-        direct_manpower = area.get('manpower', [])
-        if direct_manpower:
-            rows = [['No.', 'Name', 'Role / Position', 'Working Hours']]
-            for index, person in enumerate(direct_manpower, 1):
-                rows.append([
-                    str(index),
-                    table_cell(person.get('name', '')),
-                    table_cell(person.get('role', '')),
-                    table_cell(person.get('hours', ''), centered=True),
-                ])
-            table = Table(rows, colWidths=column_widths)
-            table.setStyle(base_ts(table_style))
-            blocks.extend([table, Spacer(1, 1*mm)])
-
-        indirect_manpower = area.get('indirect_manpower', [])
-        if indirect_manpower:
-            blocks.append(
-                Paragraph(f'Indirect Manpower — {_esc(area_id)}', styles['sub_s'])
-            )
-            rows = [['No.', 'Name', 'Role / Position', 'Working Hours']]
-            for index, person in enumerate(indirect_manpower, 1):
-                rows.append([
-                    str(index),
-                    table_cell(person.get('name', '')),
-                    table_cell(person.get('role', '')),
-                    table_cell(person.get('hours', ''), centered=True),
-                ])
-            table = Table(rows, colWidths=column_widths)
-            table.setStyle(base_ts(table_style))
-            blocks.extend([table, Spacer(1, 1*mm)])
-
-        if blocks and isinstance(blocks[-1], Spacer):
-            blocks.pop()
+        blocks = _pdf_area_manpower_blocks(
+            area,
+            styles,
+            area_heading,
+            table_cell,
+            column_widths,
+            table_style,
+        )
         flowables.append(KeepTogether(blocks[:4]))
         flowables.extend(blocks[4:])
         if area_index < len(areas) - 1:
@@ -1559,197 +1686,237 @@ def _build_remarks_flowables(
     return flowables
 
 
-def generate_pdf(d, output_path, cfg):
-    """Render one Daily Report payload to a PDF byte stream and optional file."""
-    st = make_styles(cfg)
-    GREY_LINE = colors.HexColor('#CCCCCC')
-    GREY_BG   = colors.HexColor('#F2F2F2')
-    WHITE     = colors.white
+_PDF_GREY_LINE = colors.HexColor('#CCCCCC')
+_PDF_GREY_BACKGROUND = colors.HexColor('#F2F2F2')
+_PDF_WHITE = colors.white
+_DAILY_PDF_SECTION_GAP = 3.5 * mm
 
-    date = d.get('date', '')
-    day = d.get('day_no', '')
-    proj = d.get('project_no', '')
-    loc = d.get('location', '')
-    cust = d.get('customer', '')
-    equip = d.get('equipment', '-')
-    prep = d.get('prepared_by', '')
-    chk = d.get('checked_by', '')
-    appr = d.get('approved_by', '')
 
-    gpa_logo = resolve_logo_path(cfg.get('logo_gpa', ''), 'gpa')
-    kn_logo = resolve_logo_path(cfg.get('logo_kn', ''), 'kn')
-    gpa_is_bundled = bool(gpa_logo) and os.path.normcase(os.path.abspath(gpa_logo)) == \
-        os.path.normcase(os.path.abspath(BUNDLED_LOGOS['gpa']))
-    kn_is_bundled = bool(kn_logo) and os.path.normcase(os.path.abspath(kn_logo)) == \
-        os.path.normcase(os.path.abspath(BUNDLED_LOGOS['kn']))
-    use_gpa_header_logo = gpa_is_bundled and _is_drawable_logo(BUNDLED_HEADER_LOGOS['gpa'])
-    use_kn_header_logo = kn_is_bundled and _is_drawable_logo(BUNDLED_HEADER_LOGOS['kn'])
-    if use_gpa_header_logo:
-        gpa_logo = BUNDLED_HEADER_LOGOS['gpa']
-    if use_kn_header_logo:
-        kn_logo = BUNDLED_HEADER_LOGOS['kn']
+def _resolve_daily_pdf_logo(config, logo_key):
+    """Resolve one logo and select the compact bundled header variant."""
+    logo = resolve_logo_path(config.get(f'logo_{logo_key}', ''), logo_key)
+    bundled_logo = BUNDLED_LOGOS[logo_key]
+    is_bundled = bool(logo) and (
+        os.path.normcase(os.path.abspath(logo))
+        == os.path.normcase(os.path.abspath(bundled_logo))
+    )
+    use_header_logo = (
+        is_bundled
+        and _is_drawable_logo(BUNDLED_HEADER_LOGOS[logo_key])
+    )
+    if use_header_logo:
+        logo = BUNDLED_HEADER_LOGOS[logo_key]
+    return logo, use_header_logo
 
-    _NC._meta = {
-        'date': date, 'day': day, 'proj': proj, 'loc': loc, 'cust': cust,
-        'theme':        cfg.get('theme', {}),
-        'logo_gpa':     gpa_logo,
-        'logo_kn':      kn_logo,
-        'company_name': cfg.get('company_name',  'PT. GARUDA PRIMA AKSARA'),
-        'project_title':d.get('project_title') or cfg.get('project_title','Electrical Installation & Construction'),
-        'show_logo_gpa':cfg.get('show_logo_gpa', True),
-        'show_logo_kn': cfg.get('show_logo_kn',  True),
-        # The two bundled header marks use the same box and exact visual height.
-        # Their widths remain proportional so neither brand mark is stretched.
-        'logo_gpa_w':   43.5 if use_gpa_header_logo else cfg.get('logo_gpa_w', 28),
-        'logo_gpa_h':   9.2 if use_gpa_header_logo else cfg.get('logo_gpa_h', 12),
-        'logo_gpa_y_off':cfg.get('logo_gpa_y_off', 0),
-        'logo_kn_w':    32 if use_kn_header_logo else cfg.get('logo_kn_w',  28),
-        'logo_kn_h':    9.2 if use_kn_header_logo else cfg.get('logo_kn_h',  12),
-        'logo_kn_y_off':cfg.get('logo_kn_y_off',  0),
-        'logo_gpa_card':not use_gpa_header_logo,
+
+def _daily_pdf_canvas_metadata(report, config):
+    """Prepare the header/footer values consumed by the PDF canvas."""
+    gpa_logo, use_gpa_header_logo = _resolve_daily_pdf_logo(config, 'gpa')
+    kn_logo, use_kn_header_logo = _resolve_daily_pdf_logo(config, 'kn')
+    return {
+        'date': report.get('date', ''),
+        'day': report.get('day_no', ''),
+        'proj': report.get('project_no', ''),
+        'loc': report.get('location', ''),
+        'cust': report.get('customer', ''),
+        'theme': config.get('theme', {}),
+        'logo_gpa': gpa_logo,
+        'logo_kn': kn_logo,
+        'company_name': config.get(
+            'company_name',
+            'PT. GARUDA PRIMA AKSARA',
+        ),
+        'project_title': report.get('project_title') or config.get(
+            'project_title',
+            'Electrical Installation & Construction',
+        ),
+        'show_logo_gpa': config.get('show_logo_gpa', True),
+        'show_logo_kn': config.get('show_logo_kn', True),
+        # Bundled marks share one visual height while retaining aspect ratio.
+        'logo_gpa_w': 43.5 if use_gpa_header_logo else config.get('logo_gpa_w', 28),
+        'logo_gpa_h': 9.2 if use_gpa_header_logo else config.get('logo_gpa_h', 12),
+        'logo_gpa_y_off': config.get('logo_gpa_y_off', 0),
+        'logo_kn_w': 32 if use_kn_header_logo else config.get('logo_kn_w', 28),
+        'logo_kn_h': 9.2 if use_kn_header_logo else config.get('logo_kn_h', 12),
+        'logo_kn_y_off': config.get('logo_kn_y_off', 0),
+        'logo_gpa_card': not use_gpa_header_logo,
         'logo_kn_card': not use_kn_header_logo,
     }
 
-    story = []
-    SECTION_GAP = 3.5 * mm
 
-    def TC(value, centered=False):
-        return _pdf_table_cell(value, st, centered)
+def _daily_pdf_section_marker(key, before=None):
+    """Mark a complete story section for final ordering and numbering."""
+    return [_PDFSectionMarker(key, before)]
 
-    def _bar(text, paragraph_style, background, height):
-        return _pdf_heading_bar(text, paragraph_style, background, height)
 
-    def SH(t):
-        safe = re.sub(r'^(\d+\.)\s*', r'\1&#160;&#160;', _esc(t))
-        return [
-            _bar(safe, st['sec_s'], st['PRI'], 6.5*mm),
-            Spacer(1, 1.2*mm),
-        ]
-
-    def AH(t):
-        return _pdf_area_heading(t, st)
-
-    def SECTION(key, before=None):
-        return [_PDFSectionMarker(key, before)]
-
-    def assemble_sections(flowables, requested_order, progress_enabled):
-        return _assemble_pdf_sections(
-            flowables,
-            requested_order,
-            progress_enabled,
-            st,
-            heading_builder=SH,
-        )
-
-    story += _build_report_information_flowables(
-        d,
-        cfg,
-        st,
-        GREY_LINE,
-        GREY_BG,
-        WHITE,
-        SECTION_GAP,
-        SECTION,
-    )
-    story += _build_weather_flowables(
-        d,
-        st,
-        GREY_LINE,
-        WHITE,
-        SECTION_GAP,
-        SECTION,
-        TC,
-    )
-    story += _build_indirect_manpower_flowables(
-        d,
-        SECTION_GAP,
-        SECTION,
-        TC,
-    )
-
-    show_overall_progress = _coerce_bool(d.get('show_overall_progress'), False)
-
-    # Missing flags default to disabled so archived reports keep their layout.
+def _build_daily_pdf_overview_flowables(
+    report,
+    config,
+    styles,
+    table_cell,
+    show_overall_progress,
+):
+    """Build report information, weather, and global manpower sections."""
+    flowables = []
+    flowables.extend(_build_report_information_flowables(
+        report,
+        config,
+        styles,
+        _PDF_GREY_LINE,
+        _PDF_GREY_BACKGROUND,
+        _PDF_WHITE,
+        _DAILY_PDF_SECTION_GAP,
+        _daily_pdf_section_marker,
+    ))
+    flowables.extend(_build_weather_flowables(
+        report,
+        styles,
+        _PDF_GREY_LINE,
+        _PDF_WHITE,
+        _DAILY_PDF_SECTION_GAP,
+        _daily_pdf_section_marker,
+        table_cell,
+    ))
+    flowables.extend(_build_indirect_manpower_flowables(
+        report,
+        _DAILY_PDF_SECTION_GAP,
+        _daily_pdf_section_marker,
+        table_cell,
+    ))
     if show_overall_progress:
-        story += _build_overall_progress_flowables(
-            d,
-            st,
-            GREY_LINE,
-            GREY_BG,
-            WHITE,
-            SECTION_GAP,
-        )
+        flowables.extend(_build_overall_progress_flowables(
+            report,
+            styles,
+            _PDF_GREY_LINE,
+            _PDF_GREY_BACKGROUND,
+            _PDF_WHITE,
+            _DAILY_PDF_SECTION_GAP,
+        ))
+    return flowables
 
-    def act_cell(lines, label):
-        return _pdf_activity_cell(lines, label, st)
 
-    areas = d.get('areas', [])
-    story += _build_area_activity_flowables(
+def _build_daily_pdf_area_flowables(report, styles, table_cell):
+    """Build all activity, manpower, constraint, and remark area sections."""
+    areas = report.get('areas', [])
+    area_heading = functools.partial(_pdf_area_heading, styles=styles)
+    activity_cell = functools.partial(_pdf_activity_cell, styles=styles)
+    flowables = []
+    flowables.extend(_build_area_activity_flowables(
         areas,
-        st,
-        GREY_LINE,
-        GREY_BG,
-        SECTION_GAP,
-        SECTION,
-        AH,
-        act_cell,
-    )
-    story += _build_area_manpower_flowables(
+        styles,
+        _PDF_GREY_LINE,
+        _PDF_GREY_BACKGROUND,
+        _DAILY_PDF_SECTION_GAP,
+        _daily_pdf_section_marker,
+        area_heading,
+        activity_cell,
+    ))
+    flowables.extend(_build_area_manpower_flowables(
         areas,
-        st,
-        SECTION_GAP,
-        SECTION,
-        AH,
-        TC,
-    )
-    story += _build_constraints_flowables(
-        d,
-        st,
-        SECTION_GAP,
-        SECTION,
-        TC,
-    )
-    story += _build_remarks_flowables(
-        d,
-        st,
-        SECTION_GAP,
-        SECTION,
-        TC,
-    )
-    story += _build_sign_off_flowables(
-        d,
-        st,
-        GREY_LINE,
-        WHITE,
-        prep,
-        chk,
-        appr,
-        SECTION_GAP,
-    )
-    story += _build_photo_documentation_flowables(
-        d,
-        areas,
-        st,
-        GREY_LINE,
-        GREY_BG,
-        WHITE,
-    )
+        styles,
+        _DAILY_PDF_SECTION_GAP,
+        _daily_pdf_section_marker,
+        area_heading,
+        table_cell,
+    ))
+    flowables.extend(_build_constraints_flowables(
+        report,
+        styles,
+        _DAILY_PDF_SECTION_GAP,
+        _daily_pdf_section_marker,
+        table_cell,
+    ))
+    flowables.extend(_build_remarks_flowables(
+        report,
+        styles,
+        _DAILY_PDF_SECTION_GAP,
+        _daily_pdf_section_marker,
+        table_cell,
+    ))
+    return flowables
 
-    story = assemble_sections(
-        story,
-        d.get('section_order'),
+
+def _build_daily_pdf_closing_flowables(report, styles):
+    """Build sign-off and photo documentation sections."""
+    areas = report.get('areas', [])
+    flowables = _build_sign_off_flowables(
+        report,
+        styles,
+        _PDF_GREY_LINE,
+        _PDF_WHITE,
+        report.get('prepared_by', ''),
+        report.get('checked_by', ''),
+        report.get('approved_by', ''),
+        _DAILY_PDF_SECTION_GAP,
+    )
+    flowables.extend(_build_photo_documentation_flowables(
+        report,
+        areas,
+        styles,
+        _PDF_GREY_LINE,
+        _PDF_GREY_BACKGROUND,
+        _PDF_WHITE,
+    ))
+    return flowables
+
+
+def _build_daily_pdf_story(report, config, styles):
+    """Compose marked PDF sections before applying the requested order."""
+    # Archived reports without this newer flag must retain their old layout.
+    show_overall_progress = _coerce_bool(
+        report.get('show_overall_progress'),
+        False,
+    )
+    table_cell = functools.partial(_pdf_table_cell, styles=styles)
+    story = _build_daily_pdf_overview_flowables(
+        report,
+        config,
+        styles,
+        table_cell,
         show_overall_progress,
     )
+    story.extend(_build_daily_pdf_area_flowables(report, styles, table_cell))
+    story.extend(_build_daily_pdf_closing_flowables(report, styles))
+    return _assemble_pdf_sections(
+        story,
+        report.get('section_order'),
+        show_overall_progress,
+        styles,
+    )
 
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf,pagesize=A4,topMargin=40.5*mm,bottomMargin=11*mm,leftMargin=M,rightMargin=M)
-    doc.build(story, canvasmaker=_NC)
+
+def _write_daily_pdf_output(buffer, output_path):
+    """Persist a generated PDF buffer when the caller supplied a path."""
+    output_directory = os.path.dirname(output_path) or '.'
+    os.makedirs(output_directory, exist_ok=True)
+    with open(output_path, 'wb') as output:
+        output.write(buffer.getvalue())
+
+
+def _render_daily_pdf_story(story, output_path):
+    """Render prepared flowables and return a rewound in-memory PDF."""
+    buffer = io.BytesIO()
+    document = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        topMargin=40.5*mm,
+        bottomMargin=11*mm,
+        leftMargin=M,
+        rightMargin=M,
+    )
+    document.build(story, canvasmaker=_NC)
     if output_path:
-        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
-        with open(output_path, 'wb') as output:
-            output.write(buf.getvalue())
-    buf.seek(0)
-    return buf
+        _write_daily_pdf_output(buffer, output_path)
+    buffer.seek(0)
+    return buffer
+
+
+def generate_pdf(d, output_path, cfg):
+    """Render one Daily Report payload to a PDF byte stream and optional file."""
+    styles = make_styles(cfg)
+    _NC._meta = _daily_pdf_canvas_metadata(d, cfg)
+    story = _build_daily_pdf_story(d, cfg, styles)
+    return _render_daily_pdf_story(story, output_path)
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 MANPOWER_DB = [

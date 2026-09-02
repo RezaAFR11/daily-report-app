@@ -264,6 +264,40 @@ class PDFGenerationTests(unittest.TestCase):
 
         self.assertEqual(page_count, 1)
 
+    def test_optional_output_file_matches_returned_pdf_buffer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, 'nested', 'daily-report.pdf')
+
+            pdf = generate_pdf(
+                deepcopy(MINIMAL_REPORT),
+                output_path,
+                deepcopy(DEFAULT_CONFIG),
+            )
+
+            with open(output_path, 'rb') as output:
+                saved_pdf = output.read()
+
+        self.assertEqual(saved_pdf, pdf.getvalue())
+        self.assertTrue(saved_pdf.startswith(b'%PDF'))
+
+    def test_generate_pdf_preserves_canvas_metadata_contract(self):
+        report = deepcopy(MINIMAL_REPORT)
+        report['project_title'] = ''
+        config = deepcopy(DEFAULT_CONFIG)
+        config['project_title'] = 'Configured PDF Project'
+
+        generate_pdf(report, None, config)
+
+        self.assertEqual(_NC._meta['date'], report['date'])
+        self.assertEqual(_NC._meta['day'], report['day_no'])
+        self.assertEqual(_NC._meta['proj'], report['project_no'])
+        self.assertEqual(_NC._meta['loc'], report['location'])
+        self.assertEqual(_NC._meta['cust'], report['customer'])
+        self.assertEqual(_NC._meta['project_title'], 'Configured PDF Project')
+        self.assertEqual(_NC._meta['theme'], config['theme'])
+        self.assertIn('logo_gpa_card', _NC._meta)
+        self.assertIn('logo_kn_card', _NC._meta)
+
     def test_overall_progress_weighted_totals_match_reference(self):
         rows = []
         for description, weight, previous_actual, period, cumulative in [
