@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from copy import deepcopy
 from unittest.mock import patch
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import daily_report_app
 from reportlab.lib.pagesizes import A4
@@ -149,6 +149,125 @@ class PDFGenerationTests(unittest.TestCase):
             self.assertEqual(traversal.status_code, 404)
             self.assertEqual(deletion.status_code, 404)
             self.assertTrue(os.path.isfile(outside_path))
+
+    def test_same_display_name_uses_archive_id_for_download_and_delete(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reports_dir = os.path.join(temp_dir, 'reports')
+            os.makedirs(reports_dir)
+            filename = 'Daily Report - Same Date.pdf'
+            old_archive_id = 'a' * 32
+            new_archive_id = 'b' * 32
+            old_storage = f'report-{old_archive_id}.pdf'
+            new_storage = f'report-{new_archive_id}.pdf'
+            old_pdf = b'%PDF-1.4\nold report'
+            new_pdf = b'%PDF-1.4\nnew report'
+            for storage_name, pdf_bytes in (
+                (old_storage, old_pdf),
+                (new_storage, new_pdf),
+            ):
+                with open(os.path.join(reports_dir, storage_name), 'wb') as output:
+                    output.write(pdf_bytes)
+            rows = [
+                {
+                    'filename': filename,
+                    'archive_id': new_archive_id,
+                    'storage_filename': new_storage,
+                    'canonical_report_id': 'new-report',
+                },
+                {
+                    'filename': filename,
+                    'archive_id': old_archive_id,
+                    'storage_filename': old_storage,
+                    'canonical_report_id': 'old-report',
+                },
+            ]
+            with open(os.path.join(reports_dir, 'index.json'), 'w', encoding='utf-8') as index:
+                json.dump(rows, index)
+
+            with patch('daily_report_app.get_reports_dir', return_value=reports_dir):
+                download = self.client.get(
+                    f'/reports/download/{quote(filename)}?archive_id={old_archive_id}'
+                )
+                downloaded_pdf = download.get_data()
+                download.close()
+                deletion = self.client.post('/reports/delete', json={
+                    'filename': filename,
+                    'archive_id': old_archive_id,
+                    'report_id': 'old-report',
+                })
+
+            self.assertEqual(download.status_code, 200)
+            self.assertEqual(downloaded_pdf, old_pdf)
+            self.assertEqual(deletion.status_code, 200)
+            self.assertFalse(os.path.exists(os.path.join(reports_dir, old_storage)))
+            self.assertTrue(os.path.isfile(os.path.join(reports_dir, new_storage)))
+            with open(os.path.join(reports_dir, 'index.json'), encoding='utf-8') as index:
+                remaining_rows = json.load(index)
+            self.assertEqual(
+                [row['archive_id'] for row in remaining_rows],
+                [new_archive_id],
+            )
+
+    def test_indexed_storage_filename_cannot_escape_reports_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reports_dir = os.path.join(temp_dir, 'reports')
+            os.makedirs(reports_dir)
+            filename = 'Indexed Report.pdf'
+            outside_path = os.path.join(temp_dir, 'secret.pdf')
+            with open(outside_path, 'wb') as output:
+                output.write(b'%PDF secret')
+            with open(os.path.join(reports_dir, 'index.json'), 'w', encoding='utf-8') as index:
+                json.dump([{
+                    'filename': filename,
+                    'storage_filename': '../secret.pdf',
+                }], index)
+
+            with patch('daily_report_app.get_reports_dir', return_value=reports_dir):
+                download = self.client.get(f'/reports/download/{quote(filename)}')
+                deletion = self.client.post(
+                    '/reports/delete',
+                    json={'filename': filename},
+                )
+
+            self.assertEqual(download.status_code, 404)
+            self.assertEqual(deletion.status_code, 404)
+            self.assertTrue(os.path.isfile(outside_path))
+
+    def test_admin_delete_report_uses_owned_archive_identity(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reports_dir = os.path.join(temp_dir, 'reports')
+            os.makedirs(reports_dir)
+            filename = 'Worker Daily Report.pdf'
+            archive_id = 'c' * 32
+            storage_filename = f'report-{archive_id}.pdf'
+            report_path = os.path.join(reports_dir, storage_filename)
+            with open(report_path, 'wb') as output:
+                output.write(b'%PDF worker report')
+            with open(os.path.join(reports_dir, 'index.json'), 'w', encoding='utf-8') as index:
+                json.dump([{
+                    'filename': filename,
+                    'archive_id': archive_id,
+                    'storage_filename': storage_filename,
+                }], index)
+            users = {
+                'pdf-test': {'is_admin': True},
+                'worker': {'is_admin': False},
+            }
+
+            with (
+                patch('daily_report_app.load_users', return_value=users),
+                patch('daily_report_app.get_reports_dir', return_value=reports_dir),
+            ):
+                response = self.client.post('/admin/delete_report', json={
+                    'username': 'worker',
+                    'filename': filename,
+                    'archive_id': archive_id,
+                })
+
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(os.path.exists(report_path))
+            with open(os.path.join(reports_dir, 'index.json'), encoding='utf-8') as index:
+                self.assertEqual(json.load(index), [])
 
     def test_very_long_photo_caption_does_not_break_pdf_layout(self):
         report = deepcopy(MINIMAL_REPORT)

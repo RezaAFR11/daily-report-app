@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+import daily_report_app
 from daily_report_app import app
 from google_drive_integration import (
     GoogleDriveConfig,
@@ -281,6 +282,54 @@ class GoogleDriveRouteTests(unittest.TestCase):
                 rows = json.load(handle)
             self.assertEqual(rows[0]["drive_file_id"], "drive-file")
             self.assertEqual(rows[0]["drive_status"], "uploaded")
+
+    def test_drive_metadata_backfills_only_missing_index_values(self):
+        entry = {
+            'project_title': 'Indexed Project Title',
+            'project_no': '',
+            'date': '',
+            'canonical_report_id': 'canonical-report',
+        }
+        canonical_record = {
+            'project_title': 'Canonical Project Title',
+            'project_no': 'CANONICAL-NO',
+            'payload': {
+                'project_no': 'PAYLOAD-NO',
+                'date': '2026-08-06',
+            },
+        }
+
+        with patch(
+            'daily_report_app.load_canonical_record',
+            return_value=canonical_record,
+        ):
+            metadata = daily_report_app._drive_report_metadata('reza', entry)
+
+        self.assertEqual(metadata, (
+            'Indexed Project Title',
+            'CANONICAL-NO',
+            '2026-08-06',
+        ))
+
+    def test_drive_metadata_keeps_index_values_when_canonical_record_is_missing(self):
+        entry = {
+            'project_title': 'Indexed Project Title',
+            'project_no': '',
+            'date': '2026-08-06',
+            'canonical_report_id': 'missing-report',
+        }
+
+        with patch(
+            'daily_report_app.load_canonical_record',
+            side_effect=FileNotFoundError,
+        ):
+            metadata = daily_report_app._drive_report_metadata('reza', entry)
+
+        self.assertEqual(metadata, (
+            'Indexed Project Title',
+            '',
+            '2026-08-06',
+        ))
 
     def test_upload_route_rejects_unowned_path(self):
         response = self.client.post(

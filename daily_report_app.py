@@ -2253,6 +2253,71 @@ def _safe_report_filename_part(value, fallback):
     value = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', '-', value)
     return value.strip(' ._-') or fallback
 
+
+def _is_safe_report_filename(value):
+    """Accept a single filename while rejecting absolute and traversing paths."""
+    return bool(value) and value == os.path.basename(value)
+
+
+def _report_lookup_matches(row, filename, report_id='', archive_id=''):
+    """Match the same indexed report identity used by download and delete."""
+    if row.get('filename') != filename:
+        return False
+    if archive_id:
+        return row.get('archive_id') == archive_id
+    if report_id:
+        return row.get('canonical_report_id') == report_id
+    return True
+
+
+def _find_report_index_entry(username, filename, report_id='', archive_id=''):
+    """Return the newest indexed row matching a user-facing report identity."""
+    return next(
+        (
+            row for row in get_reports_index(username)
+            if _report_lookup_matches(row, filename, report_id, archive_id)
+        ),
+        None,
+    )
+
+
+def _owned_report_storage_path(username, stored_name):
+    """Resolve an indexed storage filename inside the owner's reports folder."""
+    if not _is_safe_report_filename(stored_name):
+        return None
+    reports_dir = os.path.abspath(get_reports_dir(username))
+    candidate = os.path.abspath(os.path.join(reports_dir, stored_name))
+    try:
+        if os.path.commonpath([reports_dir, candidate]) != reports_dir:
+            return None
+    except ValueError:
+        return None
+    return candidate
+
+
+def _report_archive_identity(entry):
+    """Return a valid unique archive identifier and internal PDF filename."""
+    archive_id = str(entry.get('archive_id') or '')
+    if not re.fullmatch(r'[a-f0-9]{32}', archive_id):
+        archive_id = uuid.uuid4().hex
+    return archive_id, f'report-{archive_id}.pdf'
+
+
+def _atomic_write_report_pdf(report_path, pdf_bytes):
+    """Write report bytes atomically so incomplete PDFs never enter the index."""
+    temporary_path = f'{report_path}.{uuid.uuid4().hex}.tmp'
+    try:
+        with open(temporary_path, 'wb') as handle:
+            handle.write(pdf_bytes)
+        os.replace(temporary_path, report_path)
+    finally:
+        if os.path.exists(temporary_path):
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
+
+
 def archive_generated_report(username, filename, pdf_bytes, entry):
     """Atomically save a PDF copy, then add it to the My Reports index."""
     reports_dir = get_reports_dir(username)
@@ -2261,20 +2326,9 @@ def archive_generated_report(username, filename, pdf_bytes, entry):
     # under a unique internal name.  Reports from two projects can otherwise
     # share the same date/day filename and silently overwrite each other's
     # bytes while both rows remain in My Reports.
-    archive_id = str(entry.get('archive_id') or '')
-    if not re.fullmatch(r'[a-f0-9]{32}', archive_id):
-        archive_id = uuid.uuid4().hex
-    storage_filename = f'report-{archive_id}.pdf'
+    archive_id, storage_filename = _report_archive_identity(entry)
     report_path = os.path.join(reports_dir, storage_filename)
-    temp_path = f'{report_path}.{uuid.uuid4().hex}.tmp'
-    try:
-        with open(temp_path, 'wb') as f:
-            f.write(pdf_bytes)
-        os.replace(temp_path, report_path)
-    finally:
-        if os.path.exists(temp_path):
-            try: os.remove(temp_path)
-            except OSError: pass
+    _atomic_write_report_pdf(report_path, pdf_bytes)
 
     entry = dict(entry)
     entry['archive_id'] = archive_id
@@ -2294,33 +2348,76 @@ def archive_generated_report(username, filename, pdf_bytes, entry):
 def get_owned_report_path(username, filename, report_id='', archive_id=''):
     """Return a user's indexed Daily PDF path, never an arbitrary path."""
     filename = str(filename or '')
-    if not filename or filename != os.path.basename(filename):
+    if not _is_safe_report_filename(filename):
         return None
     report_id = str(report_id or '')
     archive_id = str(archive_id or '')
-    entry = None
-    for row in get_reports_index(username):
-        if row.get('filename') != filename:
-            continue
-        if archive_id and row.get('archive_id') != archive_id:
-            continue
-        if not archive_id and report_id and row.get('canonical_report_id') != report_id:
-            continue
-        entry = row
-        break
+    entry = _find_report_index_entry(
+        username,
+        filename,
+        report_id,
+        archive_id,
+    )
     if entry is None:
         return None
     stored_name = str(entry.get('storage_filename') or filename)
-    if not stored_name or stored_name != os.path.basename(stored_name):
-        return None
-    reports_dir = os.path.abspath(get_reports_dir(username))
-    candidate = os.path.abspath(os.path.join(reports_dir, stored_name))
-    try:
-        if os.path.commonpath([reports_dir, candidate]) != reports_dir:
-            return None
-    except ValueError:
-        return None
-    return candidate
+    return _owned_report_storage_path(username, stored_name)
+
+
+def _requested_report_query_identity():
+    """Read optional report disambiguators from a download request."""
+    return (
+        request.args.get('report_id', '').strip(),
+        request.args.get('archive_id', '').strip(),
+    )
+
+
+def _send_owned_report(username, filename):
+    """Send one indexed report or return the existing not-found contract."""
+    report_id, archive_id = _requested_report_query_identity()
+    report_path = get_owned_report_path(
+        username,
+        filename,
+        report_id=report_id,
+        archive_id=archive_id,
+    )
+    if not report_path or not os.path.isfile(report_path):
+        return 'Not found', 404
+    return send_file(
+        report_path,
+        as_attachment=True,
+        download_name=os.path.basename(filename),
+    )
+
+
+def _report_delete_fields(data):
+    """Read the legacy delete payload without changing its accepted values."""
+    return (
+        (data.get('filename') or '').strip(),
+        (data.get('report_id') or '').strip(),
+        (data.get('archive_id') or '').strip(),
+    )
+
+
+def _delete_owned_report(username, filename, report_id='', archive_id=''):
+    """Delete one owned PDF identity and its matching report index rows."""
+    report_path = get_owned_report_path(
+        username,
+        filename,
+        report_id=report_id,
+        archive_id=archive_id,
+    )
+    if not report_path:
+        return False
+    if os.path.isfile(report_path):
+        os.remove(report_path)
+    remaining_rows = [
+        row for row in get_reports_index(username)
+        if not _report_lookup_matches(row, filename, report_id, archive_id)
+    ]
+    _save_reports_index(username, remaining_rows)
+    return True
+
 
 def login_required(f):
     @functools.wraps(f)
@@ -2726,52 +2823,20 @@ def admin_user_reports(username):
 def admin_download_report(username, filename):
     if username not in load_users():
         return 'Not found', 404
-    fpath = get_owned_report_path(
-        username,
-        filename,
-        report_id=request.args.get('report_id', '').strip(),
-        archive_id=request.args.get('archive_id', '').strip(),
-    )
-    if not fpath or not os.path.isfile(fpath):
-        return 'Not found', 404
-    return send_file(fpath, as_attachment=True, download_name=os.path.basename(filename))
+    return _send_owned_report(username, filename)
 
 @app.route('/admin/delete_report', methods=['POST'])
 @admin_required
 def admin_delete_report():
     data = request.get_json(silent=True) or {}
     username = (data.get('username') or '').strip()
-    filename = (data.get('filename') or '').strip()
-    report_id = (data.get('report_id') or '').strip()
-    archive_id = (data.get('archive_id') or '').strip()
+    filename, report_id, archive_id = _report_delete_fields(data)
     if not username or not filename:
         return jsonify({'error': 'Missing params'}), 400
     if username not in load_users():
         return jsonify({'error': 'User not found'}), 404
-    fpath = get_owned_report_path(
-        username,
-        filename,
-        report_id=report_id,
-        archive_id=archive_id,
-    )
-    if not fpath:
+    if not _delete_owned_report(username, filename, report_id, archive_id):
         return jsonify({'error': 'Report not found'}), 404
-    if os.path.isfile(fpath):
-        os.remove(fpath)
-    idx = [
-        r for r in get_reports_index(username)
-        if not (
-            r.get('filename') == filename
-            and (
-                (archive_id and r.get('archive_id') == archive_id)
-                or (
-                    not archive_id
-                    and (not report_id or r.get('canonical_report_id') == report_id)
-                )
-            )
-        )
-    ]
-    _save_reports_index(username, idx)
     return jsonify({'ok': True})
 
 # ── User report history ──────────────────────────────────────────────────────
@@ -2796,38 +2861,56 @@ def my_reports():
 
 
 def _report_entry_for_drive(username, filename, archive_id='', report_id=''):
-    for row in get_reports_index(username):
-        if row.get('filename') != filename:
-            continue
-        if archive_id and row.get('archive_id') != archive_id:
-            continue
-        if not archive_id and report_id and row.get('canonical_report_id') != report_id:
-            continue
-        return row
-    return None
+    return _find_report_index_entry(
+        username,
+        filename,
+        report_id,
+        archive_id,
+    )
+
+
+def _indexed_drive_report_metadata(entry):
+    """Read Drive routing metadata already persisted in the report index."""
+    return (
+        str(entry.get('project_title') or '').strip(),
+        str(entry.get('project_no') or '').strip(),
+        str(entry.get('date') or '').strip(),
+    )
+
+
+def _canonical_drive_report_metadata(username, report_id):
+    """Recover missing Drive routing metadata from a canonical Daily record."""
+    record = load_canonical_record(DATA_DIR, username, report_id)
+    payload = record.get('payload')
+    if not isinstance(payload, dict):
+        payload = {}
+    return (
+        str(
+            record.get('project_title')
+            or payload.get('project_title')
+            or ''
+        ).strip(),
+        str(record.get('project_no') or payload.get('project_no') or '').strip(),
+        str(record.get('date') or payload.get('date') or '').strip(),
+    )
 
 
 def _drive_report_metadata(username, entry):
-    project_title = str(entry.get('project_title') or '').strip()
-    project_no = str(entry.get('project_no') or '').strip()
-    report_date = str(entry.get('date') or '').strip()
+    metadata = _indexed_drive_report_metadata(entry)
     report_id = str(entry.get('canonical_report_id') or '').strip()
-    if report_id and (not project_title or not project_no or not report_date):
-        try:
-            record = load_canonical_record(DATA_DIR, username, report_id)
-            payload = record.get('payload') if isinstance(record.get('payload'), dict) else {}
-            project_title = project_title or str(
-                record.get('project_title') or payload.get('project_title') or ''
-            ).strip()
-            project_no = project_no or str(
-                record.get('project_no') or payload.get('project_no') or ''
-            ).strip()
-            report_date = report_date or str(
-                record.get('date') or payload.get('date') or ''
-            ).strip()
-        except (FileNotFoundError, OSError, ValueError, TypeError):
-            pass
-    return project_title, project_no, report_date
+    if not report_id or all(metadata):
+        return metadata
+    try:
+        canonical_metadata = _canonical_drive_report_metadata(
+            username,
+            report_id,
+        )
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return metadata
+    return tuple(
+        indexed_value or canonical_value
+        for indexed_value, canonical_value in zip(metadata, canonical_metadata)
+    )
 
 
 def _next_drive_upload_attempt(entry):
@@ -3130,49 +3213,16 @@ def upload_report_to_drive():
 @app.route('/reports/download/<path:filename>')
 @login_required
 def download_report(filename):
-    username = session['username']
-    fpath = get_owned_report_path(
-        username,
-        filename,
-        report_id=request.args.get('report_id', '').strip(),
-        archive_id=request.args.get('archive_id', '').strip(),
-    )
-    if not fpath or not os.path.isfile(fpath):
-        return 'Not found', 404
-    return send_file(fpath, as_attachment=True, download_name=os.path.basename(filename))
+    return _send_owned_report(session['username'], filename)
 
 @app.route('/reports/delete', methods=['POST'])
 @login_required
 def delete_report():
     username = session['username']
     data = request.get_json(silent=True) or {}
-    filename = (data.get('filename') or '').strip()
-    report_id = (data.get('report_id') or '').strip()
-    archive_id = (data.get('archive_id') or '').strip()
-    fpath = get_owned_report_path(
-        username,
-        filename,
-        report_id=report_id,
-        archive_id=archive_id,
-    )
-    if not fpath:
+    filename, report_id, archive_id = _report_delete_fields(data)
+    if not _delete_owned_report(username, filename, report_id, archive_id):
         return jsonify({'error': 'Report not found'}), 404
-    if os.path.isfile(fpath):
-        os.remove(fpath)
-    idx = [
-        r for r in get_reports_index(username)
-        if not (
-            r.get('filename') == filename
-            and (
-                (archive_id and r.get('archive_id') == archive_id)
-                or (
-                    not archive_id
-                    and (not report_id or r.get('canonical_report_id') == report_id)
-                )
-            )
-        )
-    ]
-    _save_reports_index(username, idx)
     return jsonify({'ok': True})
 
 @app.route('/reports/check_date')
