@@ -2216,6 +2216,25 @@ def _normalise_project_aliases(raw_aliases, title, strict):
     return title_aliases
 
 
+def _normalise_work_hours_limits(raw_policy, strict):
+    """Parse bounded break values, using legacy defaults outside strict mode."""
+    try:
+        break_minutes = int(raw_policy.get('break_minutes') or 0)
+        threshold = int(
+            raw_policy.get('deduct_when_elapsed_gte_minutes') or 360
+        )
+    except (TypeError, ValueError):
+        if strict:
+            raise ValueError('Work-hours break values must be whole minutes.')
+        return 0, 360
+
+    if 0 <= break_minutes <= 240 and 0 <= threshold <= 1440:
+        return break_minutes, threshold
+    if strict:
+        raise ValueError('Work-hours break values are outside the supported range.')
+    return 0, 360
+
+
 def _normalise_project_work_hours_policy(raw_policy, strict):
     """Return a supported work-hours policy or ``None`` for legacy defaults."""
     if raw_policy in (None, ''):
@@ -2231,18 +2250,10 @@ def _normalise_project_work_hours_policy(raw_policy, strict):
             raise ValueError('Unsupported project work-hours policy mode.')
         mode = 'elapsed_no_break'
 
-    try:
-        break_minutes = int(raw_policy.get('break_minutes') or 0)
-        threshold = int(raw_policy.get('deduct_when_elapsed_gte_minutes') or 360)
-    except (TypeError, ValueError):
-        if strict:
-            raise ValueError('Work-hours break values must be whole minutes.')
-        break_minutes, threshold = 0, 360
-
-    if not (0 <= break_minutes <= 240 and 0 <= threshold <= 1440):
-        if strict:
-            raise ValueError('Work-hours break values are outside the supported range.')
-        break_minutes, threshold = 0, 360
+    break_minutes, threshold = _normalise_work_hours_limits(
+        raw_policy,
+        strict,
+    )
 
     return {
         'mode': mode if break_minutes else 'elapsed_no_break',
@@ -2251,6 +2262,67 @@ def _normalise_project_work_hours_policy(raw_policy, strict):
         'allow_overnight': bool(raw_policy.get('allow_overnight', True)),
         'version': str(raw_policy.get('version') or 'work-hours-policy/1')[:80],
     }
+
+
+def _invalid_project(strict, message):
+    if strict:
+        raise ValueError(message)
+    return None
+
+
+def _normalise_project_identity(entry, strict):
+    """Return a trimmed title/number pair or skip invalid legacy input."""
+    if not isinstance(entry, dict):
+        return _invalid_project(
+            strict,
+            'Each project must contain a title and project number.',
+        )
+
+    title = entry.get('title', '')
+    project_no = entry.get('project_no', entry.get('number', ''))
+    if not isinstance(title, str) or not isinstance(project_no, str):
+        return _invalid_project(
+            strict,
+            'Project title and number must be text.',
+        )
+
+    title = title.strip()
+    project_no = project_no.strip()
+    if not title or not project_no:
+        return _invalid_project(
+            strict,
+            'Project title and number cannot be empty.',
+        )
+    if len(title) > 300 or len(project_no) > 150:
+        return _invalid_project(
+            strict,
+            'Project title or number is too long.',
+        )
+    return title, project_no
+
+
+def _normalise_project_entry(entry, strict):
+    """Normalize one project row and its optional compatibility metadata."""
+    identity = _normalise_project_identity(entry, strict)
+    if identity is None:
+        return None
+    title, project_no = identity
+
+    title_aliases = _normalise_project_aliases(
+        entry.get('title_aliases', entry.get('aliases', [])),
+        title,
+        strict,
+    )
+    work_hours_policy = _normalise_project_work_hours_policy(
+        entry.get('work_hours_policy'),
+        strict,
+    )
+    normalized = {'title': title, 'project_no': project_no}
+    if title_aliases:
+        normalized['title_aliases'] = title_aliases
+    if work_hours_policy:
+        normalized['work_hours_policy'] = work_hours_policy
+    return normalized
 
 
 def normalize_projects(value, strict=False):
@@ -2271,49 +2343,47 @@ def normalize_projects(value, strict=False):
     normalized = []
     seen = set()
     for entry in value:
-        if not isinstance(entry, dict):
-            if strict:
-                raise ValueError('Each project must contain a title and project number.')
+        normalized_entry = _normalise_project_entry(entry, strict)
+        if normalized_entry is None:
             continue
-        title = entry.get('title', '')
-        project_no = entry.get('project_no', entry.get('number', ''))
-        if not isinstance(title, str) or not isinstance(project_no, str):
-            if strict:
-                raise ValueError('Project title and number must be text.')
-            continue
-        title = title.strip()
-        project_no = project_no.strip()
-        if not title or not project_no:
-            if strict:
-                raise ValueError('Project title and number cannot be empty.')
-            continue
-        if len(title) > 300 or len(project_no) > 150:
-            if strict:
-                raise ValueError('Project title or number is too long.')
-            continue
-        title_aliases = _normalise_project_aliases(
-            entry.get('title_aliases', entry.get('aliases', [])),
-            title,
-            strict,
+        pair_key = (
+            normalized_entry['title'].casefold(),
+            normalized_entry['project_no'].casefold(),
         )
-        work_hours_policy = _normalise_project_work_hours_policy(
-            entry.get('work_hours_policy'),
-            strict,
-        )
-
-        pair_key = (title.casefold(), project_no.casefold())
         if pair_key in seen:
             if strict:
                 raise ValueError('Duplicate project title and number pair.')
             continue
         seen.add(pair_key)
-        normalized_entry = {'title': title, 'project_no': project_no}
-        if title_aliases:
-            normalized_entry['title_aliases'] = title_aliases
-        if work_hours_policy:
-            normalized_entry['work_hours_policy'] = work_hours_policy
         normalized.append(normalized_entry)
     return normalized
+
+def _merge_project_aliases(project, default):
+    aliases = []
+    seen_aliases = set()
+    for alias in [
+        *project.get('title_aliases', []),
+        *default.get('title_aliases', []),
+    ]:
+        key = alias.casefold()
+        if key not in seen_aliases:
+            seen_aliases.add(key)
+            aliases.append(alias)
+    return aliases
+
+
+def _merge_default_project_row(project, default):
+    row = copy.deepcopy(project)
+    if default is None:
+        return row
+
+    aliases = _merge_project_aliases(row, default)
+    if aliases:
+        row['title_aliases'] = aliases
+    if 'work_hours_policy' not in row and default.get('work_hours_policy'):
+        row['work_hours_policy'] = copy.deepcopy(default['work_hours_policy'])
+    return row
+
 
 def merge_default_project_metadata(projects):
     """Backfill compatibility metadata for unchanged built-in project pairs.
@@ -2331,27 +2401,31 @@ def merge_default_project_metadata(projects):
     }
     merged = []
     for project in normalize_projects(projects):
-        row = copy.deepcopy(project)
         default = default_by_pair.get(
-            (row['title'].casefold(), row['project_no'].casefold())
+            (
+                project['title'].casefold(),
+                project['project_no'].casefold(),
+            )
         )
-        if default:
-            aliases = []
-            seen_aliases = set()
-            for alias in [
-                *row.get('title_aliases', []),
-                *default.get('title_aliases', []),
-            ]:
-                key = alias.casefold()
-                if key not in seen_aliases:
-                    seen_aliases.add(key)
-                    aliases.append(alias)
-            if aliases:
-                row['title_aliases'] = aliases
-            if 'work_hours_policy' not in row and default.get('work_hours_policy'):
-                row['work_hours_policy'] = copy.deepcopy(default['work_hours_policy'])
-        merged.append(row)
+        merged.append(_merge_default_project_row(project, default))
     return merged
+
+
+def _apply_config_defaults(config, defaults):
+    """Backfill top-level and nested defaults without overwriting saved values."""
+    for key, default_value in defaults.items():
+        if key not in config:
+            config[key] = copy.deepcopy(default_value)
+            continue
+        if not isinstance(default_value, dict):
+            continue
+        if not isinstance(config[key], dict):
+            config[key] = copy.deepcopy(default_value)
+            continue
+        for nested_key, nested_default in default_value.items():
+            if nested_key not in config[key]:
+                config[key][nested_key] = copy.deepcopy(nested_default)
+
 
 def load_config():
     defaults = copy.deepcopy(DEFAULT_CONFIG)
@@ -2363,16 +2437,7 @@ def load_config():
     # returning configuration to templates or authenticated JSON endpoints.
     had_legacy_ai_key = 'ai_api_key' in config
     config.pop('ai_api_key', None)
-    for key, default_value in defaults.items():
-        if key not in config:
-            config[key] = copy.deepcopy(default_value)
-        elif isinstance(default_value, dict):
-            if not isinstance(config[key], dict):
-                config[key] = copy.deepcopy(default_value)
-            else:
-                for nested_key, nested_default in default_value.items():
-                    if nested_key not in config[key]:
-                        config[key][nested_key] = copy.deepcopy(nested_default)
+    _apply_config_defaults(config, defaults)
     config['projects'] = merge_default_project_metadata(
         config.get('projects', defaults['projects'])
     )

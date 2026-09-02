@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from daily_report_app import DEFAULT_PROJECTS, app, load_config
+from daily_report_app import DEFAULT_PROJECTS, app, load_config, normalize_projects
 
 
 class ProjectConfigTests(unittest.TestCase):
@@ -180,6 +180,67 @@ class ProjectConfigTests(unittest.TestCase):
             with self.subTest(projects=projects):
                 response = self.client.post('/save_config', json={'projects': projects})
                 self.assertEqual(response.status_code, 400)
+
+    def test_invalid_project_metadata_is_rejected_in_strict_admin_mode(self):
+        invalid_entries = [
+            {
+                'title': 'Invalid Aliases',
+                'project_no': 'ALIAS-001',
+                'title_aliases': {'not': 'a list'},
+            },
+            {
+                'title': 'Invalid Mode',
+                'project_no': 'MODE-001',
+                'work_hours_policy': {'mode': 'unsupported'},
+            },
+            {
+                'title': 'Invalid Break',
+                'project_no': 'BREAK-001',
+                'work_hours_policy': {
+                    'mode': 'elapsed_less_break',
+                    'break_minutes': 999,
+                },
+            },
+        ]
+
+        for project in invalid_entries:
+            with self.subTest(project=project['title']):
+                response = self.client.post(
+                    '/save_config',
+                    json={'projects': [project]},
+                )
+                self.assertEqual(response.status_code, 400)
+
+    def test_legacy_project_normalization_remains_lenient_and_deduplicated(self):
+        projects = normalize_projects([
+            None,
+            {
+                'title': ' Canonical Project ',
+                'number': ' LEGACY-001 ',
+                'aliases': 'Old Daily Name; old daily name; Canonical Project',
+                'work_hours_policy': {
+                    'mode': 'unsupported',
+                    'break_minutes': 'invalid',
+                },
+            },
+            {'title': 'canonical project', 'project_no': 'legacy-001'},
+            {'title': '', 'project_no': 'EMPTY'},
+        ])
+
+        self.assertEqual(len(projects), 1)
+        self.assertEqual(projects[0]['title'], 'Canonical Project')
+        self.assertEqual(projects[0]['project_no'], 'LEGACY-001')
+        self.assertEqual(projects[0]['title_aliases'], ['Old Daily Name'])
+        self.assertEqual(
+            projects[0]['work_hours_policy'],
+            {
+                'mode': 'elapsed_no_break',
+                'break_minutes': 0,
+                'deduct_when_elapsed_gte_minutes': 360,
+                'allow_overnight': True,
+                'version': 'work-hours-policy/1',
+            },
+        )
 
     def test_non_admin_cannot_change_master_projects(self):
         self.set_session(is_admin=False)
