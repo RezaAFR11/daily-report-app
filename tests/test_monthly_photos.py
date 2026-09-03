@@ -150,9 +150,12 @@ class PeriodicPhotoRendererTests(unittest.TestCase):
 
         reader = PdfReader(io.BytesIO(result.getvalue()))
         text = "\n".join(page.extract_text() or "" for page in reader.pages)
-        self.assertIn("Appendix 6.1 - Photo Documentation", text)
+        self.assertIn("Appendix 1.1 - Photo Documentation", text)
         self.assertIn("Switchgear inspection", text)
-        self.assertGreaterEqual(len(reader.pages), 8)
+        self.assertEqual(len(reader.pages), 3)
+        appendix_page = reader.pages[-1].extract_text() or ""
+        self.assertIn("1. Appendices", appendix_page)
+        self.assertIn("Appendix 1.1 - Photo Documentation", appendix_page)
 
 
 class PeriodicPhotoRouteTests(unittest.TestCase):

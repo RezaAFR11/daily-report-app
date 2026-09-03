@@ -33,6 +33,12 @@ from .identity import (
     project_title_match,
 )
 from .importer import DEFAULT_LIMITS, PDFImportError, import_daily_report_pdf
+from .legacy_excel import (
+    DEFAULT_LIMITS as LEGACY_EXCEL_LIMITS,
+    LegacyExcelError,
+    analyze_legacy_daily_workbook,
+    extract_legacy_daily_records,
+)
 from .overtime import parse_overtime_workbooks
 from .photos import (
     DEFAULT_PHOTO_LIMITS,
@@ -79,6 +85,7 @@ _STORED_PHOTO_WARNING_PREFIX = "Stored JSON photo:"
 _MAX_WORKBOOK_FILES = 6
 _MAX_WORKBOOK_FILE_BYTES = 16 * 1024 * 1024
 _MAX_WORKBOOK_REQUEST_BYTES = 48 * 1024 * 1024
+_MAX_LEGACY_EXCEL_REQUEST_BYTES = LEGACY_EXCEL_LIMITS.max_file_bytes + (2 * 1024 * 1024)
 _AI_COOLDOWN_SECONDS = 20
 _AI_DRAFT_LOCK_STALE_SECONDS = 5 * 60
 _AI_DRAFT_LOCK_RETRY_SECONDS = 5
@@ -4229,6 +4236,62 @@ def _workbook_uploads() -> list[tuple[str, bytes]]:
     return result
 
 
+def _save_legacy_excel_upload(upload: Any, destination: Path) -> tuple[int, str]:
+    """Stream one legacy workbook to disk while enforcing the per-file limit."""
+
+    total = 0
+    digest = hashlib.sha256()
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("xb") as handle:
+            while True:
+                chunk = upload.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > LEGACY_EXCEL_LIMITS.max_file_bytes:
+                    raise ValueError(
+                        f"Workbook exceeds the {LEGACY_EXCEL_LIMITS.max_file_bytes // (1024 * 1024)} MB limit."
+                    )
+                digest.update(chunk)
+                handle.write(chunk)
+        if total <= 0:
+            raise ValueError("Uploaded workbook is empty.")
+        os.replace(temporary, destination)
+        return total, digest.hexdigest()
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def _public_legacy_excel_analysis(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Hide internal worksheet package paths from the browser response."""
+
+    return {
+        key: copy.deepcopy(value.get(key))
+        for key in (
+            "schema_version",
+            "parser_version",
+            "filename",
+            "size_bytes",
+            "daily_sheet_count",
+            "ignored_sheet_count",
+            "ignored_sheets",
+            "available_dates",
+            "date_from",
+            "date_to",
+            "duplicate_dates",
+            "project",
+            "field_variants",
+            "warning_count",
+            "warnings",
+        )
+    }
+
+
 def _ai_admin_only() -> bool:
     return str(os.environ.get("ANTHROPIC_AI_ADMIN_ONLY", "true")).strip().lower() not in {
         "0", "false", "no", "off",
@@ -4908,8 +4971,10 @@ def _build_uploaded_pdf_draft(
     report_mode: str,
     report_type: str,
     config: Mapping[str, Any],
+    source_method: str = "uploaded_pdf",
+    expected_dates: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Validate and aggregate normalized PDF records into an editable draft."""
+    """Validate and aggregate normalized legacy source records into an editable draft."""
     photo_limits = periodic_photo_limits(report_type)
     warnings.extend(_bound_record_photo_candidates(records, limits=photo_limits))
     source_issues = _source_validation_issues(warnings)
@@ -4932,7 +4997,11 @@ def _build_uploaded_pdf_draft(
         date_from=date_from.strftime("%Y-%m-%d"),
         date_to=date_to.strftime("%Y-%m-%d"),
         project_no=project_no,
-        expected_dates=_expected_dates(date_from, date_to),
+        expected_dates=(
+            list(expected_dates)
+            if expected_dates is not None
+            else _expected_dates(date_from, date_to)
+        ),
         work_hours_policy=_project_work_hours_policy(
             config,
             project_no=project_no,
@@ -4956,8 +5025,8 @@ def _build_uploaded_pdf_draft(
         date_from=date_from.strftime("%Y-%m-%d"),
         date_to=date_to.strftime("%Y-%m-%d"),
         report_mode=report_mode,
-        source_method="uploaded_pdf",
-        source_manifest=_source_manifest(selected_records, "uploaded_pdf"),
+        source_method=source_method,
+        source_manifest=_source_manifest(selected_records, source_method),
         report_context=_latest_report_context(selected_records),
         extra_warnings=review_warnings,
         report_type=report_type,
@@ -5201,6 +5270,214 @@ def register_monthly_routes(
             report_name = _report_name(kind)
             app.logger.exception("Stored JSON %s compilation failed", kind)
             return jsonify({"error": f"{report_name} compilation failed: {exc}"}), 500
+
+    @app.post("/monthly/excel-source/analyze")
+    def analyze_monthly_excel_source():
+        auth = require_login_json()
+        if auth:
+            return auth
+        if (
+            request.content_length is not None
+            and request.content_length > _MAX_LEGACY_EXCEL_REQUEST_BYTES
+        ):
+            return jsonify({
+                "error": (
+                    "Excel upload exceeds the "
+                    f"{LEGACY_EXCEL_LIMITS.max_file_bytes // (1024 * 1024)} MB limit."
+                )
+            }), 413
+
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            return jsonify({"error": "Choose one legacy Daily Report .xlsx workbook."}), 400
+        filename = os.path.basename(str(upload.filename or ""))
+        if not filename.lower().endswith(".xlsx"):
+            return jsonify({"error": f"{filename or 'Upload'} is not an .xlsx workbook."}), 400
+
+        username = session["username"]
+        upload_session_id = uuid.uuid4().hex
+        directory: Path | None = None
+        try:
+            _cleanup_upload_sessions(data_dir, username)
+            root = _upload_sessions_dir(data_dir, username)
+            active_count = sum(
+                1
+                for path in root.iterdir()
+                if path.is_dir()
+                and _DRAFT_ID_RE.fullmatch(path.name)
+                and not (path / "result.json").is_file()
+            )
+            if active_count >= _MAX_ACTIVE_UPLOAD_SESSIONS:
+                return jsonify({
+                    "error": "Too many unfinished upload sessions. Finish or remove the current source first."
+                }), 429
+
+            directory = root / upload_session_id
+            directory.mkdir()
+            workbook_path = directory / "workbook.xlsx"
+            size_bytes, digest = _save_legacy_excel_upload(upload, workbook_path)
+            analysis = analyze_legacy_daily_workbook(
+                workbook_path,
+                filename=filename,
+                sha256=digest,
+            )
+            manifest = {
+                "schema_version": "legacy-excel-source-session/1",
+                "upload_session_id": upload_session_id,
+                "owner": username,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "filename": filename,
+                "size_bytes": size_bytes,
+                "sha256": digest,
+                "analysis": analysis,
+            }
+            _atomic_json(directory / "session.json", manifest)
+            return jsonify({
+                "ok": True,
+                "upload_session_id": upload_session_id,
+                "analysis": _public_legacy_excel_analysis(analysis),
+            })
+        except (LegacyExcelError, ValueError) as exc:
+            if directory is not None and directory.exists():
+                _remove_upload_session(data_dir, username, upload_session_id)
+            return jsonify({"error": str(exc)}), 400
+        except Exception:
+            if directory is not None and directory.exists():
+                _remove_upload_session(data_dir, username, upload_session_id)
+            app.logger.exception("Legacy Excel source analysis failed for %s", filename)
+            return jsonify({
+                "error": "Excel source could not be analyzed. Check the workbook or server logs."
+            }), 500
+
+    @app.post("/monthly/excel-source/<upload_session_id>/compile")
+    def compile_monthly_excel_source(upload_session_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        loaded = _load_upload_session(data_dir, session["username"], upload_session_id)
+        if loaded is None:
+            return jsonify({"error": "Excel source session was not found or has expired."}), 404
+        directory, manifest = loaded
+        if manifest.get("schema_version") != "legacy-excel-source-session/1":
+            return jsonify({"error": "This session is not an Excel source session."}), 400
+
+        operation_lock = _acquire_upload_operation_lock(directory)
+        if operation_lock is None:
+            return jsonify({"error": "This Excel source is already being compiled. Please wait."}), 409
+        try:
+            body = request.get_json(silent=True)
+            if not isinstance(body, dict):
+                raise ValueError("Invalid Excel compile request.")
+            kind = _report_type(body.get("report_type") or "monthly")
+            mode = _normalise_report_mode(kind, body.get("report_mode"))
+            start, end = _parse_period(body.get("date_from"), body.get("date_to"), kind, mode)
+            project_no = _clean_text(body.get("project_no"), 250)
+            project_title = _clean_text(body.get("project_title"), 500)
+            if not project_no:
+                raise ValueError("Select a project first.")
+
+            analysis = manifest.get("analysis") if isinstance(manifest.get("analysis"), dict) else {}
+            if analysis.get("duplicate_dates"):
+                raise ValueError("Resolve duplicate worksheet dates before compiling this workbook.")
+            available = {
+                _clean_text(value, 10)
+                for value in analysis.get("available_dates", [])
+                if _clean_text(value, 10)
+            }
+            start_text = start.strftime("%Y-%m-%d")
+            end_text = end.strftime("%Y-%m-%d")
+            if start_text not in available or end_text not in available:
+                raise ValueError("The From and To dates must be dates available in the workbook.")
+
+            requested_dates = body.get("selected_dates")
+            if requested_dates is None:
+                selected_dates = sorted(
+                    value for value in available if start_text <= value <= end_text
+                )
+            elif isinstance(requested_dates, list):
+                selected_dates = sorted({
+                    _clean_text(value, 10) for value in requested_dates if _clean_text(value, 10)
+                })
+            else:
+                raise ValueError("Selected workbook dates must be a list.")
+            if not selected_dates:
+                raise ValueError("Choose at least one workbook date to compile.")
+            unavailable = [value for value in selected_dates if value not in available]
+            outside = [value for value in selected_dates if not (start_text <= value <= end_text)]
+            if unavailable:
+                raise ValueError(
+                    f"Selected date(s) are not available in the workbook: {', '.join(unavailable)}"
+                )
+            if outside:
+                raise ValueError(
+                    f"Selected date(s) are outside the reporting period: {', '.join(outside)}"
+                )
+
+            workbook_path = directory / "workbook.xlsx"
+            if not workbook_path.is_file():
+                return jsonify({"error": "The uploaded Excel source is no longer available."}), 410
+            photo_limits = periodic_photo_limits(kind)
+            records, parser_warnings = extract_legacy_daily_records(
+                workbook_path,
+                analysis=analysis,
+                selected_dates=selected_dates,
+                username=session["username"],
+                project_no=project_no,
+                project_title=project_title,
+                asset_directory=directory / "assets",
+                photo_limits=photo_limits,
+            )
+            warnings: list[Any] = [
+                "Uploaded Excel data was normalized from date-named Daily Report worksheets. "
+                "Review date warnings, manpower, man-hours, progress, and photo captions before issue."
+            ]
+            warnings.extend(parser_warnings)
+            draft = _build_uploaded_pdf_draft(
+                records,
+                warnings,
+                project_no=project_no,
+                project_title=project_title,
+                date_from=start,
+                date_to=end,
+                report_mode=mode,
+                report_type=kind,
+                config=config_provider(),
+                source_method="uploaded_excel",
+                expected_dates=selected_dates,
+            )
+            pending_draft_id = uuid.uuid4().hex
+            draft_photo_dir = _draft_photo_dir(
+                data_dir,
+                session["username"],
+                pending_draft_id,
+            )
+            if draft_photo_dir is None:
+                raise ValueError("Invalid report draft photo directory")
+            copy_photo_assets(
+                _all_photo_references(records),
+                directory / "assets",
+                draft_photo_dir,
+            )
+            draft_id = _save_draft(
+                data_dir,
+                session["username"],
+                draft,
+                draft_id=pending_draft_id,
+            )
+            draft["draft_id"] = draft_id
+            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+        except (LegacyExcelError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception:
+            app.logger.exception("Legacy Excel source compilation failed")
+            return jsonify({
+                "error": "Excel source compilation failed. Retry or check the server logs."
+            }), 500
+        finally:
+            try:
+                operation_lock.rmdir()
+            except OSError:
+                pass
 
     @app.post("/monthly/upload-session/start")
     def start_monthly_upload_session():
@@ -5823,12 +6100,32 @@ def register_monthly_routes(
             start, end = _parse_period(period.get("start"), period.get("end"), kind, mode)
             project_no = review["project_no"]
             project_title = review["project_title"]
+            source_method = str(draft.get("source_method") or "stored_json")
+            expected_dates = _expected_dates(start, end)
+            # Excel users may deliberately compile only some of the worksheets
+            # inside a period. Preserve that explicit selection when Source Data
+            # Validation re-aggregates the draft.
+            if source_method == "uploaded_excel":
+                coverage = draft.get("coverage") if isinstance(draft.get("coverage"), dict) else {}
+                selected_expected: list[str] = []
+                seen_expected: set[str] = set()
+                for value in coverage.get("expected_dates", []):
+                    text = str(value or "").strip()
+                    try:
+                        selected_day = datetime.strptime(text, "%Y-%m-%d")
+                    except ValueError:
+                        continue
+                    if start <= selected_day <= end and text not in seen_expected:
+                        seen_expected.add(text)
+                        selected_expected.append(text)
+                if selected_expected:
+                    expected_dates = sorted(selected_expected)
             aggregated = aggregate_monthly_records(
                 included_records,
                 date_from=start.strftime("%Y-%m-%d"),
                 date_to=end.strftime("%Y-%m-%d"),
                 project_no=project_no,
-                expected_dates=_expected_dates(start, end),
+                expected_dates=expected_dates,
                 work_hours_policy=_project_work_hours_policy(
                     config_provider(), project_no=project_no, project_title=project_title
                 ),
@@ -5842,7 +6139,6 @@ def register_monthly_routes(
                 record for record in included_records
                 if not selected_ids or str(record.get("report_id") or "") in selected_ids
             ]
-            source_method = str(draft.get("source_method") or "stored_json")
             photo_limits = periodic_photo_limits(kind)
             photo_warnings: list[str] = []
             if source_method == "stored_json":

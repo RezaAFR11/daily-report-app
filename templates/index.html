@@ -2482,120 +2482,115 @@ function populateSignOffs(signOffs) {
 // ════════════════════════════════════════════════════════════
 // COLLECT ALL FORM DATA
 // ════════════════════════════════════════════════════════════
-function collectData() {
-  const v = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+const WEATHER_FIELD_IDS = {
+  Morning:'wx_morning',
+  Afternoon:'wx_afternoon',
+  Evening:'wx_evening',
+  Wind:'wx_wind',
+  Temperature:'wx_temp',
+  Impact:'wx_impact',
+};
 
-  // Weather
+function formFieldValue(id) {
+  const field = document.getElementById(id);
+  return field ? field.value : '';
+}
+
+function collectWeatherData() {
   const weather = {};
-  const wxFields = [
-    ['Morning',     'wx_morning'],
-    ['Afternoon',   'wx_afternoon'],
-    ['Evening',     'wx_evening'],
-    ['Wind',        'wx_wind'],
-    ['Temperature', 'wx_temp'],
-    ['Impact',      'wx_impact'],
-  ];
-  wxFields.forEach(([label, eid]) => { const el = document.getElementById(eid); if (el) weather[label] = el.value; });
-
-  // Global indirect manpower
-  const indirect_manpower = [];
-  document.querySelectorAll('#indirectContainer .indirect-row').forEach(row => {
-    indirect_manpower.push({
-      name:  row.querySelector('.mp-name').value,
-      role:  row.querySelector('.mp-role').value,
-      hours: row.querySelector('.mp-hours').value,
-    });
+  Object.entries(WEATHER_FIELD_IDS).forEach(([label, id]) => {
+    const field = document.getElementById(id);
+    if (field) weather[label] = field.value;
   });
+  return weather;
+}
 
-  // Overall progress
-  const overall_progress = [];
+function collectManpowerRows(root, selector, includeTask=false) {
+  return Array.from(root.querySelectorAll(selector)).map(row => {
+    if (includeTask) {
+      return {
+        name:  row.querySelector('.mp-name').value,
+        role:  row.querySelector('.mp-role').value,
+        task:  row.querySelector('.mp-task').value,
+        hours: row.querySelector('.mp-hours').value,
+      };
+    }
+    return {
+      name: row.querySelector('.mp-name').value,
+      role: row.querySelector('.mp-role').value,
+      hours: row.querySelector('.mp-hours').value,
+    };
+  });
+}
+
+function collectOverallProgressData() {
+  const progress = [];
   document.querySelectorAll('#overallProgressContainer .overall-progress-row').forEach(row => {
     const item = {};
     OVERALL_PROGRESS_INPUTS.forEach(([field, selector]) => {
       item[field] = row.querySelector(selector).value.trim();
     });
-    if (Object.values(item).some(value => value)) overall_progress.push(item);
+    if (Object.values(item).some(value => value)) progress.push(item);
   });
+  return progress;
+}
 
-  // Areas
-  const areas = [];
-  document.querySelectorAll('#areasContainer .area-card').forEach(block => {
-    const sel = block.querySelector('.area-sel');
-    const custom = block.querySelector('.area-custom');
-    const areaId = sel.value === '__custom__' ? custom.value : sel.value;
+function collectActivityValues(areaBlock, selector) {
+  return Array.from(areaBlock.querySelectorAll(selector))
+    .map(input => input.value.trim())
+    .filter(Boolean);
+}
 
-    const activities_today = [];
-    block.querySelectorAll('.acts-today .act-item input').forEach(inp => {
-      if (inp.value.trim()) activities_today.push(inp.value.trim());
-    });
-    const activities_tomorrow = [];
-    block.querySelectorAll('.acts-tmr .act-item input').forEach(inp => {
-      if (inp.value.trim()) activities_tomorrow.push(inp.value.trim());
-    });
-
-    const manpower = [];
-    block.querySelectorAll('.dm-row').forEach(row => {
-      manpower.push({
-        name:  row.querySelector('.mp-name').value,
-        role:  row.querySelector('.mp-role').value,
-        task:  row.querySelector('.mp-task').value,
-        hours: row.querySelector('.mp-hours').value,
-      });
-    });
-
-    const indirect_manpower_area = [];
-    block.querySelectorAll('.area-ind-row').forEach(row => {
-      indirect_manpower_area.push({
-        name:  row.querySelector('.mp-name').value,
-        role:  row.querySelector('.mp-role').value,
-        hours: row.querySelector('.mp-hours').value,
-      });
-    });
-
-    const photos = [];
-    block.querySelectorAll('.photo-box').forEach(box => {
-      const data     = box.querySelector('.photo-data').value;
-      const filename = box.querySelector('.photo-filename').value;
-      const desc     = box.querySelector('.photo-desc').value;
-      const missing  = box.querySelector('.photo-missing')?.value === 'true';
-      if (data || filename || desc) {
-        const photo = { img_data: data, photo_filename: filename, desc };
-        if (missing) photo.photo_missing = true;
-        photos.push(photo);
-      }
-    });
-
-    areas.push({
-      id: areaId,
-      activities_today,
-      activities_tomorrow,
-      manpower,
-      indirect_manpower: indirect_manpower_area,
-      constraints: (block.querySelector('.area-const') || {}).value || '',
-      remarks:     (block.querySelector('.area-rem')   || {}).value || '',
-      photos,
-    });
+function collectAreaPhotos(areaBlock) {
+  const photos = [];
+  areaBlock.querySelectorAll('.photo-box').forEach(box => {
+    const data = box.querySelector('.photo-data').value;
+    const filename = box.querySelector('.photo-filename').value;
+    const desc = box.querySelector('.photo-desc').value;
+    const missing = box.querySelector('.photo-missing')?.value === 'true';
+    if (!data && !filename && !desc) return;
+    const photo = {img_data:data, photo_filename:filename, desc};
+    if (missing) photo.photo_missing = true;
+    photos.push(photo);
   });
+  return photos;
+}
 
+function collectAreaData(areaBlock) {
+  const selector = areaBlock.querySelector('.area-sel');
+  const customArea = areaBlock.querySelector('.area-custom');
+  return {
+    id: selector.value === '__custom__' ? customArea.value : selector.value,
+    activities_today: collectActivityValues(areaBlock, '.acts-today .act-item input'),
+    activities_tomorrow: collectActivityValues(areaBlock, '.acts-tmr .act-item input'),
+    manpower: collectManpowerRows(areaBlock, '.dm-row', true),
+    indirect_manpower: collectManpowerRows(areaBlock, '.area-ind-row'),
+    constraints: (areaBlock.querySelector('.area-const') || {}).value || '',
+    remarks: (areaBlock.querySelector('.area-rem') || {}).value || '',
+    photos: collectAreaPhotos(areaBlock),
+  };
+}
+
+function collectData() {
   return {
     section_order:  getSectionOrder(),
-    date:           v('f_date'),
-    day_no:         v('f_day_no'),
-    project_no:     v('f_project_no'),
-    location:       v('f_location'),
-    customer:       v('f_customer'),
-    equipment:      v('f_equipment'),
-    project_title:  v('f_project_title'),
-    photo_documentation_title: v('f_photo_documentation_title'),
-    prepared_by:    v('f_prepared_by'),
-    checked_by:     v('f_checked_by'),
-    approved_by:    v('f_approved_by'),
-    global_remarks: v('f_global_remarks'),
-    weather,
-    indirect_manpower,
+    date:           formFieldValue('f_date'),
+    day_no:         formFieldValue('f_day_no'),
+    project_no:     formFieldValue('f_project_no'),
+    location:       formFieldValue('f_location'),
+    customer:       formFieldValue('f_customer'),
+    equipment:      formFieldValue('f_equipment'),
+    project_title:  formFieldValue('f_project_title'),
+    photo_documentation_title: formFieldValue('f_photo_documentation_title'),
+    prepared_by:    formFieldValue('f_prepared_by'),
+    checked_by:     formFieldValue('f_checked_by'),
+    approved_by:    formFieldValue('f_approved_by'),
+    global_remarks: formFieldValue('f_global_remarks'),
+    weather: collectWeatherData(),
+    indirect_manpower: collectManpowerRows(document, '#indirectContainer .indirect-row'),
     show_overall_progress: document.getElementById('showOverallProgress')?.checked === true,
-    overall_progress,
-    areas,
+    overall_progress: collectOverallProgressData(),
+    areas: Array.from(document.querySelectorAll('#areasContainer .area-card')).map(collectAreaData),
     sign_offs: collectSignOffs(),
   };
 }
@@ -2619,9 +2614,7 @@ function populateForm(d) {
   set('f_photo_documentation_title', d.photo_documentation_title);
 
   const wx = d.weather || {};
-  const wxMap = { Morning:'wx_morning', Afternoon:'wx_afternoon', Evening:'wx_evening',
-                  Wind:'wx_wind', Temperature:'wx_temp', Impact:'wx_impact' };
-  Object.entries(wxMap).forEach(([k,id]) => { if (wx[k] !== undefined) set(id, wx[k]); });
+  Object.entries(WEATHER_FIELD_IDS).forEach(([k,id]) => { if (wx[k] !== undefined) set(id, wx[k]); });
 
   // Global indirect manpower
   document.getElementById('indirectContainer').innerHTML = '';
@@ -3837,36 +3830,25 @@ async function sendAIMessage() {
   }
 }
 
-function applyAIUpdates(badge) {
-  let updates;
-  try {
-    updates = JSON.parse(badge.dataset.updates);
-  } catch { return; }
+function setAIFormField(id, value) {
+  const field = document.getElementById(id);
+  if (field && value !== undefined && value !== '') field.value = value;
+}
 
-  const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined && val !== '') el.value = val; };
+function applyAIWeatherUpdates(weather) {
+  if (!weather) return;
+  Object.entries(WEATHER_FIELD_IDS).forEach(([key, id]) => {
+    if (weather[key] !== undefined) setAIFormField(id, weather[key]);
+  });
+}
 
-  // Simple fields
-  set('f_date', updates.date);
-  set('f_day_no', updates.day_no);
-  set('f_global_remarks', updates.global_remarks);
-  set('f_photo_documentation_title', updates.photo_documentation_title);
+function applyAIIndirectManpower(manpower) {
+  if (!manpower || manpower.length === 0) return;
+  document.getElementById('indirectContainer').innerHTML = '';
+  manpower.forEach(item => addIndirectRow(item));
+}
 
-  // Weather
-  if (updates.weather) {
-    const wxMap = { Morning:'wx_morning', Afternoon:'wx_afternoon', Evening:'wx_evening',
-                    Wind:'wx_wind', Temperature:'wx_temp', Impact:'wx_impact' };
-    Object.entries(wxMap).forEach(([k,id]) => {
-      if (updates.weather[k] !== undefined) set(id, updates.weather[k]);
-    });
-  }
-
-  // Global indirect manpower
-  if (updates.indirect_manpower && updates.indirect_manpower.length > 0) {
-    document.getElementById('indirectContainer').innerHTML = '';
-    updates.indirect_manpower.forEach(m => addIndirectRow(m));
-  }
-
-  // Overall progress
+function applyAIProgressUpdates(updates) {
   if (updates.show_overall_progress !== undefined) {
     const overallProgressToggle = document.getElementById('showOverallProgress');
     if (overallProgressToggle) {
@@ -3879,13 +3861,29 @@ function applyAIUpdates(badge) {
     updates.overall_progress.forEach(row => addOverallProgressRow(row));
     updateOverallProgressTotals();
   }
+}
 
-  // Areas
-  if (updates.areas && updates.areas.length > 0) {
-    document.getElementById('areasContainer').innerHTML = '';
-    _aidx = 0;
-    updates.areas.forEach(a => addAreaBlock(a));
-  }
+function applyAIAreaUpdates(areas) {
+  if (!areas || areas.length === 0) return;
+  document.getElementById('areasContainer').innerHTML = '';
+  _aidx = 0;
+  areas.forEach(area => addAreaBlock(area));
+}
+
+function applyAIUpdates(badge) {
+  let updates;
+  try {
+    updates = JSON.parse(badge.dataset.updates);
+  } catch { return; }
+
+  setAIFormField('f_date', updates.date);
+  setAIFormField('f_day_no', updates.day_no);
+  setAIFormField('f_global_remarks', updates.global_remarks);
+  setAIFormField('f_photo_documentation_title', updates.photo_documentation_title);
+  applyAIWeatherUpdates(updates.weather);
+  applyAIIndirectManpower(updates.indirect_manpower);
+  applyAIProgressUpdates(updates);
+  applyAIAreaUpdates(updates.areas);
 
   updateHeadcount();
   badge.textContent = '✅ Applied!';

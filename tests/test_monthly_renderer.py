@@ -19,15 +19,19 @@ def _pdf_text(pdf_bytes: bytes) -> str:
 
 
 class MonthlyReportRendererTests(unittest.TestCase):
-    def test_minimal_report_returns_rewound_six_page_pdf(self):
+    def test_minimal_report_hides_every_empty_chapter(self):
         result = render_monthly_report({})
 
         self.assertIsInstance(result, io.BytesIO)
         self.assertEqual(result.tell(), 0)
         self.assertTrue(result.getvalue().startswith(b"%PDF-"))
-        # Cover, TOC, executive/safety, engineering, procurement and site.
-        # Empty appendices and the blank source-template page are not emitted.
-        self.assertEqual(_page_count(result.getvalue()), 6)
+        # Only the cover and TOC remain when every report chapter is empty.
+        self.assertEqual(_page_count(result.getvalue()), 2)
+        text = _pdf_text(result.getvalue())
+        self.assertNotIn("Executive Summary", text)
+        self.assertNotIn("Engineering", text)
+        self.assertNotIn("Procurement", text)
+        self.assertNotIn("Appendices", text)
 
     def test_review_schema_progress_adds_generated_s_curve_page(self):
         report = {
@@ -77,8 +81,12 @@ class MonthlyReportRendererTests(unittest.TestCase):
 
         result = render_monthly_report(report)
 
-        self.assertEqual(_page_count(result.getvalue()), 8)
+        self.assertEqual(_page_count(result.getvalue()), 7)
         self.assertEqual(result.tell(), 0)
+        reader = PdfReader(io.BytesIO(result.getvalue()))
+        appendix_page = reader.pages[-1].extract_text() or ""
+        self.assertIn("6. Appendices", appendix_page)
+        self.assertIn("Appendix 6.1 - Progress S-Curve", appendix_page)
 
     def test_internal_line_breaks_and_safety_bullets_do_not_render_as_markup(self):
         result = render_monthly_report({
@@ -101,7 +109,7 @@ class MonthlyReportRendererTests(unittest.TestCase):
         self.assertNotIn("&# 82", text)
         self.assertIn("To-date Plan", text)
         self.assertIn("Total Manpower", text)
-        self.assertIn("Supplier/Vendor/", text)
+        self.assertNotIn("Procurement Status", text)
 
     def test_s_curve_can_be_disabled(self):
         report = {
@@ -121,7 +129,40 @@ class MonthlyReportRendererTests(unittest.TestCase):
 
         result = render_monthly_report(report)
 
-        self.assertEqual(_page_count(result.getvalue()), 6)
+        self.assertEqual(_page_count(result.getvalue()), 3)
+
+    def test_nonempty_chapters_and_subchapters_are_renumbered_without_gaps(self):
+        result = render_monthly_report({
+            "engineering": {"summary": "Issued drawing review completed."},
+            "equipment_delivery": {"rows": [{
+                "equipment": "Governor valve",
+                "supplier": "Vendor A",
+                "status": "Delivered",
+            }]},
+            "site": {"next_month_activities": ["Continue installation"]},
+            "appendices": [{
+                "number": "6.8",
+                "title": "QC Document",
+                "status": "Attached",
+                "content": ["Inspection record attached"],
+            }],
+        })
+
+        text = _pdf_text(result.getvalue())
+        self.assertIn("1. Engineering", text)
+        self.assertIn("1.1 Status Engineering", text)
+        self.assertIn("2. Procurement", text)
+        self.assertIn("2.1 Equipment Delivery Status", text)
+        self.assertNotIn("Procurement Status", text)
+        self.assertNotIn("Shipment Status", text)
+        self.assertIn("3. Site Services / Construction", text)
+        self.assertIn("3.1 Planned Activities Next Month", text)
+        self.assertNotIn("This Month Activities", text)
+        self.assertNotIn("Project Schedule Status", text)
+        self.assertIn("4. Appendices", text)
+        self.assertIn("Appendix 4.1 - QC Document", text)
+        self.assertNotIn("Executive Summary", text)
+        self.assertNotIn("Safety Status", text)
 
     def test_long_runtime_text_and_tables_split_without_layout_error(self):
         long_text = "Wrapped runtime text with XML chars & < > " * 350

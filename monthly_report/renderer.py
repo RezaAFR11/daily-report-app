@@ -113,6 +113,66 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
+_ABSENT_SECTION_TEXT = {
+    "none",
+    "not supplied",
+    "no data",
+    "no data supplied",
+    "manual input required",
+    "manual input required.",
+    "manual weekly input required",
+    "manual weekly input required.",
+    "manual monthly input required",
+    "manual monthly input required.",
+    "no engineering status data was supplied in the available daily reports.",
+    "no procurement status data was supplied in the available daily reports.",
+    "no separate engineering deliverable register was supplied in the available daily reports.",
+    "no separate procurement, equipment-delivery, or shipment register was supplied in the available daily reports.",
+}
+_NON_CONTENT_KEYS = {
+    "available",
+    "source_meta",
+    "source_type",
+    "source_ids",
+    "source_dates",
+    "generated_at",
+    "updated_at",
+}
+
+
+def _has_section_data(value: Any) -> bool:
+    """Return whether a report section contains client-facing source data.
+
+    Zero is meaningful (for example, zero safety incidents), while compiler
+    placeholders and provenance-only mappings are not report content.
+    """
+
+    if value is None or value == "":
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return math.isfinite(float(value))
+    if isinstance(value, str):
+        text = " ".join(value.strip().casefold().split())
+        if not text or text in _ABSENT_SECTION_TEXT:
+            return False
+        if text.startswith("no separate engineering deliverable register was supplied"):
+            return False
+        if text.startswith("no separate procurement") or text.startswith("no separate po or material register was supplied"):
+            return False
+        return not re.fullmatch(r"no .+ (?:data|information) (?:was |were )?supplied\.?", text)
+    if isinstance(value, Mapping):
+        return any(
+            _has_section_data(item)
+            for key, item in value.items()
+            if str(key).strip().casefold() not in _NON_CONTENT_KEYS
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        return any(_has_section_data(item) for item in value)
+    return True
+
+
 def _number(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
         return None
@@ -1492,7 +1552,11 @@ def _appendix_source_number(item: Mapping[str, Any]) -> str:
     return _plain(item.get("source_number") or item.get("number"))
 
 
-def _renumber_visible_appendices(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _renumber_visible_appendices(
+    items: list[dict[str, Any]],
+    *,
+    chapter_number: int = 6,
+) -> list[dict[str, Any]]:
     """Assign contiguous display numbers to appendices that will be rendered.
 
     The stable ``source_number`` remains unchanged, so internal mapping still
@@ -1501,7 +1565,7 @@ def _renumber_visible_appendices(items: list[dict[str, Any]]) -> list[dict[str, 
     """
 
     for index, item in enumerate(items, start=1):
-        item["number"] = f"6.{index}"
+        item["number"] = f"{chapter_number}.{index}"
     return items
 
 
@@ -1987,6 +2051,7 @@ def _visible_report_appendices(
     curve: tuple[list[str], list[float], list[float], bool] | None,
     manpower: Mapping[str, Any],
     photos: list[Mapping[str, Any]],
+    chapter_number: int = 6,
 ) -> list[dict[str, Any]]:
     appendices = _normalise_appendices(
         report.get("appendices"),
@@ -2008,7 +2073,8 @@ def _visible_report_appendices(
                 item["content"] = "__reviewed_photos__"
                 break
     return _renumber_visible_appendices(
-        [item for item in appendices if _appendix_is_visible(item)]
+        [item for item in appendices if _appendix_is_visible(item)],
+        chapter_number=chapter_number,
     )
 
 
@@ -2049,42 +2115,163 @@ def _toc_story(styles: Mapping[str, ParagraphStyle]) -> list[Flowable]:
     ]
 
 
+def _executive_section_has_data(
+    report: Mapping[str, Any],
+    progress: list[dict[str, Any]],
+) -> bool:
+    coverage = report.get("coverage") if isinstance(report.get("coverage"), Mapping) else {}
+    has_coverage = any(
+        _has_section_data(coverage.get(key))
+        for key in ("expected_dates", "covered_dates", "found_dates", "missing_dates")
+    )
+    return _has_section_data(report.get("executive_summary")) or bool(progress) or has_coverage
+
+
+def _safety_section_has_data(report: Mapping[str, Any]) -> bool:
+    safety = report.get("safety") if isinstance(report.get("safety"), Mapping) else {}
+    return any(
+        value is not None and value != ""
+        for value in (
+            _value(safety, "peak_daily_headcount", "total_manpower", "manpower", default=None),
+            _value(safety, "total_man_hours", "man_hours", default=None),
+            _value(safety, "total_recordable_cases", "recordable_cases", default=None),
+            safety.get("lost_workdays"),
+            safety.get("lost_time_injuries"),
+            safety.get("severity_rate"),
+            safety.get("average_day_away"),
+        )
+    )
+
+
+def _procurement_parts(report: Mapping[str, Any]) -> dict[str, Any]:
+    procurement = report.get("procurement")
+    summary, po_rows, embedded_equipment, embedded_shipments = _po_rows(procurement)
+    equipment = report.get("equipment_delivery", embedded_equipment)
+    shipments = report.get("shipments", embedded_shipments)
+
+    equipment_rows: list[Mapping[str, Any]] = []
+    equipment_summary: Any = equipment
+    if isinstance(equipment, Mapping):
+        equipment_summary = equipment.get("summary")
+        equipment_rows = [
+            row
+            for row in _as_list(_value(equipment, "rows", "items", default=[]))
+            if isinstance(row, Mapping)
+        ]
+    elif isinstance(equipment, Sequence) and not isinstance(
+        equipment, (str, bytes, bytearray)
+    ):
+        equipment_rows = [row for row in equipment if isinstance(row, Mapping)]
+        if equipment_rows:
+            equipment_summary = None
+
+    shipment_summary: Any = None
+    shipment_rows = [row for row in _as_list(shipments) if isinstance(row, Mapping)]
+    if isinstance(shipments, Mapping):
+        shipment_summary = shipments.get("summary")
+        shipment_rows = [
+            row
+            for row in _as_list(_value(shipments, "rows", "items", default=[]))
+            if isinstance(row, Mapping)
+        ]
+
+    return {
+        "summary": summary,
+        "po_rows": po_rows,
+        "procurement_visible": _has_section_data(summary) or _has_section_data(po_rows),
+        "equipment_summary": equipment_summary,
+        "equipment_rows": equipment_rows,
+        "equipment_visible": _has_section_data(equipment_summary) or _has_section_data(equipment_rows),
+        "shipment_summary": shipment_summary,
+        "shipment_rows": shipment_rows,
+        "shipment_visible": _has_section_data(shipment_summary) or _has_section_data(shipment_rows),
+    }
+
+
+def _site_parts(report: Mapping[str, Any], report_type: str) -> dict[str, Any]:
+    site = report.get("site") if isinstance(report.get("site"), Mapping) else {}
+    current_keys, next_keys, _, _, _, _ = _site_activity_configuration(report_type)
+    current = _value(site, *current_keys, default=_value(report, *current_keys, default=[]))
+    upcoming = _value(site, *next_keys, default=_value(report, *next_keys, default=[]))
+    schedule = _value(site, "schedule_status", "project_schedule_status")
+    concerns = _as_list(
+        _value(site, "concerns", "constraints", default=report.get("constraints"))
+    )
+    findings = _as_list(site.get("key_findings"))
+    constraint_reporting = site.get("constraint_reporting")
+    if not isinstance(constraint_reporting, Mapping):
+        constraint_reporting = report.get("constraint_reporting")
+    return {
+        "site": site,
+        "summary": site.get("summary"),
+        "schedule": schedule,
+        "schedule_visible": _has_section_data(schedule),
+        "current": current,
+        "current_visible": _has_section_data(current),
+        "upcoming": upcoming,
+        "upcoming_visible": _has_section_data(upcoming),
+        "concerns": concerns,
+        "findings": findings,
+        "concerns_visible": (
+            _has_section_data(concerns)
+            or _has_section_data(findings)
+            or _has_section_data(constraint_reporting)
+        ),
+    }
+
+
 def _summary_safety_story(
     report: Mapping[str, Any],
     styles: Mapping[str, ParagraphStyle],
     *,
     report_type: str,
     progress: list[dict[str, Any]],
+    executive_number: int | None,
+    safety_number: int | None,
 ) -> list[Flowable]:
-    story: list[Flowable] = [
-        _heading("1. Executive Summary", styles["h1"], 0),
-        _paragraph(_executive_summary(report, progress), styles["body"]),
-        Spacer(1, 6),
-    ]
-    story.extend(_coverage_flowables(report, styles))
-    story.extend([
-        _progress_table(
-            progress,
-            styles,
-            report_type=report_type,
-            period_label=_plain(report.get("progress_period_label")),
-        ),
-        Spacer(1, 18),
-        _heading("2. Safety Status", styles["h1"], 0),
-        Paragraph("<b>Status summary:</b>", styles["body"]),
-        _safety_table(report.get("safety"), styles),
-        PageBreak(),
-    ])
+    story: list[Flowable] = []
+    if executive_number is not None:
+        story.append(_heading(
+            f"{executive_number}. Executive Summary",
+            styles["h1"],
+            0,
+        ))
+        if _has_section_data(report.get("executive_summary")) or progress:
+            story.extend([
+                _paragraph(_executive_summary(report, progress), styles["body"]),
+                Spacer(1, 6),
+            ])
+        story.extend(_coverage_flowables(report, styles))
+        if progress:
+            story.extend([
+                _progress_table(
+                    progress,
+                    styles,
+                    report_type=report_type,
+                    period_label=_plain(report.get("progress_period_label")),
+                ),
+                Spacer(1, 18),
+            ])
+    if safety_number is not None:
+        story.extend([
+            _heading(f"{safety_number}. Safety Status", styles["h1"], 0),
+            Paragraph("<b>Status summary:</b>", styles["body"]),
+            _safety_table(report.get("safety"), styles),
+        ])
+    if story:
+        story.append(PageBreak())
     return story
 
 
 def _engineering_story(
     report: Mapping[str, Any],
     styles: Mapping[str, ParagraphStyle],
+    *,
+    chapter_number: int,
 ) -> list[Flowable]:
     story: list[Flowable] = [
-        _heading("3. Engineering", styles["h1"], 0),
-        _heading("3.1 Status Engineering", styles["h2"], 1),
+        _heading(f"{chapter_number}. Engineering", styles["h1"], 0),
+        _heading(f"{chapter_number}.1 Status Engineering", styles["h2"], 1),
     ]
     story.extend(_content_flowables(
         _client_facing_missing_summary(report.get("engineering"), section="engineering"),
@@ -2099,55 +2286,57 @@ def _engineering_story(
 def _procurement_story(
     report: Mapping[str, Any],
     styles: Mapping[str, ParagraphStyle],
+    *,
+    chapter_number: int,
 ) -> list[Flowable]:
-    procurement = _client_facing_missing_summary(
-        report.get("procurement"),
-        section="procurement",
-    )
-    summary, po_rows, embedded_equipment, embedded_shipments = _po_rows(procurement)
-    equipment = report.get("equipment_delivery", embedded_equipment)
-    shipments = report.get("shipments", embedded_shipments)
-    story: list[Flowable] = [_heading("4. Procurement", styles["h1"], 0)]
-    if _plain(summary):
-        story.extend([_paragraph(summary, styles["body"]), Spacer(1, 3)])
-    story.append(_heading("4.1 Procurement Status", styles["h2"], 1))
-    story.extend([_procurement_table(po_rows, styles), Spacer(1, 10)])
-    story.append(_heading("4.2 Equipment Delivery Status", styles["h2"], 1))
-
-    equipment_rows: list[Mapping[str, Any]] = []
-    equipment_summary = equipment
-    if isinstance(equipment, Mapping):
-        equipment_summary = equipment.get("summary")
-        equipment_rows = [
-            row
-            for row in _as_list(_value(equipment, "rows", "items", default=[]))
-            if isinstance(row, Mapping)
-        ]
-    elif isinstance(equipment, Sequence) and not isinstance(
-        equipment, (str, bytes, bytearray)
-    ):
-        equipment_rows = [row for row in equipment if isinstance(row, Mapping)]
-        if equipment_rows:
-            equipment_summary = None
-    if equipment_rows:
-        story.extend([_equipment_table(equipment_rows, styles), Spacer(1, 10)])
-    else:
-        story.extend(_content_flowables(
-            equipment_summary,
-            styles,
-            empty_message="No equipment delivery information supplied.",
-            bullets=True,
+    parts = _procurement_parts(report)
+    story: list[Flowable] = [
+        _heading(f"{chapter_number}. Procurement", styles["h1"], 0)
+    ]
+    subsection = 1
+    if parts["procurement_visible"]:
+        story.append(_heading(
+            f"{chapter_number}.{subsection} Procurement Status",
+            styles["h2"],
+            1,
         ))
+        if _has_section_data(parts["summary"]):
+            story.extend([_paragraph(parts["summary"], styles["body"]), Spacer(1, 3)])
+        if parts["po_rows"]:
+            story.extend([_procurement_table(parts["po_rows"], styles), Spacer(1, 10)])
+        subsection += 1
 
-    story.append(_heading("4.3 Shipment Status", styles["h2"], 1))
-    shipment_rows = [row for row in _as_list(shipments) if isinstance(row, Mapping)]
-    if isinstance(shipments, Mapping):
-        shipment_rows = [
-            row
-            for row in _as_list(_value(shipments, "rows", "items", default=[]))
-            if isinstance(row, Mapping)
-        ]
-    story.extend([_shipment_table(shipment_rows, styles), PageBreak()])
+    if parts["equipment_visible"]:
+        story.append(_heading(
+            f"{chapter_number}.{subsection} Equipment Delivery Status",
+            styles["h2"],
+            1,
+        ))
+        if parts["equipment_rows"]:
+            story.extend([_equipment_table(parts["equipment_rows"], styles), Spacer(1, 10)])
+        elif _has_section_data(parts["equipment_summary"]):
+            story.extend(_content_flowables(
+                parts["equipment_summary"],
+                styles,
+                empty_message="",
+                bullets=True,
+            ))
+        subsection += 1
+
+    if parts["shipment_visible"]:
+        story.append(_heading(
+            f"{chapter_number}.{subsection} Shipment Status",
+            styles["h2"],
+            1,
+        ))
+        if _has_section_data(parts["shipment_summary"]):
+            story.extend([
+                _paragraph(parts["shipment_summary"], styles["body"]),
+                Spacer(1, 3),
+            ])
+        if parts["shipment_rows"]:
+            story.append(_shipment_table(parts["shipment_rows"], styles))
+    story.append(PageBreak())
     return story
 
 
@@ -2163,8 +2352,8 @@ def _site_activity_configuration(report_type: str) -> tuple[Any, ...]:
                 "next_period_activities", "planned_next_period_activities",
                 "next_week_activities", "planned_next_week",
             ),
-            "5.2 This Week Activities",
-            "5.3 Planned Activities Next Week",
+            "This Week Activities",
+            "Planned Activities Next Week",
             "No current-week activities supplied.",
             "No next-week activities supplied.",
         )
@@ -2177,8 +2366,8 @@ def _site_activity_configuration(report_type: str) -> tuple[Any, ...]:
             "next_month_activities", "next_period_activities",
             "planned_next_period_activities", "planned_next_month",
         ),
-        "5.2 This Month Activities",
-        "5.3 Planned Activities Next Month",
+        "This Month Activities",
+        "Planned Activities Next Month",
         "No current-month activities supplied.",
         "No next-month activities supplied.",
     )
@@ -2189,8 +2378,10 @@ def _site_story(
     styles: Mapping[str, ParagraphStyle],
     *,
     report_type: str,
+    chapter_number: int,
 ) -> list[Flowable]:
-    site = report.get("site") if isinstance(report.get("site"), Mapping) else {}
+    parts = _site_parts(report, report_type)
+    site = parts["site"]
     (
         current_keys,
         next_keys,
@@ -2199,54 +2390,57 @@ def _site_story(
         current_empty,
         next_empty,
     ) = _site_activity_configuration(report_type)
-    current_activities = _value(
-        site,
-        *current_keys,
-        default=_value(report, *current_keys, default=[]),
-    )
-    next_activities = _value(
-        site,
-        *next_keys,
-        default=_value(report, *next_keys, default=[]),
-    )
     story: list[Flowable] = [
-        _heading("5. Site Services / Construction", styles["h1"], 0)
+        _heading(f"{chapter_number}. Site Services / Construction", styles["h1"], 0)
     ]
-    site_summary = _plain(site.get("summary"))
-    if site_summary:
-        story.extend([_paragraph(site_summary, styles["body"]), Spacer(1, 3)])
-    story.append(_heading("5.1 Project Schedule Status", styles["h2"], 1))
-    story.extend(_content_flowables(
-        _value(site, "schedule_status", "project_schedule_status"),
-        styles,
-        empty_message="Overall schedule/progress data was not supplied for this reporting period.",
-    ))
-    story.append(_heading(current_heading, styles["h2"], 1))
-    story.extend(_activity_flowables(current_activities, styles, empty_message=current_empty))
-    story.append(_heading(next_heading, styles["h2"], 1))
-    story.extend(_activity_flowables(next_activities, styles, empty_message=next_empty))
-    story.append(_heading(
-        "5.4 Area of Concern and Suggested Corrective Action",
-        styles["h2"],
-        1,
-    ))
-    concern_rows = _as_list(
-        _value(site, "concerns", "constraints", default=report.get("constraints"))
-    )
-    concerns_table = _concerns_table(concern_rows, styles)
-    if concerns_table is None:
-        story.append(
-            _paragraph(_constraint_reporting_message(report, site), styles["placeholder"])
-        )
-    else:
-        story.append(concerns_table)
-    findings_table = _key_findings_table(_as_list(site.get("key_findings")), styles)
-    if findings_table is not None:
-        story.extend([
-            Spacer(1, 5),
-            _display_heading("Key Remarks / Findings", styles["h2"]),
-            findings_table,
-        ])
+    if _has_section_data(parts["summary"]):
+        story.extend([_paragraph(parts["summary"], styles["body"]), Spacer(1, 3)])
+
+    subsection = 1
+    if parts["schedule_visible"]:
+        story.append(_heading(
+            f"{chapter_number}.{subsection} Project Schedule Status",
+            styles["h2"],
+            1,
+        ))
+        story.extend(_content_flowables(parts["schedule"], styles, empty_message=""))
+        subsection += 1
+    if parts["current_visible"]:
+        story.append(_heading(
+            f"{chapter_number}.{subsection} {current_heading}",
+            styles["h2"],
+            1,
+        ))
+        story.extend(_activity_flowables(parts["current"], styles, empty_message=current_empty))
+        subsection += 1
+    if parts["upcoming_visible"]:
+        story.append(_heading(
+            f"{chapter_number}.{subsection} {next_heading}",
+            styles["h2"],
+            1,
+        ))
+        story.extend(_activity_flowables(parts["upcoming"], styles, empty_message=next_empty))
+        subsection += 1
+    if parts["concerns_visible"]:
+        story.append(_heading(
+            f"{chapter_number}.{subsection} Area of Concern and Suggested Corrective Action",
+            styles["h2"],
+            1,
+        ))
+        concerns_table = _concerns_table(parts["concerns"], styles)
+        if concerns_table is None:
+            story.append(
+                _paragraph(_constraint_reporting_message(report, site), styles["placeholder"])
+            )
+        else:
+            story.append(concerns_table)
+        findings_table = _key_findings_table(parts["findings"], styles)
+        if findings_table is not None:
+            story.extend([
+                Spacer(1, 5),
+                _display_heading("Key Remarks / Findings", styles["h2"]),
+                findings_table,
+            ])
     story.append(PageBreak())
     return story
 
@@ -2259,51 +2453,31 @@ def _appendices_story(
     photos: list[Mapping[str, Any]],
     manpower: Mapping[str, Any],
     photo_base_dir: str | os.PathLike[str] | None,
+    chapter_number: int,
 ) -> list[Flowable]:
     story: list[Flowable] = []
     if visible_appendices:
-        story.append(_heading("6. Appendices", styles["h1"], 0))
-        for item in visible_appendices:
-            story.append(_heading(_appendix_label(item), styles["appendix_item"], 1))
-
-    if curve is not None:
-        labels, planned, actual, illustrative = curve
-        curve_item = next(
-            (
-                item
-                for item in visible_appendices
-                if _appendix_source_number(item) == "6.2"
-            ),
-            None,
-        )
-        curve_number = _plain(curve_item.get("number")) if curve_item else "6.1"
-        curve_title = (
-            _plain(curve_item.get("title"), "Progress S-Curve")
-            if curve_item
-            else "Progress S-Curve"
-        )
-        story.extend([
-            PageBreak(),
-            Paragraph(
-                escape(f"Appendix {curve_number} - {curve_title}", quote=False),
-                styles["h1"],
-            ),
-            Spacer(1, 10),
-            _SCurveFlowable(labels, planned, actual, illustrative=illustrative),
-        ])
-
+        story.append(_heading(f"{chapter_number}. Appendices", styles["h1"], 0))
+    rendered_sections = 0
     for item in visible_appendices:
         content = item.get("content")
-        if content in (None, "", [], {}):
+        is_curve = curve is not None and _appendix_source_number(item) == "6.2"
+        if not is_curve and content in (None, "", [], {}):
             continue
-        story.extend([
-            PageBreak(),
-            Paragraph(
-                escape(f"Appendix {item['number']} - {item['title']}", quote=False),
-                styles["h1"],
-            ),
-        ])
-        if content == "__reviewed_photos__":
+        if rendered_sections:
+            story.append(PageBreak())
+        story.append(_heading(
+            f"Appendix {item['number']} - {item['title']}",
+            styles["h1"],
+            1,
+        ))
+        if is_curve:
+            labels, planned, actual, illustrative = curve
+            story.extend([
+                Spacer(1, 10),
+                _SCurveFlowable(labels, planned, actual, illustrative=illustrative),
+            ])
+        elif content == "__reviewed_photos__":
             story.extend(_photo_grid_flowables(
                 photos,
                 styles,
@@ -2318,6 +2492,14 @@ def _appendices_story(
                 empty_message="No appendix content supplied.",
                 bullets=True,
             ))
+        rendered_sections += 1
+
+    # A status-only external attachment has no in-document content page. Keep
+    # it discoverable beneath Chapter 6 without reintroducing a separate list
+    # page for appendices that do have content.
+    if visible_appendices and not rendered_sections:
+        for item in visible_appendices:
+            story.append(_heading(_appendix_label(item), styles["appendix_item"], 1))
     return story
 
 
@@ -2337,27 +2519,75 @@ def _build_story(
         manpower=manpower,
         photos=photos,
     )
+    procurement_parts = _procurement_parts(report)
+    site_parts = _site_parts(report, report_type)
+    visible = {
+        "executive": _executive_section_has_data(report, progress),
+        "safety": _safety_section_has_data(report),
+        "engineering": _has_section_data(report.get("engineering")),
+        "procurement": any(
+            procurement_parts[key]
+            for key in ("procurement_visible", "equipment_visible", "shipment_visible")
+        ),
+        "site": (
+            _has_section_data(site_parts["summary"])
+            or site_parts["schedule_visible"]
+            or site_parts["current_visible"]
+            or site_parts["upcoming_visible"]
+            or site_parts["concerns_visible"]
+        ),
+        "appendices": bool(visible_appendices),
+    }
+    chapter_numbers: dict[str, int] = {}
+    next_chapter = 1
+    for key in ("executive", "safety", "engineering", "procurement", "site", "appendices"):
+        if visible[key]:
+            chapter_numbers[key] = next_chapter
+            next_chapter += 1
+    if visible["appendices"]:
+        _renumber_visible_appendices(
+            visible_appendices,
+            chapter_number=chapter_numbers["appendices"],
+        )
+
     story = _toc_story(styles)
     story.extend(_summary_safety_story(
         report,
         styles,
         report_type=report_type,
         progress=progress,
+        executive_number=chapter_numbers.get("executive"),
+        safety_number=chapter_numbers.get("safety"),
     ))
-    story.extend(_engineering_story(report, styles))
-
-    story.extend(_procurement_story(report, styles))
-
-    story.extend(_site_story(report, styles, report_type=report_type))
-
-    story.extend(_appendices_story(
-        visible_appendices,
-        styles,
-        curve=curve,
-        photos=photos,
-        manpower=manpower,
-        photo_base_dir=photo_base_dir,
-    ))
+    if visible["engineering"]:
+        story.extend(_engineering_story(
+            report,
+            styles,
+            chapter_number=chapter_numbers["engineering"],
+        ))
+    if visible["procurement"]:
+        story.extend(_procurement_story(
+            report,
+            styles,
+            chapter_number=chapter_numbers["procurement"],
+        ))
+    if visible["site"]:
+        story.extend(_site_story(
+            report,
+            styles,
+            report_type=report_type,
+            chapter_number=chapter_numbers["site"],
+        ))
+    if visible["appendices"]:
+        story.extend(_appendices_story(
+            visible_appendices,
+            styles,
+            curve=curve,
+            photos=photos,
+            manpower=manpower,
+            photo_base_dir=photo_base_dir,
+            chapter_number=chapter_numbers["appendices"],
+        ))
     return story
 
 

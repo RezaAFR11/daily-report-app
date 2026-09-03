@@ -502,7 +502,7 @@ class MonthlyWebRouteTests(unittest.TestCase):
         self.assertEqual(preview.status_code, 200)
         reader = PdfReader(io.BytesIO(preview.data))
         text = "\n".join(page.extract_text() or "" for page in reader.pages)
-        self.assertIn("Appendix 6.3 - Photo Documentation", text)
+        self.assertIn("Appendix 4.3 - Photo Documentation", text)
         self.assertIn("Stored valve inspection", text)
         preview.close()
 

@@ -120,6 +120,7 @@ from google_drive_integration import (
 )
 from monthly_report import archive_final_daily_record, load_canonical_record
 from monthly_report.importer import DEFAULT_LIMITS as MONTHLY_PDF_IMPORT_LIMITS
+from monthly_report.legacy_excel import DEFAULT_LIMITS as LEGACY_EXCEL_IMPORT_LIMITS
 from monthly_report.web import get_monthly_reports_index, register_monthly_routes
 
 # ── PDF engine ────────────────────────────────────────────────────────────────
@@ -2175,6 +2176,9 @@ app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'gpa-daily-report-s3cr3t-2026')
 _REPORT_PDF_MAX_FILE_BYTES = MONTHLY_PDF_IMPORT_LIMITS.max_bytes
 _REPORT_UPLOAD_REQUEST_BYTES = _REPORT_PDF_MAX_FILE_BYTES + (2 * 1024 * 1024)
+_LEGACY_EXCEL_UPLOAD_REQUEST_BYTES = (
+    LEGACY_EXCEL_IMPORT_LIMITS.max_file_bytes + (2 * 1024 * 1024)
+)
 
 
 def _positive_env_bytes(name, default):
@@ -2204,11 +2208,19 @@ app.config['MAX_CONTENT_LENGTH'] = max(
     DAILY_SAVE_DRAFT_MAX_BYTES,
     DAILY_GENERATE_MAX_BYTES,
     DAILY_PREVIEW_MAX_BYTES,
+    _LEGACY_EXCEL_UPLOAD_REQUEST_BYTES,
 )
 
 
 @app.errorhandler(413)
 def request_entity_too_large(_error):
+    if request.path.startswith('/monthly/excel-source/'):
+        return jsonify({
+            'error': (
+                'Excel upload exceeds the request limit; the maximum legacy workbook size is '
+                f'{LEGACY_EXCEL_IMPORT_LIMITS.max_file_bytes // (1024 * 1024)} MB.'
+            )
+        }), 413
     if request.path.startswith('/monthly/'):
         return jsonify({
             'error': (
@@ -3022,6 +3034,7 @@ def my_reports():
         username=username,
         project_start_date=cfg.get('project_start_date',''),
         pdf_upload_max_bytes=_REPORT_PDF_MAX_FILE_BYTES,
+        legacy_excel_upload_max_bytes=LEGACY_EXCEL_IMPORT_LIMITS.max_file_bytes,
         google_drive_configured=google_drive_is_configured(),
         anthropic_configured=bool(os.environ.get('ANTHROPIC_API_KEY', '').strip()),
         ai_summary_allowed=_anthropic_ai_allowed(),
