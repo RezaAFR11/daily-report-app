@@ -11,10 +11,28 @@ from monthly_report.identity import (
 )
 from monthly_report.importer import parse_daily_report_pages
 from monthly_report.report_quality import build_report_preflight
-from monthly_report.web import _record_from_uploaded_pdf
+from monthly_report.web import _project_title_aliases, _record_from_uploaded_pdf
 
 
 class PeriodicIdentityTests(unittest.TestCase):
+    def test_selected_project_aliases_are_resolved_from_configuration(self):
+        config = {
+            "projects": [{
+                "project_no": "MASTER-001",
+                "title": "Canonical Turbine Project",
+                "title_aliases": ["Legacy Turbine Project", "Legacy Turbine Project", ""],
+            }]
+        }
+
+        self.assertEqual(
+            _project_title_aliases(
+                config,
+                project_no="MASTER-001",
+                project_title="Canonical Turbine Project",
+            ),
+            ["Legacy Turbine Project"],
+        )
+
     def test_daily_document_number_supports_old_and_new_templates(self):
         self.assertTrue(looks_like_daily_report_document_no("001-KN-GPA-DAR"))
         self.assertTrue(

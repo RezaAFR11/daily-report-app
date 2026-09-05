@@ -3245,6 +3245,50 @@ def _looks_like_daily_report_document_no(value: Any, day_no: Any = None) -> bool
     return _shared_daily_document_no(value, day_no)
 
 
+def _project_title_aliases(
+    config: Any,
+    *,
+    project_no: Any,
+    project_title: Any,
+) -> list[str]:
+    """Return aliases from the one configured project selected for compilation."""
+
+    projects = config.get("projects") if isinstance(config, Mapping) else []
+    if not isinstance(projects, list):
+        return []
+    wanted_no = _shared_identity_key(project_no)
+    wanted_title = _shared_identity_key(project_title)
+    number_matches = [
+        row
+        for row in projects
+        if isinstance(row, Mapping)
+        and wanted_no
+        and _shared_identity_key(row.get("project_no")) == wanted_no
+    ]
+    candidates = number_matches
+    if len(candidates) != 1:
+        candidates = [
+            row
+            for row in projects
+            if isinstance(row, Mapping)
+            and wanted_title
+            and _shared_identity_key(row.get("title")) == wanted_title
+        ]
+    if len(candidates) != 1:
+        return []
+
+    values = candidates[0].get("title_aliases")
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for value in values if isinstance(values, list) else []:
+        alias = _clean_text(value, 500)
+        key = _shared_identity_key(alias)
+        if alias and key and key not in seen:
+            aliases.append(alias)
+            seen.add(key)
+    return aliases
+
+
 def _project_work_hours_policy(
     config: Any,
     *,
@@ -5641,6 +5685,7 @@ def _build_legacy_excel_source_draft(
     kind = context["kind"]
     selected_dates = context["selected_dates"]
     photo_limits = periodic_photo_limits(kind)
+    config = config_provider()
     records, parser_warnings = extract_legacy_daily_records(
         workbook_path,
         analysis=context["analysis"],
@@ -5650,12 +5695,13 @@ def _build_legacy_excel_source_draft(
         project_title=context["project_title"],
         asset_directory=directory / "assets",
         photo_limits=photo_limits,
+        approved_title_aliases=_project_title_aliases(
+            config,
+            project_no=context["project_no"],
+            project_title=context["project_title"],
+        ),
     )
-    warnings: list[Any] = [
-        "Uploaded Excel data was normalized from date-named Daily Report worksheets. "
-        "Review date warnings, manpower, man-hours, progress, and photo captions before issue."
-    ]
-    warnings.extend(parser_warnings)
+    warnings: list[Any] = list(parser_warnings)
     draft = _build_uploaded_pdf_draft(
         records,
         warnings,
@@ -5665,7 +5711,7 @@ def _build_legacy_excel_source_draft(
         date_to=context["end"],
         report_mode=context["mode"],
         report_type=kind,
-        config=config_provider(),
+        config=config,
         source_method="uploaded_excel",
         expected_dates=selected_dates,
     )

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from monthly_report.aggregate import aggregate_monthly_records
 from monthly_report.legacy_excel import (
     PARSER_VERSION,
     LegacyExcelError,
@@ -15,10 +16,15 @@ from monthly_report.legacy_excel import (
     extract_legacy_daily_records,
 )
 from monthly_report.photos import DEFAULT_PHOTO_LIMITS
+from monthly_report.validation import build_source_validation, resolve_project_records
 
 
 PROJECT_NO = "001/KN-GPA/EPC-2F-P2/IV/2025"
 PROJECT_TITLE = "RE-ACTIVATION TURBINES AND GENERATORS"
+CANONICAL_PROJECT_TITLE = (
+    "PROJECT REVAMPING PT KERTAS NUSANTARA - "
+    "REACTIVATION FOR TURBINES AND GENERATORS"
+)
 
 
 def _cell(reference, value):
@@ -316,6 +322,54 @@ class LegacyExcelCharacterizationTests(unittest.TestCase):
                     selected_dates=["2026-12-09"],
                     **arguments,
                 )
+
+    def test_approved_project_alias_flows_directly_into_validation_and_aggregation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "daily.xlsx"
+            _workbook(source, [("08.12.26", "8 Desember 2026")])
+            analysis = analyze_legacy_daily_workbook(source)
+
+            records, warnings = extract_legacy_daily_records(
+                source,
+                analysis=analysis,
+                selected_dates=["2026-12-08"],
+                username="reza",
+                project_no=PROJECT_NO,
+                project_title=CANONICAL_PROJECT_TITLE,
+                asset_directory=root / "assets",
+                photo_limits=DEFAULT_PHOTO_LIMITS,
+                approved_title_aliases=[PROJECT_TITLE],
+            )
+
+        self.assertEqual(warnings, [])
+        self.assertFalse(records[0]["review_required"])
+        self.assertEqual(records[0]["source_identity"]["match_method"], "approved_alias")
+        self.assertEqual(records[0]["source_identity"]["matched_title_alias"], PROJECT_TITLE)
+        validation = build_source_validation(
+            records,
+            selected_project_no=PROJECT_NO,
+            selected_project_title=CANONICAL_PROJECT_TITLE,
+        )
+        self.assertFalse(validation["required"])
+        self.assertTrue(validation["project_groups"][0]["matches_selected"])
+        included, excluded = resolve_project_records(
+            records,
+            validation,
+            project_no=PROJECT_NO,
+            project_title=CANONICAL_PROJECT_TITLE,
+            resolutions=[],
+        )
+        self.assertEqual(excluded, [])
+        aggregate = aggregate_monthly_records(
+            included,
+            date_from="2026-12-08",
+            date_to="2026-12-08",
+            project_no=PROJECT_NO,
+            expected_dates=["2026-12-08"],
+        )
+        self.assertEqual(aggregate["coverage"]["covered_dates"], ["2026-12-08"])
+        self.assertEqual(aggregate["coverage"]["missing_dates"], [])
 
 
 if __name__ == "__main__":

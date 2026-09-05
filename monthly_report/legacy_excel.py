@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
+from .identity import project_title_match
 from .photos import PhotoLimits, _normalise_image, store_photo_candidates
 
 
@@ -119,10 +120,6 @@ def _warning(
 def _clean(value: Any, maximum: int = 4_000) -> str:
     text = " ".join(str(value or "").replace("\ufffd", " ").split())
     return text[:maximum]
-
-
-def _identity_text(value: Any) -> str:
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", _clean(value).casefold()).split())
 
 
 # ---------------------------------------------------------------------------
@@ -979,12 +976,13 @@ def _source_identity(
     raw_title: str,
     project_no: str,
     project_title: str,
-    identity_matches: bool,
+    title_match: Mapping[str, Any],
 ) -> dict[str, str]:
     # Cell C12 is labelled "Project No" in the legacy template, but its values
     # are daily document numbers. Keep it as document metadata so typing errors
     # cannot split one project into separate groups.
-    return {
+    identity_matches = bool(title_match.get("matched"))
+    result = {
         "project_no": project_no if identity_matches else "",
         "project_title": raw_title,
         "reported_project_no": raw_document_no,
@@ -992,11 +990,14 @@ def _source_identity(
         "document_no": raw_document_no,
         "canonical_project_no": project_no if identity_matches else "",
         "canonical_project_title": project_title if identity_matches else "",
-        "match_method": "title_token_equivalent"
-        if identity_matches
-        else "confirmation_required",
+        "match_method": _clean(title_match.get("method"), 100)
+        if identity_matches else "confirmation_required",
         "review_state": "matched" if identity_matches else "confirmation_required",
     }
+    matched_alias = _clean(title_match.get("alias"), 500)
+    if identity_matches and matched_alias:
+        result["matched_title_alias"] = matched_alias
+    return result
 
 
 def _record(
@@ -1009,6 +1010,7 @@ def _record(
     username: str,
     project_no: str,
     project_title: str,
+    approved_title_aliases: Sequence[str],
     asset_directory: str | os.PathLike[str],
     photo_limits: PhotoLimits,
     limits: LegacyExcelLimits,
@@ -1062,11 +1064,12 @@ def _record(
     date_mismatch = bool(
         profile.get("content_date") and profile.get("content_date") != report_date
     )
-    identity_matches = bool(
-        raw_title
-        and project_title
-        and _identity_text(raw_title) == _identity_text(project_title)
+    title_match = project_title_match(
+        raw_title,
+        project_title,
+        approved_aliases=approved_title_aliases,
     )
+    identity_matches = bool(title_match.get("matched"))
     record = {
         "record_type": "final_daily_report",
         "report_id": report_id,
@@ -1105,7 +1108,7 @@ def _record(
             raw_title=raw_title,
             project_no=project_no,
             project_title=project_title,
-            identity_matches=identity_matches,
+            title_match=title_match,
         ),
         "_photo_candidates": photo_references,
     }
@@ -1122,6 +1125,7 @@ def extract_legacy_daily_records(
     project_title: str,
     asset_directory: str | os.PathLike[str],
     photo_limits: PhotoLimits,
+    approved_title_aliases: Iterable[str] = (),
     limits: LegacyExcelLimits = DEFAULT_LIMITS,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Extract selected worksheet dates into canonical Daily Report records."""
@@ -1139,6 +1143,11 @@ def extract_legacy_daily_records(
         )
     if not wanted:
         raise LegacyExcelError("Choose at least one workbook date to compile.")
+    aliases = tuple(
+        alias
+        for value in approved_title_aliases
+        if (alias := _clean(value, 500))
+    )
 
     _, archive = _validate_archive(source, limits)
     records: list[dict[str, Any]] = []
@@ -1157,6 +1166,7 @@ def extract_legacy_daily_records(
                 username=username,
                 project_no=project_no,
                 project_title=project_title,
+                approved_title_aliases=aliases,
                 asset_directory=asset_directory,
                 photo_limits=photo_limits,
                 limits=limits,
