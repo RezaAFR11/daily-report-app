@@ -1602,30 +1602,24 @@ def _appendix_is_visible(item: Mapping[str, Any]) -> bool:
     return status not in {"", "not supplied"}
 
 
-def _photo_grid_flowables(
+def _clean_photo_caption(value: Any, fallback: str = "") -> str:
+    text = _plain(value, fallback)
+    if not text:
+        return ""
+    # Last-resort protection for legacy drafts imported before the parser
+    # boilerplate fix. Never show page headers/footers inside photo captions.
+    return re.sub(
+        r"\s+(?:PT\.?\s+GARUDA\s+PRIMA\s+AKSARA|T\.\s*Garuda\s+Prima\s+Aksara|"
+        r"Daily\s+Activity\s+Report|aily\s+Activity\s+Report)\b.*$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
+
+
+def _group_photo_references(
     photos: list[Any],
-    styles: Mapping[str, ParagraphStyle],
-    *,
-    photo_base_dir: str | os.PathLike[str] | None,
-) -> list[Flowable]:
-    """Render reviewed photos grouped by source date in an adaptive 3-column grid.
-
-    The normal layout targets 12 cards per page (3 x 4) to keep large Weekly/Monthly
-    photo appendices compact without dropping evidence.  A page falls back to nine
-    cards (3 x 3) when the next group contains several long captions, preserving
-    caption readability. Exact duplicates within the same Daily source are removed,
-    while an identical asset reused by a different Daily Report date is retained as
-    a separate dated reference for source traceability.
-    """
-
-    if photo_base_dir is None:
-        return [Paragraph("Photo assets are unavailable.", styles["placeholder"])]
-    try:
-        from PIL import Image, ImageOps
-    except ImportError:
-        return [Paragraph("Photo rendering requires Pillow.", styles["placeholder"])]
-
-    root = os.path.realpath(os.fspath(photo_base_dir))
+) -> tuple[dict[str, list[Mapping[str, Any]]], list[str]]:
     prepared: list[Mapping[str, Any]] = []
     seen_references: set[tuple[str, str, str]] = set()
     for raw in photos:
@@ -1650,7 +1644,6 @@ def _photo_grid_flowables(
         _plain(row.get("source")),
         int(_number(row.get("page")) or 0),
     ))
-
     grouped: dict[str, list[Mapping[str, Any]]] = {}
     group_order: list[str] = []
     for row in prepared:
@@ -1659,171 +1652,228 @@ def _photo_grid_flowables(
             grouped[source_date] = []
             group_order.append(source_date)
         grouped[source_date].append(row)
+    return grouped, group_order
 
-    def clean_caption(value: Any, fallback: str = "") -> str:
-        text = _plain(value, fallback)
-        if not text:
-            return ""
-        # Last-resort protection for legacy drafts imported before the parser
-        # boilerplate fix.  Never show page headers/footers inside photo captions.
-        text = re.sub(
-            r"\s+(?:PT\.?\s+GARUDA\s+PRIMA\s+AKSARA|T\.\s*Garuda\s+Prima\s+Aksara|"
-            r"Daily\s+Activity\s+Report|aily\s+Activity\s+Report)\b.*$",
-            "",
-            text,
-            flags=re.IGNORECASE,
-        ).strip()
-        return text
 
-    def _page_capacity(items: list[Mapping[str, Any]], start: int) -> int:
-        """Choose 12 cards normally, or 9 when captions need more vertical room."""
+def _photo_page_capacity(items: list[Mapping[str, Any]], start: int) -> int:
+    """Choose 12 cards normally, or 9 when captions need more vertical room."""
 
-        probe = items[start:start + 12]
-        captions = [
-            clean_caption(row.get("caption"))
-            for row in probe
-            if isinstance(row, Mapping)
-        ]
-        non_empty = [caption for caption in captions if caption]
-        long_count = sum(len(caption) > 120 for caption in non_empty)
-        very_long_count = sum(len(caption) > 180 for caption in non_empty)
-        # Three columns leave roughly 45-50 characters per caption line at the
-        # compact photo font.  Several long captions on one 3 x 4 page can make
-        # the fourth row too dense, so use the roomier legacy 3 x 3 layout.
-        if very_long_count >= 2 or long_count >= 5:
-            return 9
-        return 12
+    probe = items[start:start + 12]
+    captions = [
+        _clean_photo_caption(row.get("caption"))
+        for row in probe
+        if isinstance(row, Mapping)
+    ]
+    non_empty = [caption for caption in captions if caption]
+    long_count = sum(len(caption) > 120 for caption in non_empty)
+    very_long_count = sum(len(caption) > 180 for caption in non_empty)
+    if very_long_count >= 2 or long_count >= 5:
+        return 9
+    return 12
 
-    def build_grid(items: list[Mapping[str, Any]], *, compact: bool) -> Table | None:
-        columns = 3
-        cell_width = BODY_WIDTH / columns
-        image_width = cell_width - (6 if compact else 8)
-        image_height = 88.0 if compact else 122.0
-        photo_text_style = (
-            ParagraphStyle(
-                "MonthlyPhotoCompact",
-                parent=styles["small"],
-                fontSize=7.8,
-                leading=9.2,
-                spaceAfter=1,
-                splitLongWords=1,
+
+def _photo_caption_counts(
+    items: list[Mapping[str, Any]],
+) -> Counter[tuple[str, str]]:
+    counts: Counter[tuple[str, str]] = Counter()
+    for candidate in items:
+        area = _clean_photo_caption(candidate.get("source_area"))
+        caption = _clean_photo_caption(candidate.get("caption"))
+        counts[(area.casefold(), caption.casefold())] += 1
+    return counts
+
+
+def _render_photo_image(
+    path: str,
+    *,
+    width: float,
+    height: float,
+    image_module: Any,
+    image_ops: Any,
+) -> RLImage | None:
+    try:
+        with image_module.open(path) as opened:
+            if str(opened.format or "").upper() != "JPEG":
+                return None
+            image = image_ops.exif_transpose(opened).convert("RGB")
+            fitted = image_ops.fit(
+                image,
+                (max(1, int(width * 2)), max(1, int(height * 2))),
+                method=image_module.Resampling.LANCZOS,
             )
-            if compact
-            else styles["small"]
+            image_buffer = io.BytesIO()
+            fitted.save(image_buffer, format="JPEG", quality=82, optimize=True)
+            image_buffer.seek(0)
+        return RLImage(image_buffer, width=width, height=height)
+    except Exception:
+        return None
+
+
+def _photo_card(
+    raw: Mapping[str, Any],
+    *,
+    root: str,
+    cell_width: float,
+    image_width: float,
+    image_height: float,
+    compact: bool,
+    photo_text_style: ParagraphStyle,
+    caption_counts: Counter[tuple[str, str]],
+    seen_caption_groups: set[tuple[str, str]],
+    image_module: Any,
+    image_ops: Any,
+) -> Table | None:
+    asset_id = _plain(raw.get("asset_id"))
+    path = os.path.realpath(os.path.join(root, asset_filename(asset_id)))
+    if os.path.dirname(path) != root or not os.path.isfile(path):
+        return None
+    rendered_image = _render_photo_image(
+        path,
+        width=image_width,
+        height=image_height,
+        image_module=image_module,
+        image_ops=image_ops,
+    )
+    if rendered_image is None:
+        return None
+
+    source = _plain(raw.get("source"))
+    page = _plain(raw.get("page"))
+    area = _clean_photo_caption(raw.get("source_area"))
+    photo_card = (
+        _plain(raw.get("context_type")).casefold() == "photo_card"
+        or _plain(raw.get("photo_match_method")).casefold() == "photo_card_geometry"
+    )
+    fallback = "" if photo_card else (f"{source} - p.{page}" if source and page else source)
+    caption = _clean_photo_caption(raw.get("caption"), fallback)
+    caption_group = (area.casefold(), caption.casefold())
+    repeated_caption = bool(caption) and caption_counts.get(caption_group, 0) > 1
+    show_caption = caption
+    if repeated_caption and caption_group in seen_caption_groups:
+        show_caption = ""
+    elif repeated_caption:
+        seen_caption_groups.add(caption_group)
+
+    card_rows: list[list[Any]] = []
+    if area:
+        card_rows.append([Paragraph(f"<b>{_xml(area)}</b>", photo_text_style)])
+    if caption:
+        caption_markup = f"<i>{_xml(show_caption)}</i>" if show_caption else "&#160;"
+        card_rows.append([Paragraph(caption_markup, photo_text_style)])
+    card_rows.append([rendered_image])
+    card = Table(card_rows, colWidths=[cell_width - 4])
+    card_padding = 2 if compact else 3
+    card_style = [
+        ("BOX", (0, 0), (-1, -1), 0.55, CYAN),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), card_padding),
+        ("RIGHTPADDING", (0, 0), (-1, -1), card_padding),
+        ("TOPPADDING", (0, 0), (-1, -1), card_padding),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), card_padding),
+    ]
+    if area:
+        card_style.extend([
+            ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#DDEBF7")),
+            ("LINEBELOW", (0, 0), (0, 0), 0.35, CYAN),
+        ])
+        if caption:
+            card_style.append(("BACKGROUND", (0, 1), (0, 1), LIGHT_GREY))
+    elif caption:
+        card_style.append(("BACKGROUND", (0, 0), (0, 0), LIGHT_GREY))
+    card.setStyle(TableStyle(card_style))
+    return card
+
+
+def _photo_grid_table(
+    items: list[Mapping[str, Any]],
+    styles: Mapping[str, ParagraphStyle],
+    *,
+    root: str,
+    compact: bool,
+    image_module: Any,
+    image_ops: Any,
+) -> Table | None:
+    columns = 3
+    cell_width = BODY_WIDTH / columns
+    image_width = cell_width - (6 if compact else 8)
+    image_height = 88.0 if compact else 122.0
+    photo_text_style = (
+        ParagraphStyle(
+            "MonthlyPhotoCompact",
+            parent=styles["small"],
+            fontSize=7.8,
+            leading=9.2,
+            spaceAfter=1,
+            splitLongWords=1,
         )
-        rows: list[list[Any]] = []
-        current: list[Any] = []
-
-        # Keep every photo, but avoid printing the same activity caption on all
-        # cards of a page. The first card in each repeated Area+Caption group
-        # carries the full caption; subsequent cards keep the area label and image.
-        # The group heading naturally repeats on a continuation page because each
-        # page chunk is built independently.
-        caption_counts: Counter[tuple[str, str]] = Counter()
-        for candidate in items:
-            area_key = clean_caption(candidate.get("source_area")) if isinstance(candidate, Mapping) else ""
-            caption_key = clean_caption(candidate.get("caption")) if isinstance(candidate, Mapping) else ""
-            caption_counts[(area_key.casefold(), caption_key.casefold())] += 1
-        seen_caption_groups: set[tuple[str, str]] = set()
-
-        for raw in items:
-            asset_id = _plain(raw.get("asset_id"))
-            path = os.path.realpath(os.path.join(root, asset_filename(asset_id)))
-            if os.path.dirname(path) != root or not os.path.isfile(path):
-                continue
-            try:
-                with Image.open(path) as opened:
-                    if str(opened.format or "").upper() != "JPEG":
-                        continue
-                    image = ImageOps.exif_transpose(opened).convert("RGB")
-                    fitted = ImageOps.fit(
-                        image,
-                        (max(1, int(image_width * 2)), max(1, int(image_height * 2))),
-                        method=Image.Resampling.LANCZOS,
-                    )
-                    image_buffer = io.BytesIO()
-                    fitted.save(image_buffer, format="JPEG", quality=82, optimize=True)
-                    image_buffer.seek(0)
-                rendered_image: Any = RLImage(image_buffer, width=image_width, height=image_height)
-            except Exception:
-                continue
-
-            source = _plain(raw.get("source"))
-            page = _plain(raw.get("page"))
-            area = clean_caption(raw.get("source_area"))
-            # A current Daily Report photo card may intentionally have no
-            # caption. Do not replace that source-empty caption with a filename
-            # or page reference; provenance is already carried in the dated
-            # appendix grouping and source metadata.
-            photo_card = (
-                _plain(raw.get("context_type")).casefold() == "photo_card"
-                or _plain(raw.get("photo_match_method")).casefold() == "photo_card_geometry"
-            )
-            fallback = "" if photo_card else (f"{source} - p.{page}" if source and page else source)
-            caption = clean_caption(raw.get("caption"), fallback)
-            caption_group = (area.casefold(), caption.casefold())
-            repeated_caption = bool(caption) and caption_counts.get(caption_group, 0) > 1
-            show_caption = caption
-            if repeated_caption and caption_group in seen_caption_groups:
-                show_caption = ""
-            elif repeated_caption:
-                seen_caption_groups.add(caption_group)
-
-            card_rows: list[list[Any]] = []
-            if area:
-                card_rows.append([Paragraph(f"<b>{_xml(area)}</b>", photo_text_style)])
-            if caption:
-                caption_markup = f"<i>{_xml(show_caption)}</i>" if show_caption else "&#160;"
-                card_rows.append([Paragraph(caption_markup, photo_text_style)])
-            card_rows.append([rendered_image])
-            card = Table(card_rows, colWidths=[cell_width - 4])
-            card_padding = 2 if compact else 3
-            card_style = [
-                ("BOX", (0, 0), (-1, -1), 0.55, CYAN),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), card_padding),
-                ("RIGHTPADDING", (0, 0), (-1, -1), card_padding),
-                ("TOPPADDING", (0, 0), (-1, -1), card_padding),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), card_padding),
-            ]
-            if area:
-                card_style.extend([
-                    ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#DDEBF7")),
-                    ("LINEBELOW", (0, 0), (0, 0), 0.35, CYAN),
-                ])
-                if caption:
-                    card_style.append(("BACKGROUND", (0, 1), (0, 1), LIGHT_GREY))
-            elif caption:
-                card_style.append(("BACKGROUND", (0, 0), (0, 0), LIGHT_GREY))
-            card.setStyle(TableStyle(card_style))
-            current.append(card)
-            if len(current) == columns:
-                rows.append(current)
-                current = []
-
-        if current:
-            current.extend([""] * (columns - len(current)))
+        if compact
+        else styles["small"]
+    )
+    rows: list[list[Any]] = []
+    current: list[Any] = []
+    caption_counts = _photo_caption_counts(items)
+    seen_caption_groups: set[tuple[str, str]] = set()
+    for raw in items:
+        card = _photo_card(
+            raw,
+            root=root,
+            cell_width=cell_width,
+            image_width=image_width,
+            image_height=image_height,
+            compact=compact,
+            photo_text_style=photo_text_style,
+            caption_counts=caption_counts,
+            seen_caption_groups=seen_caption_groups,
+            image_module=image_module,
+            image_ops=image_ops,
+        )
+        if card is None:
+            continue
+        current.append(card)
+        if len(current) == columns:
             rows.append(current)
-        if not rows:
-            return None
-        grid_padding_x = 1 if compact else 2
-        grid_padding_y = 2 if compact else 4
-        grid = Table(rows, colWidths=[cell_width] * columns, hAlign="LEFT", splitByRow=1)
-        grid.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), grid_padding_x),
-            ("RIGHTPADDING", (0, 0), (-1, -1), grid_padding_x),
-            ("TOPPADDING", (0, 0), (-1, -1), grid_padding_y),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), grid_padding_y),
-        ]))
-        return grid
+            current = []
+    if current:
+        current.extend([""] * (columns - len(current)))
+        rows.append(current)
+    if not rows:
+        return None
+    grid_padding_x = 1 if compact else 2
+    grid_padding_y = 2 if compact else 4
+    grid = Table(rows, colWidths=[cell_width] * columns, hAlign="LEFT", splitByRow=1)
+    grid.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), grid_padding_x),
+        ("RIGHTPADDING", (0, 0), (-1, -1), grid_padding_x),
+        ("TOPPADDING", (0, 0), (-1, -1), grid_padding_y),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), grid_padding_y),
+    ]))
+    return grid
 
+
+def _photo_grid_flowables(
+    photos: list[Any],
+    styles: Mapping[str, ParagraphStyle],
+    *,
+    photo_base_dir: str | os.PathLike[str] | None,
+) -> list[Flowable]:
+    """Render reviewed photos grouped by source date in an adaptive grid."""
+
+    if photo_base_dir is None:
+        return [Paragraph("Photo assets are unavailable.", styles["placeholder"])]
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return [Paragraph("Photo rendering requires Pillow.", styles["placeholder"])]
+
+    root = os.path.realpath(os.fspath(photo_base_dir))
+    grouped, group_order = _group_photo_references(photos)
     result: list[Flowable] = []
-    for date_index, source_date in enumerate(group_order):
+    for source_date in group_order:
         items = grouped[source_date]
         chunk_index = 0
         while chunk_index < len(items):
-            capacity = _page_capacity(items, chunk_index)
+            capacity = _photo_page_capacity(items, chunk_index)
             chunk = items[chunk_index:chunk_index + capacity]
             if result:
                 result.append(PageBreak())
@@ -1832,7 +1882,14 @@ def _photo_grid_flowables(
                 f"Photo Documentation: {source_date}{continuation}",
                 styles["h2"],
             ))
-            grid = build_grid(chunk, compact=(capacity == 12))
+            grid = _photo_grid_table(
+                chunk,
+                styles,
+                root=root,
+                compact=(capacity == 12),
+                image_module=Image,
+                image_ops=ImageOps,
+            )
             if grid is not None:
                 result.append(grid)
             chunk_index += capacity
@@ -1840,6 +1897,252 @@ def _photo_grid_flowables(
     if not result:
         return [Paragraph("No selected photo assets are available.", styles["placeholder"])]
     return result
+
+def _person_days_text(value: Any) -> Any:
+    number = _number(value)
+    if number is None:
+        return value
+    return int(number) if float(number).is_integer() else number
+
+
+def _manpower_summary_table(
+    totals: Mapping[str, Any],
+    styles: Mapping[str, ParagraphStyle],
+) -> Table:
+    header = styles["table_header"]
+    body = styles["table"]
+    center = styles["table_center"]
+    rows = [
+        ["Category", "Person-days", "Regular MH", "OT MH", "Total MH"],
+        [
+            "Direct",
+            _person_days_text(totals.get("direct_person_days", "Not supplied")),
+            totals.get("regular_direct_man_hours", totals.get("direct_man_hours", "Not supplied")),
+            totals.get("direct_overtime_man_hours", "Not supplied"),
+            totals.get("direct_man_hours", "Not supplied"),
+        ],
+        [
+            "Indirect",
+            _person_days_text(totals.get("indirect_person_days", "Not supplied")),
+            totals.get("regular_indirect_man_hours", totals.get("indirect_man_hours", "Not supplied")),
+            totals.get("indirect_overtime_man_hours", "Not supplied"),
+            totals.get("indirect_man_hours", "Not supplied"),
+        ],
+        [
+            "Total",
+            _person_days_text(totals.get("total_person_days", "Not supplied")),
+            totals.get("regular_man_hours", totals.get("total_man_hours", "Not supplied")),
+            totals.get("overtime_man_hours", "Not supplied"),
+            totals.get("total_man_hours", "Not supplied"),
+        ],
+    ]
+    table = Table(
+        [
+            [
+                _paragraph(
+                    cell,
+                    header if row_index == 0 else (body if column_index == 0 else center),
+                )
+                for column_index, cell in enumerate(row)
+            ]
+            for row_index, row in enumerate(rows)
+        ],
+        colWidths=[118, 86, 90, 82, 90],
+        repeatRows=1,
+        hAlign="CENTER",
+    )
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), GREY_HEADER),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    return table
+
+
+def _manpower_metric_text(number: float | None) -> str:
+    if number is None:
+        return "Not supplied"
+    return (
+        str(int(number))
+        if float(number).is_integer()
+        else f"{number:.2f}".rstrip("0").rstrip(".")
+    )
+
+
+def _manpower_metric_flowables(
+    totals: Mapping[str, Any],
+    styles: Mapping[str, ParagraphStyle],
+) -> list[Flowable]:
+    supplied_days = _number(totals.get("manpower_supplied_day_count"))
+    covered_days = _number(totals.get("covered_daily_report_count"))
+    expected_days = _number(totals.get("expected_day_count"))
+    average_headcount = _number(totals.get("average_daily_headcount"))
+    peak_headcount = _number(totals.get("peak_headcount"))
+    not_supplied_days = _number(totals.get("manpower_not_supplied_day_count"))
+    metric_parts: list[str] = []
+    if covered_days is not None and expected_days is not None:
+        metric_parts.append(
+            f"Daily Report coverage: {_manpower_metric_text(covered_days)}/"
+            f"{_manpower_metric_text(expected_days)} days"
+        )
+    if supplied_days is not None:
+        metric_parts.append(
+            f"manpower supplied: {_manpower_metric_text(supplied_days)} days"
+        )
+    if average_headcount is not None:
+        metric_parts.append(
+            f"average daily headcount: {_manpower_metric_text(average_headcount)}"
+        )
+    if peak_headcount is not None:
+        metric_parts.append(f"peak daily headcount: {_manpower_metric_text(peak_headcount)}")
+
+    result: list[Flowable] = []
+    if metric_parts:
+        result.extend([
+            _paragraph("; ".join(metric_parts) + ".", styles["placeholder"]),
+            Spacer(1, 6),
+        ])
+    if not_supplied_days is not None and not_supplied_days > 0:
+        result.extend([
+            _paragraph(
+                "Manpower was not supplied for "
+                f"{_manpower_metric_text(not_supplied_days)} covered Daily Report date(s); "
+                "averages and known totals exclude those dates.",
+                styles["placeholder"],
+            ),
+            Spacer(1, 6),
+        ])
+    if int(_number(totals.get("cross_category_duplicate_count")) or 0) > 0:
+        result.extend([
+            _paragraph(
+                "Same-day cross-category duplicate names were reconciled once; "
+                "direct/area assignment takes precedence for category totals.",
+                styles["placeholder"],
+            ),
+            Spacer(1, 6),
+        ])
+    return result
+
+
+def _daily_manpower_table(
+    daily: list[Mapping[str, Any]],
+    styles: Mapping[str, ParagraphStyle],
+) -> LongTable:
+    rows: list[list[Any]] = [[
+        "Date", "Direct HC", "Indirect HC", "Total HC", "Regular MH", "OT MH", "Total MH",
+    ]]
+    for row in daily:
+        if row.get("supplied") is False:
+            rows.append([
+                row.get("date", ""),
+                "Not supplied",
+                "Not supplied",
+                "Not supplied",
+                "Not supplied",
+                row.get("overtime_man_hours", "Not supplied"),
+                "Not supplied",
+            ])
+            continue
+        regular = row.get("regular_man_hours")
+        if regular is None:
+            regular = row.get("total_man_hours")
+        if regular is None:
+            direct_value = _number(row.get("direct_man_hours")) or 0
+            indirect_value = _number(row.get("indirect_man_hours")) or 0
+            regular = direct_value + indirect_value
+        rows.append([
+            row.get("date", ""),
+            row.get("direct_headcount", 0),
+            row.get("indirect_headcount", 0),
+            row.get("total_headcount", 0),
+            regular,
+            row.get("overtime_man_hours", "Not supplied"),
+            row.get("total_man_hours", regular),
+        ])
+    table = LongTable(
+        [
+            [_paragraph(cell, styles["table_header"] if row_index == 0 else styles["table_center"]) for cell in row]
+            for row_index, row in enumerate(rows)
+        ],
+        colWidths=[74, 61, 66, 61, 70, 65, 72],
+        repeatRows=1,
+        splitByRow=1,
+    )
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.45, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), CYAN),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    return table
+
+
+def _role_manpower_table(
+    roles: list[Mapping[str, Any]],
+    styles: Mapping[str, ParagraphStyle],
+) -> LongTable:
+    rows: list[list[Any]] = [["Role / Position", "Person-days", "Man-hours"]]
+    for row in roles:
+        rows.append([
+            row.get("role", "Unspecified"),
+            _person_days_text(row.get("person_days", row.get("present_person_days", ""))),
+            row.get("man_hours", row.get("physical_manhours", "")),
+        ])
+    table = LongTable(
+        [
+            [
+                _paragraph(
+                    cell,
+                    styles["table_header"]
+                    if row_index == 0
+                    else (styles["table"] if column_index == 0 else styles["table_center"]),
+                )
+                for column_index, cell in enumerate(row)
+            ]
+            for row_index, row in enumerate(rows)
+        ],
+        colWidths=[270, 100, 100],
+        repeatRows=1,
+    )
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.45, BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), CYAN),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    return table
+
+
+def _manpower_source_flowables(
+    value: Mapping[str, Any],
+    totals: Mapping[str, Any],
+    styles: Mapping[str, ParagraphStyle],
+) -> list[Flowable]:
+    if totals.get("source"):
+        text = (
+            "Source: reviewed attendance workbook. Regular physical man-hours use "
+            "10 hours per present day; overtime is elapsed clock time only when explicitly applied."
+        )
+    elif value.get("hours_method"):
+        text = (
+            "Source: Daily Reports. Calculation policy: "
+            + _plain(value.get("hours_method"))
+            + "."
+        )
+    else:
+        return []
+    return [Spacer(1, 8), _paragraph(text, styles["placeholder"])]
+
 
 def _manpower_appendix_flowables(
     manpower: Any,
@@ -1851,165 +2154,23 @@ def _manpower_appendix_flowables(
     totals = value.get("totals") if isinstance(value.get("totals"), Mapping) else {}
     daily = [row for row in _as_list(value.get("daily")) if isinstance(row, Mapping)]
     roles = [row for row in _as_list(value.get("roles")) if isinstance(row, Mapping)]
-    header = styles["table_header"]
-    body = styles["table"]
-    center = styles["table_center"]
-
-    def person_days_text(value: Any) -> Any:
-        number = _number(value)
-        if number is None:
-            return value
-        return int(number) if float(number).is_integer() else number
-
-    summary_rows = [
-        ["Category", "Person-days", "Regular MH", "OT MH", "Total MH"],
-        [
-            "Direct", person_days_text(totals.get("direct_person_days", "Not supplied")),
-            totals.get("regular_direct_man_hours", totals.get("direct_man_hours", "Not supplied")),
-            totals.get("direct_overtime_man_hours", "Not supplied"), totals.get("direct_man_hours", "Not supplied"),
-        ],
-        [
-            "Indirect", person_days_text(totals.get("indirect_person_days", "Not supplied")),
-            totals.get("regular_indirect_man_hours", totals.get("indirect_man_hours", "Not supplied")),
-            totals.get("indirect_overtime_man_hours", "Not supplied"), totals.get("indirect_man_hours", "Not supplied"),
-        ],
-        [
-            "Total", person_days_text(totals.get("total_person_days", "Not supplied")),
-            totals.get("regular_man_hours", totals.get("total_man_hours", "Not supplied")),
-            totals.get("overtime_man_hours", "Not supplied"), totals.get("total_man_hours", "Not supplied"),
-        ],
+    result: list[Flowable] = [
+        _manpower_summary_table(totals, styles),
+        Spacer(1, 10),
+        *_manpower_metric_flowables(totals, styles),
     ]
-    summary = Table(
-        [[_paragraph(cell, header if row_index == 0 else (body if column_index == 0 else center))
-          for column_index, cell in enumerate(row)] for row_index, row in enumerate(summary_rows)],
-        colWidths=[118, 86, 90, 82, 90], repeatRows=1, hAlign="CENTER",
-    )
-    summary.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.5, BLACK),
-        ("BACKGROUND", (0, 0), (-1, 0), GREY_HEADER),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-    ]))
-    result: list[Flowable] = [summary, Spacer(1, 10)]
-    supplied_days = _number(totals.get("manpower_supplied_day_count"))
-    covered_days = _number(totals.get("covered_daily_report_count"))
-    expected_days = _number(totals.get("expected_day_count"))
-    average_headcount = _number(totals.get("average_daily_headcount"))
-    peak_headcount = _number(totals.get("peak_headcount"))
-    not_supplied_days = _number(totals.get("manpower_not_supplied_day_count"))
-    def metric_text(number: float | None) -> str:
-        if number is None:
-            return "Not supplied"
-        return str(int(number)) if float(number).is_integer() else f"{number:.2f}".rstrip("0").rstrip(".")
-
-    metric_parts: list[str] = []
-    if covered_days is not None and expected_days is not None:
-        metric_parts.append(f"Daily Report coverage: {metric_text(covered_days)}/{metric_text(expected_days)} days")
-    if supplied_days is not None:
-        metric_parts.append(f"manpower supplied: {metric_text(supplied_days)} days")
-    if average_headcount is not None:
-        metric_parts.append(f"average daily headcount: {metric_text(average_headcount)}")
-    if peak_headcount is not None:
-        metric_parts.append(f"peak daily headcount: {metric_text(peak_headcount)}")
-    if metric_parts:
-        result.extend([
-            _paragraph("; ".join(metric_parts) + ".", styles["placeholder"]),
-            Spacer(1, 6),
-        ])
-    if not_supplied_days is not None and not_supplied_days > 0:
-        result.extend([
-            _paragraph(
-                f"Manpower was not supplied for {metric_text(not_supplied_days)} covered Daily Report date(s); "
-                "averages and known totals exclude those dates.",
-                styles["placeholder"],
-            ),
-            Spacer(1, 6),
-        ])
-    if int(_number(totals.get("cross_category_duplicate_count")) or 0) > 0:
-        result.extend([
-            _paragraph(
-                "Same-day cross-category duplicate names were reconciled once; direct/area assignment takes precedence for category totals.",
-                styles["placeholder"],
-            ),
-            Spacer(1, 6),
-        ])
     if daily:
-        table_rows: list[list[Any]] = [[
-            "Date", "Direct HC", "Indirect HC", "Total HC", "Regular MH", "OT MH", "Total MH",
-        ]]
-        for row in daily:
-            supplied = row.get("supplied") is not False
-            if not supplied:
-                table_rows.append([
-                    row.get("date", ""),
-                    "Not supplied",
-                    "Not supplied",
-                    "Not supplied",
-                    "Not supplied",
-                    row.get("overtime_man_hours", "Not supplied"),
-                    "Not supplied",
-                ])
-                continue
-            regular = row.get("regular_man_hours")
-            if regular is None:
-                # Prefer the reconciled unique-person daily total. Older drafts
-                # may have direct/indirect category overlap, where adding both
-                # subtotals would double-count one employee.
-                regular = row.get("total_man_hours")
-            if regular is None:
-                direct_value = _number(row.get("direct_man_hours")) or 0
-                indirect_value = _number(row.get("indirect_man_hours")) or 0
-                regular = direct_value + indirect_value
-            table_rows.append([
-                row.get("date", ""), row.get("direct_headcount", 0), row.get("indirect_headcount", 0),
-                row.get("total_headcount", 0), regular, row.get("overtime_man_hours", "Not supplied"),
-                row.get("total_man_hours", regular),
-            ])
-        table = LongTable(
-            [[_paragraph(cell, header if row_index == 0 else center) for cell in row]
-             for row_index, row in enumerate(table_rows)],
-            colWidths=[74, 61, 66, 61, 70, 65, 72], repeatRows=1, splitByRow=1,
-        )
-        table.setStyle(TableStyle([
-            ("GRID", (0, 0), (-1, -1), 0.45, BLACK),
-            ("BACKGROUND", (0, 0), (-1, 0), CYAN),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-            ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-        ]))
-        result.extend([_heading("Daily Headcount and Man-hours", styles["h2"], 1), table, Spacer(1, 10)])
+        result.extend([
+            _heading("Daily Headcount and Man-hours", styles["h2"], 1),
+            _daily_manpower_table(daily, styles),
+            Spacer(1, 10),
+        ])
     if roles:
-        role_rows: list[list[Any]] = [["Role / Position", "Person-days", "Man-hours"]]
-        for row in roles:
-            role_rows.append([
-                row.get("role", "Unspecified"),
-                person_days_text(row.get("person_days", row.get("present_person_days", ""))),
-                row.get("man_hours", row.get("physical_manhours", "")),
-            ])
-        table = LongTable(
-            [[_paragraph(cell, header if row_index == 0 else (body if column_index == 0 else center))
-              for column_index, cell in enumerate(row)] for row_index, row in enumerate(role_rows)],
-            colWidths=[270, 100, 100], repeatRows=1,
-        )
-        table.setStyle(TableStyle([
-            ("GRID", (0, 0), (-1, -1), 0.45, BLACK),
-            ("BACKGROUND", (0, 0), (-1, 0), CYAN),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-            ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-        ]))
-        result.extend([_heading("Role Summary", styles["h2"], 1), table])
-    if totals.get("source"):
-        result.extend([Spacer(1, 8), _paragraph(
-            "Source: reviewed attendance workbook. Regular physical man-hours use 10 hours per present day; "
-            "overtime is elapsed clock time only when explicitly applied.", styles["placeholder"],
-        )])
-    elif value.get("hours_method"):
-        result.extend([Spacer(1, 8), _paragraph(
-            "Source: Daily Reports. Calculation policy: " + _plain(value.get("hours_method")) + ".",
-            styles["placeholder"],
-        )])
+        result.extend([
+            _heading("Role Summary", styles["h2"], 1),
+            _role_manpower_table(roles, styles),
+        ])
+    result.extend(_manpower_source_flowables(value, totals, styles))
     return result
 
 

@@ -910,6 +910,89 @@ def _is_generic_activity_area(value: Any) -> bool:
     return _clean_text(value, 200).casefold() in _GENERIC_ACTIVITY_AREAS
 
 
+def _deterministic_activity_baseline(draft: Mapping[str, Any]) -> list[dict[str, Any]]:
+    deterministic = (
+        draft.get("deterministic_summary")
+        if isinstance(draft.get("deterministic_summary"), Mapping)
+        else {}
+    )
+    baseline_raw = (
+        deterministic.get("current_activities")
+        if isinstance(deterministic.get("current_activities"), list)
+        else draft.get("activity_summary")
+        if isinstance(draft.get("activity_summary"), list)
+        else []
+    )
+    return _clean_activity_rows(baseline_raw, maximum_items=250)
+
+
+def _ai_activity_candidates(
+    row: Mapping[str, Any],
+    baseline: list[dict[str, Any]],
+    used: set[int],
+) -> list[int]:
+    requested_id = _clean_text(row.get("stable_id"), 100)
+    if requested_id:
+        return [
+            idx
+            for idx in range(len(baseline))
+            if idx not in used
+            and _clean_text(baseline[idx].get("stable_id"), 100) == requested_id
+        ]
+    requested_area = _activity_match_text(row.get("area"))
+    requested_workstream = _activity_match_text(row.get("workstream"))
+    candidates = [idx for idx in range(len(baseline)) if idx not in used]
+    if requested_area and not _is_generic_activity_area(row.get("area")):
+        candidates = [
+            idx for idx in candidates
+            if _activity_match_text(baseline[idx].get("area")) == requested_area
+        ]
+        if requested_workstream:
+            exact = [
+                idx for idx in candidates
+                if _activity_match_text(baseline[idx].get("workstream")) == requested_workstream
+            ]
+            # v3.3.7 AI rows carry the deterministic workstream explicitly.
+            # If that pair no longer exists, the suggestion is stale or moved
+            # and must not be attached to a different workstream in the area.
+            candidates = exact
+    elif requested_workstream:
+        candidates = [
+            idx for idx in candidates
+            if _activity_match_text(baseline[idx].get("workstream")) == requested_workstream
+        ]
+    return candidates
+
+
+def _aligned_ai_activity_row(
+    row: Mapping[str, Any],
+    base: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    area = _clean_text(base.get("area"), 200)
+    workstream = _clean_text(base.get("workstream"), 200)
+    text = _canonical_activity_body(row.get("text"), area=area, workstream=workstream)
+    base_text = _canonical_activity_body(base.get("text"), area=area, workstream=workstream)
+
+    # A polished sentence may not assert a different explicit MA ownership or
+    # be semantically unrelated to the deterministic group. Zero token overlap
+    # is a strong signal of row-order drift; preserving the baseline is safer
+    # than publishing a fluent sentence under the wrong workstream.
+    unrelated = bool(text and base_text and _activity_text_similarity(text, base_text) == 0.0)
+    if not text or _activity_area_conflicts(area, text) or unrelated:
+        text = base_text
+    if not text:
+        return None
+
+    aligned_row: dict[str, Any] = copy.deepcopy(dict(base))
+    aligned_row.update({"area": area, "text": text})
+    if workstream:
+        aligned_row["workstream"] = workstream
+    status = _clean_text(row.get("status"), 100)
+    if status and status.casefold() not in text.casefold():
+        aligned_row["status"] = status
+    return aligned_row
+
+
 def _align_ai_activity_rows(
     value: Any,
     draft: Mapping[str, Any],
@@ -928,19 +1011,7 @@ def _align_ai_activity_rows(
     """
 
     rows = _clean_activity_rows(value, maximum_items=250)
-    deterministic = (
-        draft.get("deterministic_summary")
-        if isinstance(draft.get("deterministic_summary"), Mapping)
-        else {}
-    )
-    baseline_raw = (
-        deterministic.get("current_activities")
-        if isinstance(deterministic.get("current_activities"), list)
-        else draft.get("activity_summary")
-        if isinstance(draft.get("activity_summary"), list)
-        else []
-    )
-    baseline = _clean_activity_rows(baseline_raw, maximum_items=250)
+    baseline = _deterministic_activity_baseline(draft)
     if not baseline:
         return rows
     if not rows:
@@ -950,41 +1021,8 @@ def _align_ai_activity_rows(
     replacements: dict[int, dict[str, Any]] = {}
     aligned_order: list[int] = []
 
-    def candidates_for(row: Mapping[str, Any]) -> list[int]:
-        requested_id = _clean_text(row.get("stable_id"), 100)
-        if requested_id:
-            return [
-                idx
-                for idx in range(len(baseline))
-                if idx not in used
-                and _clean_text(baseline[idx].get("stable_id"), 100) == requested_id
-            ]
-        requested_area = _activity_match_text(row.get("area"))
-        requested_workstream = _activity_match_text(row.get("workstream"))
-        candidates = [idx for idx in range(len(baseline)) if idx not in used]
-        if requested_area and not _is_generic_activity_area(row.get("area")):
-            candidates = [
-                idx for idx in candidates
-                if _activity_match_text(baseline[idx].get("area")) == requested_area
-            ]
-            if requested_workstream:
-                exact = [
-                    idx for idx in candidates
-                    if _activity_match_text(baseline[idx].get("workstream")) == requested_workstream
-                ]
-                # v3.3.7 AI rows carry the deterministic workstream explicitly.
-                # If that pair no longer exists, the suggestion is stale or moved
-                # and must not be attached to a different workstream in the area.
-                candidates = exact
-        elif requested_workstream:
-            candidates = [
-                idx for idx in candidates
-                if _activity_match_text(baseline[idx].get("workstream")) == requested_workstream
-            ]
-        return candidates
-
     for row in rows:
-        candidates = candidates_for(row)
+        candidates = _ai_activity_candidates(row, baseline, used)
         if not candidates:
             # A non-generic AI/review area that does not exist in the deterministic
             # baseline is unsupported. Do not move it to the next row by position.
@@ -1006,28 +1044,9 @@ def _align_ai_activity_rows(
         )
         used.add(base_index)
         base = baseline[base_index]
-        area = _clean_text(base.get("area"), 200)
-        workstream = _clean_text(base.get("workstream"), 200)
-        text = _canonical_activity_body(row.get("text"), area=area, workstream=workstream)
-        base_text = _canonical_activity_body(base.get("text"), area=area, workstream=workstream)
-
-        # A polished sentence may not assert a different explicit MA ownership or
-        # be semantically unrelated to the deterministic group. Zero token overlap
-        # is a strong signal of row-order drift; preserving the baseline is safer
-        # than publishing a fluent sentence under the wrong workstream.
-        unrelated = bool(text and base_text and _activity_text_similarity(text, base_text) == 0.0)
-        if not text or _activity_area_conflicts(area, text) or unrelated:
-            text = base_text
-        if not text:
+        aligned_row = _aligned_ai_activity_row(row, base)
+        if aligned_row is None:
             continue
-
-        aligned_row: dict[str, Any] = copy.deepcopy(dict(base))
-        aligned_row.update({"area": area, "text": text})
-        if workstream:
-            aligned_row["workstream"] = workstream
-        status = _clean_text(row.get("status"), 100)
-        if status and status.casefold() not in text.casefold():
-            aligned_row["status"] = status
         replacements[base_index] = aligned_row
         aligned_order.append(base_index)
 
@@ -1665,16 +1684,26 @@ def _format_positive_number(value: Any) -> str:
     return _format_number(number)
 
 
-def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases_per_group: int = 3) -> list[dict[str, Any]]:
-    """Build a deterministic management summary by Area + Workstream.
+def _new_period_activity_group(area: str, family: str) -> dict[str, Any]:
+    return {
+        "area": area,
+        "family": family,
+        "themes": [],
+        "phrases": [],
+        "dates": [],
+        "source_report_ids": [],
+        "statuses": [],
+        "equipment_tags": [],
+        "source_areas": [],
+        "area_mapping_methods": [],
+        "area_review_required": False,
+        "occurrence_count": 0,
+    }
 
-    The full Daily activity rows always remain in ``draft['activities']``.  This
-    function creates a compact client-facing layer with source/date provenance,
-    theme-level de-duplication and equipment tags retained as metadata for audit
-    and optional AI polishing.
-    """
 
-    rows = value if isinstance(value, list) else []
+def _period_activity_groups(
+    rows: list[Any],
+) -> tuple[dict[tuple[str, str], dict[str, Any]], list[tuple[str, str]]]:
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     group_order: list[tuple[str, str]] = []
     for raw in rows:
@@ -1690,20 +1719,7 @@ def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases
         family = _period_activity_family(description)
         key = (area, family)
         if key not in groups:
-            groups[key] = {
-                "area": area,
-                "family": family,
-                "themes": [],
-                "phrases": [],
-                "dates": [],
-                "source_report_ids": [],
-                "statuses": [],
-                "equipment_tags": [],
-                "source_areas": [],
-                "area_mapping_methods": [],
-                "area_review_required": False,
-                "occurrence_count": 0,
-            }
+            groups[key] = _new_period_activity_group(area, family)
             group_order.append(key)
         group = groups[key]
         if source_area not in group["source_areas"]:
@@ -1734,7 +1750,13 @@ def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases
             group["source_report_ids"].append(source_id)
         if status and status.casefold() not in {item.casefold() for item in group["statuses"]}:
             group["statuses"].append(status)
+    return groups, group_order
 
+
+def _enrich_period_activity_groups(
+    groups: dict[tuple[str, str], dict[str, Any]],
+    remarks: Any,
+) -> None:
     # Area remarks can explain a source-backed standby state without becoming a
     # new work activity.  Only explicit waiting/coordination wording is used, and
     # only to enrich an already recorded Standby / Coordination group.
@@ -1760,52 +1782,77 @@ def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases
         if source_id and source_id not in group["source_report_ids"]:
             group["source_report_ids"].append(source_id)
 
-    result: list[dict[str, Any]] = []
-    for key in group_order:
-        group = groups[key]
-        themes = list(group["themes"])
-        if group["family"] == "Mechanical Maintenance" and "turning-gear operation and testing" in themes:
-            themes = [item for item in themes if item != "turning-gear operation"]
-        if group["family"] == "Valve Mechanical" and "MSV installation and associated piping" in themes:
-            themes = [item for item in themes if item != "MSV installation"]
-        themes = sorted(themes, key=lambda item: _theme_rank(group["family"], item))
-        phrases = list(group["phrases"])
-        if themes:
-            detail = _english_join(themes[:5])
-        else:
-            selected = phrases[:max_phrases_per_group]
-            detail = "; ".join(selected)
-        if not detail:
-            continue
 
-        text = detail.rstrip(".") + "."
-        tags = group["equipment_tags"]
-        # A short equipment list improves traceability for one-off work fronts;
-        # broad MA-81 groups keep the tag list in metadata to avoid a wall of IDs.
-        if 1 <= len(tags) <= 4 and len(group["themes"]) <= 2:
-            text += f" Equipment: {', '.join(tags)}."
-        statuses = group["statuses"]
-        if len(statuses) == 1 and len(phrases) == 1:
-            text += f" Status: {statuses[0]}."
-        stable_id = "activity-" + hashlib.sha256(
-            f"{_activity_match_text(group['area'])}\0{_activity_match_text(group['family'])}".encode("utf-8")
-        ).hexdigest()[:16]
-        result.append({
-            "stable_id": stable_id,
-            "area": group["area"],
-            "workstream": group["family"],
-            "text": text,
-            "source_dates": group["dates"],
-            "source_report_ids": group["source_report_ids"],
-            "equipment_tags": tags,
-            "source_areas": list(group.get("source_areas") or []),
-            "area_mapping_methods": list(group.get("area_mapping_methods") or []),
-            "area_review_required": bool(group.get("area_review_required")),
-            "representative_activities": phrases[:4],
-            "themes": themes,
-            "occurrence_count": int(group.get("occurrence_count") or len(phrases)),
-            "summary_type": "deterministic_period_group_v3",
-        })
+def _period_activity_summary_row(
+    group: Mapping[str, Any],
+    *,
+    max_phrases_per_group: int,
+) -> dict[str, Any] | None:
+    themes = list(group["themes"])
+    if group["family"] == "Mechanical Maintenance" and "turning-gear operation and testing" in themes:
+        themes = [item for item in themes if item != "turning-gear operation"]
+    if group["family"] == "Valve Mechanical" and "MSV installation and associated piping" in themes:
+        themes = [item for item in themes if item != "MSV installation"]
+    themes = sorted(themes, key=lambda item: _theme_rank(group["family"], item))
+    phrases = list(group["phrases"])
+    if themes:
+        detail = _english_join(themes[:5])
+    else:
+        selected = phrases[:max_phrases_per_group]
+        detail = "; ".join(selected)
+    if not detail:
+        return None
+
+    text = detail.rstrip(".") + "."
+    tags = group["equipment_tags"]
+    # A short equipment list improves traceability for one-off work fronts;
+    # broad MA-81 groups keep the tag list in metadata to avoid a wall of IDs.
+    if 1 <= len(tags) <= 4 and len(group["themes"]) <= 2:
+        text += f" Equipment: {', '.join(tags)}."
+    statuses = group["statuses"]
+    if len(statuses) == 1 and len(phrases) == 1:
+        text += f" Status: {statuses[0]}."
+    stable_id = "activity-" + hashlib.sha256(
+        f"{_activity_match_text(group['area'])}\0{_activity_match_text(group['family'])}".encode("utf-8")
+    ).hexdigest()[:16]
+    return {
+        "stable_id": stable_id,
+        "area": group["area"],
+        "workstream": group["family"],
+        "text": text,
+        "source_dates": group["dates"],
+        "source_report_ids": group["source_report_ids"],
+        "equipment_tags": tags,
+        "source_areas": list(group.get("source_areas") or []),
+        "area_mapping_methods": list(group.get("area_mapping_methods") or []),
+        "area_review_required": bool(group.get("area_review_required")),
+        "representative_activities": phrases[:4],
+        "themes": themes,
+        "occurrence_count": int(group.get("occurrence_count") or len(phrases)),
+        "summary_type": "deterministic_period_group_v3",
+    }
+
+
+def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases_per_group: int = 3) -> list[dict[str, Any]]:
+    """Build a deterministic management summary by Area + Workstream.
+
+    The full Daily activity rows always remain in ``draft['activities']``.  This
+    function creates a compact client-facing layer with source/date provenance,
+    theme-level de-duplication and equipment tags retained as metadata for audit
+    and optional AI polishing.
+    """
+
+    rows = value if isinstance(value, list) else []
+    groups, group_order = _period_activity_groups(rows)
+    _enrich_period_activity_groups(groups, remarks)
+    result = []
+    for key in group_order:
+        row = _period_activity_summary_row(
+            groups[key],
+            max_phrases_per_group=max_phrases_per_group,
+        )
+        if row is not None:
+            result.append(row)
     result.sort(key=lambda row: (_area_sort_key(row.get("area")), _workstream_rank(row.get("workstream"))))
     return result
 
@@ -2409,14 +2456,11 @@ def _missing_management_status_sentence(draft: Mapping[str, Any]) -> str:
     return f"{missing[0].capitalize()} and {missing[1]} were not supplied."
 
 
-def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: str) -> str:
-    """Build a detailed management-facing baseline without requiring Claude.
-
-    V3 keeps the stronger completeness/warning behaviour from Revision 3.1/3.2,
-    while restoring the useful area-level detail that made the earlier executive
-    summary easier for a project manager to understand.
-    """
-
+def _deterministic_activity_summary_sentences(
+    draft: Mapping[str, Any],
+    *,
+    report_type: str,
+) -> list[str]:
     period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
     start = _clean_text(period.get("start", period.get("date_from")), 10)
     end = _clean_text(period.get("end", period.get("date_to")), 10)
@@ -2438,52 +2482,59 @@ def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: s
 
     report_word = "week" if report_type == "weekly" else "month"
     sentences: list[str] = []
-    if grouped:
-        period_label = _short_period_label(start, end)
-        opening = f"During the reporting {report_word}"
-        if period_label:
-            opening += f" ({period_label})"
-        opening += ", field activities were carried out"
-        if area_phrase:
-            opening += f" across {area_phrase}"
-        sentences.append(opening + ".")
+    if not grouped:
+        return [f"No current-period site activities were supplied for this reporting {report_word}."]
 
-        # Give the busiest recorded area enough detail to be useful, without
-        # describing it as the project's most important area. Activity-line volume
-        # is used only to choose presentation order, never as a progress metric.
-        ranked = sorted(
-            highlights,
-            key=lambda item: (
-                -int(item.get("active_occurrence_count") or 0),
-                -int(item.get("occurrence_count") or 0),
-                _area_sort_key(item.get("area")),
-            ),
-        )
-        if ranked:
-            focus = ranked[0]
-            focus_area = _clean_text(focus.get("area"), 255) or "General"
-            focus_detail = _area_highlight_detail(focus, max_details=7)
-            if focus_detail:
-                sentences.append(f"In {focus_area}, recorded work included {focus_detail}.")
+    period_label = _short_period_label(start, end)
+    opening = f"During the reporting {report_word}"
+    if period_label:
+        opening += f" ({period_label})"
+    opening += ", field activities were carried out"
+    if area_phrase:
+        opening += f" across {area_phrase}"
+    sentences.append(opening + ".")
 
-            # Remaining area highlights stay compact. Weekly reports normally have
-            # few enough active areas to name all of them; monthly reports may have
-            # many, so cap the detailed clauses while the opening still lists the
-            # full supported area set.
-            remainder = [item for item in ranked[1:] if item.get("area") != focus.get("area")]
-            detailed_limit = 4 if report_type == "weekly" else 5
-            clauses = []
-            for item in remainder[:detailed_limit]:
-                area = _clean_text(item.get("area"), 255) or "General"
-                detail = _area_highlight_detail(item, max_details=3)
-                if detail:
-                    clauses.append(f"{area}: {detail}")
-            if clauses:
-                sentences.append("Other recorded work fronts included " + "; ".join(clauses) + ".")
-        elif workstreams:
+    # Give the busiest recorded area enough detail to be useful, without
+    # describing it as the project's most important area. Activity-line volume
+    # is used only to choose presentation order, never as a progress metric.
+    ranked = sorted(
+        highlights,
+        key=lambda item: (
+            -int(item.get("active_occurrence_count") or 0),
+            -int(item.get("occurrence_count") or 0),
+            _area_sort_key(item.get("area")),
+        ),
+    )
+    if not ranked:
+        if workstreams:
             sentences.append(f"Major work fronts included {_english_join(workstreams)}.")
-    else:
-        sentences.append(f"No current-period site activities were supplied for this reporting {report_word}.")
+        return sentences
+
+    focus = ranked[0]
+    focus_area = _clean_text(focus.get("area"), 255) or "General"
+    focus_detail = _area_highlight_detail(focus, max_details=7)
+    if focus_detail:
+        sentences.append(f"In {focus_area}, recorded work included {focus_detail}.")
+
+    # Remaining area highlights stay compact. Weekly reports normally have
+    # few enough active areas to name all of them; monthly reports may have
+    # many, so cap the detailed clauses while the opening still lists the
+    # full supported area set.
+    remainder = [item for item in ranked[1:] if item.get("area") != focus.get("area")]
+    detailed_limit = 4 if report_type == "weekly" else 5
+    clauses = []
+    for item in remainder[:detailed_limit]:
+        area = _clean_text(item.get("area"), 255) or "General"
+        detail = _area_highlight_detail(item, max_details=3)
+        if detail:
+            clauses.append(f"{area}: {detail}")
+    if clauses:
+        sentences.append("Other recorded work fronts included " + "; ".join(clauses) + ".")
+    return sentences
+
+
+def _deterministic_workforce_summary_sentences(draft: Mapping[str, Any]) -> list[str]:
+    sentences: list[str] = []
 
     # Workforce is a deterministic period fact and should remain visible even when
     # progress values are supplied. This avoids the earlier behaviour where adding
@@ -2511,25 +2562,42 @@ def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: s
             f"Manpower data was not supplied for {not_supplied_days} covered Daily Report {day_label}; "
             "workforce averages therefore use supplied dates only."
         )
+    return sentences
+
+
+def _deterministic_constraint_summary_sentence(draft: Mapping[str, Any]) -> str:
+    constraints = _real_constraint_rows(draft.get("constraints"))
+    if not constraints:
+        return _executive_constraint_and_findings_sentence(draft)
+
+    tags = _constraint_tags(constraints)
+    areas_with_constraints = _constraint_areas(constraints)
+    detail = "Formal constraints were reported"
+    if areas_with_constraints:
+        detail += f" in {_english_join(areas_with_constraints)}"
+    if tags:
+        detail += f" for {_english_join(tags)}"
+    return detail + "; details and source-recorded follow-up are shown in Section 5.4."
+
+
+def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: str) -> str:
+    """Build a detailed management-facing baseline without requiring Claude.
+
+    V3 keeps the stronger completeness/warning behaviour from Revision 3.1/3.2,
+    while restoring the useful area-level detail that made the earlier executive
+    summary easier for a project manager to understand.
+    """
+
+    sentences = _deterministic_activity_summary_sentences(draft, report_type=report_type)
+    sentences.extend(_deterministic_workforce_summary_sentences(draft))
 
     progress_sentence = _progress_summary_sentence(draft)
     if progress_sentence:
         sentences.append(progress_sentence)
 
-    constraints = _real_constraint_rows(draft.get("constraints"))
-    if constraints:
-        tags = _constraint_tags(constraints)
-        areas_with_constraints = _constraint_areas(constraints)
-        detail = "Formal constraints were reported"
-        if areas_with_constraints:
-            detail += f" in {_english_join(areas_with_constraints)}"
-        if tags:
-            detail += f" for {_english_join(tags)}"
-        sentences.append(detail + "; details and source-recorded follow-up are shown in Section 5.4.")
-    else:
-        findings_sentence = _executive_constraint_and_findings_sentence(draft)
-        if findings_sentence:
-            sentences.append(findings_sentence)
+    constraints_sentence = _deterministic_constraint_summary_sentence(draft)
+    if constraints_sentence:
+        sentences.append(constraints_sentence)
 
     missing_sentence = _missing_management_status_sentence(draft)
     if missing_sentence:
@@ -2541,7 +2609,7 @@ def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: s
         sentences.append("Daily Report coverage is partial; available and missing dates are listed in Source Coverage.")
     return " ".join(sentences)
 
-def _prepare_draft(
+def _initialise_periodic_draft(
     aggregated: dict[str, Any],
     *,
     project_no: str,
@@ -2551,14 +2619,11 @@ def _prepare_draft(
     report_mode: str,
     source_method: str,
     source_manifest: list[dict[str, Any]],
-    report_context: dict[str, Any] | None = None,
-    extra_warnings: list[str] | None = None,
-    report_type: str = "monthly",
-) -> dict[str, Any]:
+    report_context: dict[str, Any] | None,
+    report_type: str,
+) -> tuple[dict[str, Any], str, str, datetime, datetime]:
     kind = _report_type(report_type)
     mode = _normalise_report_mode(kind, report_mode)
-    # Validate again at the draft boundary so direct callers cannot create a
-    # weekly draft with a malformed period.
     start, end = _parse_period(date_from, date_to, kind, mode)
     report_name = _report_name(kind)
     draft = copy.deepcopy(aggregated if isinstance(aggregated, dict) else {})
@@ -2587,7 +2652,16 @@ def _prepare_draft(
     draft["checked_by"] = context.get("checked_by", "")
     draft["approved_by"] = context.get("approved_by", "")
     draft["revision_description"] = _periodic_revision_description(draft)
+    return draft, kind, mode, start, end
 
+
+def _set_draft_coverage(
+    draft: dict[str, Any],
+    *,
+    start: datetime,
+    end: datetime,
+    source_manifest: list[dict[str, Any]],
+) -> None:
     coverage = draft.get("coverage") if isinstance(draft.get("coverage"), dict) else {}
     expected = _expected_dates(start, end)
     found_dates = sorted({
@@ -2602,6 +2676,11 @@ def _prepare_draft(
     coverage.setdefault("duplicate_count", len(coverage.get("duplicate_dates", [])))
     draft["coverage"] = coverage
 
+
+def _set_draft_warnings(
+    draft: dict[str, Any],
+    extra_warnings: list[str] | None,
+) -> None:
     warnings = draft.get("warnings") if isinstance(draft.get("warnings"), list) else []
     warnings = [_warning_text(item) for item in warnings if _warning_text(item)]
     for warning in extra_warnings or []:
@@ -2610,6 +2689,8 @@ def _prepare_draft(
             warnings.append(warning)
     draft["warnings"] = _compact_review_warnings(warnings)
 
+
+def _set_draft_progress_and_safety(draft: dict[str, Any], *, kind: str) -> None:
     if not _has_progress_rows(draft.get("progress")) and isinstance(draft.get("overall_progress"), dict):
         progress_rows = []
         overall_progress = draft["overall_progress"]
@@ -2659,9 +2740,11 @@ def _prepare_draft(
         "severity_rate": None,
         "average_day_away": None,
     })
-    # Build a complete management-facing baseline before any AI call. Claude is
-    # optional: the deterministic compiler owns classification, grouping, source
-    # provenance, workforce numbers and constraint follow-up selection.
+
+
+def _set_draft_management_sections(
+    draft: dict[str, Any],
+) -> tuple[list[Any], list[dict[str, Any]], str, str]:
     activities_for_summary = draft.get("activities") if isinstance(draft.get("activities"), list) else []
     grouped_activities = _summarise_period_activities(activities_for_summary, remarks=draft.get("remarks"))
     draft["activity_summary"] = copy.deepcopy(grouped_activities)
@@ -2676,15 +2759,15 @@ def _prepare_draft(
         "summary": procurement_summary,
         "source_meta": {"source_type": "derived_from_daily_reports", "scope": "field_evidence_only"},
     })
+    return activities_for_summary, grouped_activities, engineering_summary, procurement_summary
 
-    site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
-    if not site.get("this_month_activities"):
-        site["this_month_activities"] = grouped_activities or copy.deepcopy(activities_for_summary)
 
-    # Weekly look-ahead may use Activity Tomorrow from the Daily Report that
-    # exactly closes the weekly period. Earlier Daily tomorrow items stay excluded
-    # because they normally become current-week work on subsequent days. Monthly
-    # look-ahead remains explicit-only.
+def _period_lookahead_source(
+    draft: Mapping[str, Any],
+    *,
+    kind: str,
+    date_to: str,
+) -> list[Any]:
     explicit_lookahead = (
         draft.get("planned_next_week", []) if kind == "weekly"
         else draft.get("planned_next_month", [])
@@ -2705,8 +2788,17 @@ def _prepare_draft(
             last_report_date = valid_dates[-1] if valid_dates else ""
         if last_report_date and last_report_date == date_to:
             explicit_lookahead = copy.deepcopy(draft.get("tomorrow_activities", []))
+    return explicit_lookahead if isinstance(explicit_lookahead, list) else []
+
+
+def _clean_period_lookahead(
+    rows: list[Any],
+    *,
+    kind: str,
+    date_to: str,
+) -> list[Any]:
     cleaned_lookahead: list[Any] = []
-    for row in explicit_lookahead if isinstance(explicit_lookahead, list) else []:
+    for row in rows:
         if isinstance(row, dict):
             description = _clean_text(row.get("description", row.get("text")), 2_000)
             if description:
@@ -2726,6 +2818,25 @@ def _prepare_draft(
             text_value = _clean_text(row, 2_000)
             if text_value:
                 cleaned_lookahead.append(text_value)
+    return cleaned_lookahead
+
+
+def _set_draft_site(
+    draft: dict[str, Any],
+    *,
+    kind: str,
+    date_to: str,
+    activities_for_summary: list[Any],
+    grouped_activities: list[dict[str, Any]],
+) -> tuple[list[Any], list[dict[str, Any]], str]:
+    site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
+    if not site.get("this_month_activities"):
+        site["this_month_activities"] = grouped_activities or copy.deepcopy(activities_for_summary)
+    cleaned_lookahead = _clean_period_lookahead(
+        _period_lookahead_source(draft, kind=kind, date_to=date_to),
+        kind=kind,
+        date_to=date_to,
+    )
     site["next_month_activities"] = cleaned_lookahead
     site["tomorrow_activities"] = copy.deepcopy(draft.get("tomorrow_activities", []))
 
@@ -2757,7 +2868,21 @@ def _prepare_draft(
         site["this_week_activities"] = site["current_period_activities"]
         site["next_week_activities"] = site["next_period_activities"]
     draft["site"] = site
+    return cleaned_lookahead, deterministic_concerns, baseline_site_summary
 
+
+def _set_deterministic_summary(
+    draft: dict[str, Any],
+    *,
+    kind: str,
+    grouped_activities: list[dict[str, Any]],
+    cleaned_lookahead: list[Any],
+    deterministic_concerns: list[dict[str, Any]],
+    baseline_site_summary: str,
+    engineering_summary: str,
+    procurement_summary: str,
+) -> None:
+    site = draft.get("site") if isinstance(draft.get("site"), Mapping) else {}
     baseline_executive = _deterministic_executive_summary(draft, report_type=kind)
     if not draft.get("executive_summary"):
         draft["executive_summary"] = baseline_executive
@@ -2796,6 +2921,67 @@ def _prepare_draft(
     }
     draft["narrative_mode"] = "deterministic"
     draft["narrative_engine_version"] = _DETERMINISTIC_SUMMARY_VERSION
+
+
+def _prepare_draft(
+    aggregated: dict[str, Any],
+    *,
+    project_no: str,
+    project_title: str,
+    date_from: str,
+    date_to: str,
+    report_mode: str,
+    source_method: str,
+    source_manifest: list[dict[str, Any]],
+    report_context: dict[str, Any] | None = None,
+    extra_warnings: list[str] | None = None,
+    report_type: str = "monthly",
+) -> dict[str, Any]:
+    # Validate again at the draft boundary so direct callers cannot create a
+    # weekly draft with a malformed period.
+    draft, kind, _mode, start, end = _initialise_periodic_draft(
+        aggregated,
+        project_no=project_no,
+        project_title=project_title,
+        date_from=date_from,
+        date_to=date_to,
+        report_mode=report_mode,
+        source_method=source_method,
+        source_manifest=source_manifest,
+        report_context=report_context,
+        report_type=report_type,
+    )
+    _set_draft_coverage(
+        draft,
+        start=start,
+        end=end,
+        source_manifest=source_manifest,
+    )
+    _set_draft_warnings(draft, extra_warnings)
+    _set_draft_progress_and_safety(draft, kind=kind)
+    (
+        activities_for_summary,
+        grouped_activities,
+        engineering_summary,
+        procurement_summary,
+    ) = _set_draft_management_sections(draft)
+    cleaned_lookahead, deterministic_concerns, baseline_site_summary = _set_draft_site(
+        draft,
+        kind=kind,
+        date_to=date_to,
+        activities_for_summary=activities_for_summary,
+        grouped_activities=grouped_activities,
+    )
+    _set_deterministic_summary(
+        draft,
+        kind=kind,
+        grouped_activities=grouped_activities,
+        cleaned_lookahead=cleaned_lookahead,
+        deterministic_concerns=deterministic_concerns,
+        baseline_site_summary=baseline_site_summary,
+        engineering_summary=engineering_summary,
+        procurement_summary=procurement_summary,
+    )
     return draft
 
 
@@ -2825,61 +3011,59 @@ def _concern_summary_signature(value: Any) -> list[tuple[str, str]]:
     return result
 
 
-def _refresh_deterministic_summary(draft: dict[str, Any]) -> dict[str, Any]:
-    """Refresh deterministic narrative after reviewed data changes.
+def _previous_deterministic_values(previous: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "executive": _clean_text(
+            previous.get("executive_summary", {}).get("text")
+            if isinstance(previous.get("executive_summary"), Mapping) else "",
+            4_000,
+        ),
+        "site": _clean_text(
+            previous.get("site_summary", {}).get("text")
+            if isinstance(previous.get("site_summary"), Mapping) else "",
+            4_000,
+        ),
+        "engineering": _clean_text(
+            previous.get("engineering_summary", {}).get("text")
+            if isinstance(previous.get("engineering_summary"), Mapping) else "",
+            4_000,
+        ),
+        "procurement": _clean_text(
+            previous.get("procurement_summary", {}).get("text")
+            if isinstance(previous.get("procurement_summary"), Mapping) else "",
+            4_000,
+        ),
+        "activities": (
+            previous.get("current_activities")
+            if isinstance(previous.get("current_activities"), list)
+            else []
+        ),
+        "concerns": previous.get("concerns") if isinstance(previous.get("concerns"), list) else [],
+    }
 
-    Timesheet decisions, progress edits and structured sources can legitimately
-    change factual totals after the initial compile.  Rebuild the deterministic
-    baseline, but update client-facing fields only while they still match the
-    previous baseline.  Manual edits and accepted AI wording therefore survive.
-    """
 
-    if not isinstance(draft, dict):
-        return draft
-    kind = _draft_report_type(draft)
-    previous = draft.get("deterministic_summary") if isinstance(draft.get("deterministic_summary"), Mapping) else {}
-
-    old_exec = _clean_text(
-        previous.get("executive_summary", {}).get("text")
-        if isinstance(previous.get("executive_summary"), Mapping) else "",
-        4_000,
-    )
-    old_site_summary = _clean_text(
-        previous.get("site_summary", {}).get("text")
-        if isinstance(previous.get("site_summary"), Mapping) else "",
-        4_000,
-    )
-    old_engineering = _clean_text(
-        previous.get("engineering_summary", {}).get("text")
-        if isinstance(previous.get("engineering_summary"), Mapping) else "",
-        4_000,
-    )
-    old_procurement = _clean_text(
-        previous.get("procurement_summary", {}).get("text")
-        if isinstance(previous.get("procurement_summary"), Mapping) else "",
-        4_000,
-    )
-    old_activities = previous.get("current_activities") if isinstance(previous.get("current_activities"), list) else []
-    old_concerns = previous.get("concerns") if isinstance(previous.get("concerns"), list) else []
-
-    activities = draft.get("activities") if isinstance(draft.get("activities"), list) else []
-    grouped = _summarise_period_activities(activities, remarks=draft.get("remarks"))
-    draft["activity_summary"] = copy.deepcopy(grouped)
-    engineering_summary = _deterministic_engineering_summary(activities)
-    procurement_summary = _deterministic_procurement_summary(activities)
-    concerns = _deterministic_concerns(draft)
-
-    site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
-    new_site_summary = _deterministic_site_summary(draft, grouped)
-    new_exec = _deterministic_executive_summary(draft, report_type=kind)
-
+def _apply_refreshed_deterministic_fields(
+    draft: dict[str, Any],
+    site: dict[str, Any],
+    *,
+    kind: str,
+    previous: Mapping[str, Any],
+    grouped: list[dict[str, Any]],
+    concerns: list[dict[str, Any]],
+    executive_summary: str,
+    site_summary: str,
+    engineering_summary: str,
+    procurement_summary: str,
+) -> None:
     current_exec = _clean_text(draft.get("executive_summary"), 4_000)
+    old_exec = previous["executive"]
     if not current_exec or (old_exec and current_exec == old_exec):
-        draft["executive_summary"] = new_exec
+        draft["executive_summary"] = executive_summary
 
     current_site_summary = _clean_text(site.get("summary"), 4_000)
+    old_site_summary = previous["site"]
     if not current_site_summary or (old_site_summary and current_site_summary == old_site_summary):
-        site["summary"] = new_site_summary
+        site["summary"] = site_summary
 
     current_activities = site.get(
         "current_period_activities",
@@ -2887,7 +3071,8 @@ def _refresh_deterministic_summary(draft: dict[str, Any]) -> dict[str, Any]:
     )
     if (
         not _activity_summary_signature(current_activities)
-        or _activity_summary_signature(current_activities) == _activity_summary_signature(old_activities)
+        or _activity_summary_signature(current_activities)
+        == _activity_summary_signature(previous["activities"])
     ):
         site["this_month_activities"] = copy.deepcopy(grouped)
         site["current_period_activities"] = copy.deepcopy(grouped)
@@ -2898,13 +3083,14 @@ def _refresh_deterministic_summary(draft: dict[str, Any]) -> dict[str, Any]:
     current_concerns = site.get("concerns") if isinstance(site.get("concerns"), list) else []
     if (
         not _concern_summary_signature(current_concerns)
-        or _concern_summary_signature(current_concerns) == _concern_summary_signature(old_concerns)
+        or _concern_summary_signature(current_concerns)
+        == _concern_summary_signature(previous["concerns"])
     ):
         site["concerns"] = copy.deepcopy(concerns)
 
     for section_key, old_text, new_text in (
-        ("engineering", old_engineering, engineering_summary),
-        ("procurement", old_procurement, procurement_summary),
+        ("engineering", previous["engineering"], engineering_summary),
+        ("procurement", previous["procurement"], procurement_summary),
     ):
         section = draft.get(section_key) if isinstance(draft.get(section_key), dict) else {}
         current_text = _clean_text(section.get("summary"), 4_000)
@@ -2918,19 +3104,30 @@ def _refresh_deterministic_summary(draft: dict[str, Any]) -> dict[str, Any]:
             })
         draft[section_key] = section
 
-    draft["site"] = site
+
+def _store_refreshed_deterministic_summary(
+    draft: dict[str, Any],
+    site: Mapping[str, Any],
+    *,
+    executive_summary: str,
+    site_summary: str,
+    engineering_summary: str,
+    procurement_summary: str,
+    grouped: list[dict[str, Any]],
+    concerns: list[dict[str, Any]],
+) -> None:
     source_ids, source_dates = _period_source_provenance(draft)
     lookahead = site.get("next_period_activities", site.get("next_month_activities", []))
     draft["deterministic_summary"] = {
         "version": _DETERMINISTIC_SUMMARY_VERSION,
         "source_type": "deterministic_compiler",
         "executive_summary": {
-            "text": new_exec,
+            "text": executive_summary,
             "source_report_ids": source_ids,
             "source_dates": source_dates,
         },
         "site_summary": {
-            "text": new_site_summary,
+            "text": site_summary,
             "source_report_ids": source_ids,
             "source_dates": source_dates,
         },
@@ -2948,6 +3145,57 @@ def _refresh_deterministic_summary(draft: dict[str, Any]) -> dict[str, Any]:
         "concerns": copy.deepcopy(concerns),
         "lookahead": copy.deepcopy(lookahead if isinstance(lookahead, list) else []),
     }
+
+
+def _refresh_deterministic_summary(draft: dict[str, Any]) -> dict[str, Any]:
+    """Refresh deterministic narrative after reviewed data changes.
+
+    Timesheet decisions, progress edits and structured sources can legitimately
+    change factual totals after the initial compile.  Rebuild the deterministic
+    baseline, but update client-facing fields only while they still match the
+    previous baseline.  Manual edits and accepted AI wording therefore survive.
+    """
+
+    if not isinstance(draft, dict):
+        return draft
+    kind = _draft_report_type(draft)
+    previous = draft.get("deterministic_summary") if isinstance(draft.get("deterministic_summary"), Mapping) else {}
+    previous_values = _previous_deterministic_values(previous)
+
+    activities = draft.get("activities") if isinstance(draft.get("activities"), list) else []
+    grouped = _summarise_period_activities(activities, remarks=draft.get("remarks"))
+    draft["activity_summary"] = copy.deepcopy(grouped)
+    engineering_summary = _deterministic_engineering_summary(activities)
+    procurement_summary = _deterministic_procurement_summary(activities)
+    concerns = _deterministic_concerns(draft)
+
+    site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
+    new_site_summary = _deterministic_site_summary(draft, grouped)
+    new_exec = _deterministic_executive_summary(draft, report_type=kind)
+    _apply_refreshed_deterministic_fields(
+        draft,
+        site,
+        kind=kind,
+        previous=previous_values,
+        grouped=grouped,
+        concerns=concerns,
+        executive_summary=new_exec,
+        site_summary=new_site_summary,
+        engineering_summary=engineering_summary,
+        procurement_summary=procurement_summary,
+    )
+
+    draft["site"] = site
+    _store_refreshed_deterministic_summary(
+        draft,
+        site,
+        executive_summary=new_exec,
+        site_summary=new_site_summary,
+        engineering_summary=engineering_summary,
+        procurement_summary=procurement_summary,
+        grouped=grouped,
+        concerns=concerns,
+    )
     draft["narrative_engine_version"] = _DETERMINISTIC_SUMMARY_VERSION
     if str(draft.get("narrative_mode") or "").strip() not in {"ai_enhanced"}:
         draft["narrative_mode"] = "deterministic"
@@ -3329,6 +3577,130 @@ def _sanitize_current_split_uploaded_payload(data: dict[str, Any]) -> dict[str, 
     return data
 
 
+def _uploaded_pdf_record(
+    imported: Mapping[str, Any],
+    data: dict[str, Any],
+    *,
+    username: str,
+    project_no: str,
+    project_title: str,
+    report_date: str,
+    parsed_project: str,
+    parsed_project_title: str,
+    daily_document_no: str,
+    title_matches_selected: bool,
+) -> dict[str, Any]:
+    source = imported.get("source") if isinstance(imported.get("source"), dict) else {}
+    report_id = f"pdf-{source.get('sha256') or uuid.uuid4().hex}"
+    identity_requires_review = bool(
+        not parsed_project
+        or not parsed_project_title
+        or not title_matches_selected
+        or (
+            parsed_project
+            and not daily_document_no
+            and parsed_project.casefold() != project_no.casefold()
+        )
+    )
+    canonical_identity_match = bool(
+        title_matches_selected
+        and (
+            daily_document_no
+            or (
+                parsed_project
+                and parsed_project.casefold() == project_no.casefold()
+            )
+        )
+    )
+    return {
+        "record_type": "final_daily_report",
+        "report_id": report_id,
+        "revision": int(imported.get("revision") or 1),
+        "username": username,
+        "date": report_date,
+        "project_no": project_no,
+        "project_title": project_title,
+        "generated_at": "",
+        "payload": data,
+        "source": source,
+        "confidence": imported.get("confidence", {}),
+        "import_status": imported.get("status", "needs_review"),
+        # Exact/approved identities can flow straight to a Draft. Ambiguous
+        # identities and critical parser failures still require confirmation.
+        "review_required": bool(
+            identity_requires_review or imported.get("status") != "ready"
+        ),
+        "source_identity": {
+            # ``*-DAR`` values are document-control numbers, not the Vendor
+            # Project No. used by the periodic report. Preserve both identities.
+            "project_no": parsed_project,
+            "project_title": parsed_project_title,
+            "reported_project_no": parsed_project,
+            "reported_project_title": parsed_project_title,
+            "document_no": daily_document_no,
+            "canonical_project_no": project_no if canonical_identity_match else "",
+            "canonical_project_title": project_title if canonical_identity_match else "",
+            "match_method": (
+                _selected_title_match_method(
+                    imported,
+                    project_no,
+                    parsed_project_title,
+                    project_title,
+                )
+                if canonical_identity_match
+                else "confirmation_required"
+            ),
+            "matched_title_alias": (
+                _selected_title_match_alias(imported)
+                if canonical_identity_match
+                else ""
+            ),
+            "review_state": (
+                "matched" if canonical_identity_match else "confirmation_required"
+            ),
+        },
+    }
+
+
+def _append_uploaded_pdf_parser_warnings(
+    warnings: list[Any],
+    imported: Mapping[str, Any],
+    *,
+    filename: str,
+    daily_document_no: str,
+    title_matches_selected: bool,
+) -> None:
+    if imported.get("status") != "ready":
+        warnings.append(f"{filename}: parser result needs manual review.")
+    for warning in imported.get("warnings", []):
+        if (
+            isinstance(warning, Mapping)
+            and str(warning.get("code") or "") in {
+                "project_title_fuzzy_suggestion",
+                "project_title_alias_suggestion",
+            }
+            and daily_document_no
+            and title_matches_selected
+        ):
+            # A high-confidence title match plus an explicit Daily Report
+            # document number is expected and need not be repeated for every day.
+            continue
+        if isinstance(warning, Mapping):
+            issue = {
+                "code": _clean_text(warning.get("code"), 120),
+                "severity": _clean_text(warning.get("severity") or "warning", 40).casefold(),
+                "field": _clean_text(warning.get("field"), 160),
+                "filename": _clean_text(warning.get("filename") or filename, 255),
+                "message": _clean_text(
+                    warning.get("message") or warning.get("code") or "PDF parsing warning",
+                    1_000,
+                ),
+            }
+            warnings.append(issue)
+        else:
+            warnings.append(f"{filename}: {_warning_text(warning)}")
+
+
 def _record_from_uploaded_pdf(
     imported: dict[str, Any],
     *,
@@ -3385,105 +3757,25 @@ def _record_from_uploaded_pdf(
         warnings.append(f"{filename}: date {report_date} is outside the selected period; file skipped.")
         return None, warnings
 
-    source = imported.get("source") if isinstance(imported.get("source"), dict) else {}
-    report_id = f"pdf-{source.get('sha256') or uuid.uuid4().hex}"
-    identity_requires_review = bool(
-        not parsed_project
-        or not parsed_project_title
-        or not title_matches_selected
-        or (
-            parsed_project
-            and not daily_document_no
-            and parsed_project.casefold() != project_no.casefold()
-        )
+    record = _uploaded_pdf_record(
+        imported,
+        data,
+        username=username,
+        project_no=project_no,
+        project_title=project_title,
+        report_date=report_date,
+        parsed_project=parsed_project,
+        parsed_project_title=parsed_project_title,
+        daily_document_no=daily_document_no,
+        title_matches_selected=title_matches_selected,
     )
-    canonical_identity_match = bool(
-        title_matches_selected
-        and (
-            daily_document_no
-            or (
-                parsed_project
-                and parsed_project.casefold() == project_no.casefold()
-            )
-        )
+    _append_uploaded_pdf_parser_warnings(
+        warnings,
+        imported,
+        filename=filename,
+        daily_document_no=daily_document_no,
+        title_matches_selected=title_matches_selected,
     )
-    record = {
-        "record_type": "final_daily_report",
-        "report_id": report_id,
-        "revision": int(imported.get("revision") or 1),
-        "username": username,
-        "date": report_date,
-        "project_no": project_no,
-        "project_title": project_title,
-        "generated_at": "",
-        "payload": data,
-        "source": source,
-        "confidence": imported.get("confidence", {}),
-        "import_status": imported.get("status", "needs_review"),
-        # Exact/approved identities can flow straight to a Draft. Ambiguous
-        # identities and critical parser failures still require confirmation.
-        "review_required": bool(
-            identity_requires_review or imported.get("status") != "ready"
-        ),
-        "source_identity": {
-            # ``*-DAR`` values are document-control numbers, not the Vendor
-            # Project No. used by the periodic report. Preserve both identities.
-            "project_no": parsed_project,
-            "project_title": parsed_project_title,
-            "reported_project_no": parsed_project,
-            "reported_project_title": parsed_project_title,
-            "document_no": daily_document_no,
-            "canonical_project_no": project_no if canonical_identity_match else "",
-            "canonical_project_title": project_title if canonical_identity_match else "",
-            "match_method": (
-                _selected_title_match_method(
-                    imported,
-                    project_no,
-                    parsed_project_title,
-                    project_title,
-                )
-                if canonical_identity_match
-                else "confirmation_required"
-            ),
-            "matched_title_alias": (
-                _selected_title_match_alias(imported)
-                if canonical_identity_match
-                else ""
-            ),
-            "review_state": (
-                "matched" if canonical_identity_match else "confirmation_required"
-            ),
-        },
-    }
-    if imported.get("status") != "ready":
-        warnings.append(f"{filename}: parser result needs manual review.")
-    for warning in imported.get("warnings", []):
-        if (
-            isinstance(warning, Mapping)
-            and str(warning.get("code") or "") in {
-                "project_title_fuzzy_suggestion",
-                "project_title_alias_suggestion",
-            }
-            and daily_document_no
-            and title_matches_selected
-        ):
-            # A high-confidence title match plus an explicit Daily Report
-            # document number is expected and need not be repeated for every day.
-            continue
-        if isinstance(warning, Mapping):
-            issue = {
-                "code": _clean_text(warning.get("code"), 120),
-                "severity": _clean_text(warning.get("severity") or "warning", 40).casefold(),
-                "field": _clean_text(warning.get("field"), 160),
-                "filename": _clean_text(warning.get("filename") or filename, 255),
-                "message": _clean_text(
-                    warning.get("message") or warning.get("code") or "PDF parsing warning",
-                    1_000,
-                ),
-            }
-            warnings.append(issue)
-        else:
-            warnings.append(f"{filename}: {_warning_text(warning)}")
     return record, warnings
 
 
@@ -3780,6 +4072,204 @@ def _source_validation_payload(review: Any) -> dict[str, Any]:
     }
 
 
+def _progress_row_key(row: Mapping[str, Any]) -> str:
+    return _clean_text(row.get("description"), 250).casefold()
+
+
+def _first_progress_number(*values: Any) -> float | None:
+    for value in values:
+        parsed = _optional_number(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _progress_source_type(
+    review: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+) -> tuple[str, bool]:
+    source_type = _clean_text(
+        review.get("source_type") or baseline.get("source_type"), 100
+    )
+    if not source_type and baseline.get("available") and baseline.get("latest_snapshot_date"):
+        source_type = "latest_daily_overall_progress_snapshot"
+    return source_type, source_type == "latest_daily_overall_progress_snapshot"
+
+
+def _progress_value(
+    source_values: tuple[Any, ...],
+    review_values: tuple[Any, ...],
+    *,
+    source_snapshot: bool,
+) -> float | None:
+    # For an authoritative Daily snapshot, source fields win even when an
+    # older saved draft/review payload already contains v3.3.8-derived
+    # values. Manual progress keeps reviewer values first.
+    ordered = source_values + review_values if source_snapshot else review_values + source_values
+    return _first_progress_number(*ordered)
+
+
+def _normalized_progress_row(
+    raw: Mapping[str, Any],
+    baseline_by_description: Mapping[str, Mapping[str, Any]],
+    *,
+    source_snapshot: bool,
+) -> dict[str, Any] | None:
+    description = _clean_text(raw.get("description"), 250)
+    if not description or description.casefold() in {"total", "total overall"}:
+        return None
+    baseline_row = baseline_by_description.get(description.casefold(), {})
+    if not isinstance(baseline_row, Mapping):
+        baseline_row = {}
+
+    previous = _progress_value(
+        (
+            baseline_row.get("previous"),
+            baseline_row.get("previous_actual"),
+            baseline_row.get("cumulative_previous_actual"),
+        ),
+        (
+            raw.get("previous"),
+            raw.get("previous_actual"),
+            raw.get("cumulative_previous_actual"),
+        ),
+        source_snapshot=source_snapshot,
+    )
+    this_month = _progress_value(
+        (
+            baseline_row.get("this_month"),
+            baseline_row.get("this_week"),
+            baseline_row.get("this_period"),
+            baseline_row.get("this_period_actual"),
+        ),
+        (
+            raw.get("this_month"),
+            raw.get("this_week"),
+            raw.get("this_period"),
+            raw.get("this_period_actual"),
+        ),
+        source_snapshot=source_snapshot,
+    )
+    to_date = _progress_value(
+        (
+            baseline_row.get("to_date"),
+            baseline_row.get("cumulative"),
+            baseline_row.get("cumulative_to_date_actual"),
+        ),
+        (
+            raw.get("to_date"),
+            raw.get("cumulative"),
+            raw.get("cumulative_to_date_actual"),
+        ),
+        source_snapshot=source_snapshot,
+    )
+    if to_date is None and previous is not None and this_month is not None:
+        to_date = previous + this_month
+
+    plan = _progress_value(
+        (
+            baseline_row.get("plan"),
+            baseline_row.get("to_date_plan"),
+            baseline_row.get("cumulative_to_date_plan"),
+        ),
+        (
+            raw.get("plan"),
+            raw.get("to_date_plan"),
+            raw.get("cumulative_to_date_plan"),
+        ),
+        source_snapshot=source_snapshot,
+    )
+    variance = _progress_value(
+        (baseline_row.get("variance"), baseline_row.get("deviation")),
+        (raw.get("variance"), raw.get("deviation")),
+        source_snapshot=source_snapshot,
+    )
+    if variance is None and to_date is not None and plan is not None:
+        variance = to_date - plan
+
+    weight = _first_progress_number(
+        raw.get("weight"), raw.get("weight_factor"),
+        baseline_row.get("weight"), baseline_row.get("weight_factor"),
+    )
+    is_total = bool(raw.get("is_total", baseline_row.get("is_total", False))) or (
+        description.casefold() == "overall progress"
+    )
+    return {
+        "description": description,
+        "weight": round(max(0.0, weight), 4) if weight is not None else None,
+        "previous": round(previous, 4) if previous is not None else None,
+        "this_month": round(this_month, 4) if this_month is not None else None,
+        "to_date": round(to_date, 4) if to_date is not None else None,
+        "plan": round(plan, 4) if plan is not None else None,
+        "variance": round(variance, 4) if variance is not None else None,
+        "is_total": is_total,
+    }
+
+
+def _append_weighted_progress_total(rows: list[dict[str, Any]]) -> None:
+    # A Daily source snapshot already contains its authoritative OVERALL PROGRESS
+    # row. Do not append a second, derived ``Total Overall`` row. Manual progress
+    # without an explicit total can still use the weighted fallback.
+    has_explicit_total = any(
+        row.get("is_total") or _clean_text(row.get("description"), 250).casefold() == "overall progress"
+        for row in rows
+    )
+    detail_rows = [row for row in rows if not row.get("is_total")]
+    weight_total = sum(
+        float(row.get("weight"))
+        for row in detail_rows
+        if _optional_number(row.get("weight")) is not None
+    )
+    if not detail_rows or weight_total <= 0 or has_explicit_total:
+        return
+
+    def weighted(key: str) -> float:
+        return sum(
+            float(row.get(key) or 0.0) * float(row.get("weight") or 0.0) / 100.0
+            for row in detail_rows
+        )
+
+    total_previous = weighted("previous")
+    total_this = weighted("this_month")
+    total_to_date = weighted("to_date")
+    total_plan = weighted("plan")
+    rows.append({
+        "description": "Total Overall",
+        "weight": round(weight_total, 4),
+        "previous": round(total_previous, 4),
+        "this_month": round(total_this, 4),
+        "to_date": round(total_to_date, 4),
+        "plan": round(total_plan, 4),
+        "variance": round(total_to_date - total_plan, 4),
+        "is_total": True,
+    })
+
+
+def _copy_progress_metadata(
+    result: dict[str, Any],
+    review: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+    *,
+    source_snapshot: bool,
+) -> None:
+    metadata_aliases = {
+        "source_period_label": ("source_period_label",),
+        "source_snapshot_date": ("source_snapshot_date", "latest_snapshot_date"),
+        "source_type": ("source_type",),
+    }
+    for key, aliases in metadata_aliases.items():
+        value = review.get(key)
+        if value in (None, ""):
+            for alias in aliases:
+                value = baseline.get(alias)
+                if value not in (None, ""):
+                    break
+        if key == "source_type" and value in (None, "") and source_snapshot:
+            value = "latest_daily_overall_progress_snapshot"
+        if value not in (None, ""):
+            result[key] = value
+
+
 def _normalize_progress(review: Any, baseline: Any = None) -> dict[str, Any]:
     """Normalise reviewed progress without overwriting source snapshot arithmetic.
 
@@ -3801,179 +4291,33 @@ def _normalize_progress(review: Any, baseline: Any = None) -> dict[str, Any]:
         if isinstance(baseline_map.get("rows", []), list)
         else []
     )
-
-    def row_key(row: Mapping[str, Any]) -> str:
-        return _clean_text(row.get("description"), 250).casefold()
-
     baseline_by_description = {
-        row_key(row): row
+        _progress_row_key(row): row
         for row in baseline_rows
-        if isinstance(row, Mapping) and row_key(row)
+        if isinstance(row, Mapping) and _progress_row_key(row)
     }
-
-    source_type = _clean_text(
-        review_map.get("source_type") or baseline_map.get("source_type"), 100
-    )
-    if not source_type and baseline_map.get("available") and baseline_map.get("latest_snapshot_date"):
-        source_type = "latest_daily_overall_progress_snapshot"
-    source_snapshot = source_type == "latest_daily_overall_progress_snapshot"
-
-    def first_number(*values: Any) -> float | None:
-        for value in values:
-            parsed = _optional_number(value)
-            if parsed is not None:
-                return parsed
-        return None
+    _, source_snapshot = _progress_source_type(review_map, baseline_map)
 
     rows: list[dict[str, Any]] = []
     for raw in raw_rows[:100]:
         if not isinstance(raw, dict):
             continue
-        description = _clean_text(raw.get("description"), 250)
-        if not description or description.casefold() in {"total", "total overall"}:
-            continue
-        baseline_row = baseline_by_description.get(description.casefold(), {})
-        if not isinstance(baseline_row, Mapping):
-            baseline_row = {}
-
-        def source_or_review(source_values: tuple[Any, ...], review_values: tuple[Any, ...]) -> float | None:
-            # For an authoritative Daily snapshot, source fields win even when an
-            # older saved draft/review payload already contains v3.3.8-derived
-            # values. Manual progress keeps reviewer values first.
-            return first_number(
-                *(source_values + review_values if source_snapshot else review_values + source_values)
-            )
-
-        previous = source_or_review(
-            (
-                baseline_row.get("previous"),
-                baseline_row.get("previous_actual"),
-                baseline_row.get("cumulative_previous_actual"),
-            ),
-            (
-                raw.get("previous"),
-                raw.get("previous_actual"),
-                raw.get("cumulative_previous_actual"),
-            ),
+        row = _normalized_progress_row(
+            raw,
+            baseline_by_description,
+            source_snapshot=source_snapshot,
         )
-        this_month = source_or_review(
-            (
-                baseline_row.get("this_month"),
-                baseline_row.get("this_week"),
-                baseline_row.get("this_period"),
-                baseline_row.get("this_period_actual"),
-            ),
-            (
-                raw.get("this_month"),
-                raw.get("this_week"),
-                raw.get("this_period"),
-                raw.get("this_period_actual"),
-            ),
-        )
-        to_date = source_or_review(
-            (
-                baseline_row.get("to_date"),
-                baseline_row.get("cumulative"),
-                baseline_row.get("cumulative_to_date_actual"),
-            ),
-            (
-                raw.get("to_date"),
-                raw.get("cumulative"),
-                raw.get("cumulative_to_date_actual"),
-            ),
-        )
-        if to_date is None and previous is not None and this_month is not None:
-            to_date = previous + this_month
+        if row is not None:
+            rows.append(row)
 
-        plan = source_or_review(
-            (
-                baseline_row.get("plan"),
-                baseline_row.get("to_date_plan"),
-                baseline_row.get("cumulative_to_date_plan"),
-            ),
-            (
-                raw.get("plan"),
-                raw.get("to_date_plan"),
-                raw.get("cumulative_to_date_plan"),
-            ),
-        )
-        variance = source_or_review(
-            (baseline_row.get("variance"), baseline_row.get("deviation")),
-            (raw.get("variance"), raw.get("deviation")),
-        )
-        if variance is None and to_date is not None and plan is not None:
-            variance = to_date - plan
-
-        weight = first_number(
-            raw.get("weight"), raw.get("weight_factor"),
-            baseline_row.get("weight"), baseline_row.get("weight_factor"),
-        )
-        is_total = bool(raw.get("is_total", baseline_row.get("is_total", False))) or (
-            description.casefold() == "overall progress"
-        )
-        rows.append({
-            "description": description,
-            "weight": round(max(0.0, weight), 4) if weight is not None else None,
-            "previous": round(previous, 4) if previous is not None else None,
-            "this_month": round(this_month, 4) if this_month is not None else None,
-            "to_date": round(to_date, 4) if to_date is not None else None,
-            "plan": round(plan, 4) if plan is not None else None,
-            "variance": round(variance, 4) if variance is not None else None,
-            "is_total": is_total,
-        })
-
-    # A Daily source snapshot already contains its authoritative OVERALL PROGRESS
-    # row. Do not append a second, derived ``Total Overall`` row. Manual progress
-    # without an explicit total can still use the weighted fallback.
-    has_explicit_total = any(
-        row.get("is_total") or _clean_text(row.get("description"), 250).casefold() == "overall progress"
-        for row in rows
-    )
-    detail_rows = [row for row in rows if not row.get("is_total")]
-    weight_total = sum(
-        float(row.get("weight"))
-        for row in detail_rows
-        if _optional_number(row.get("weight")) is not None
-    )
-    if detail_rows and weight_total > 0 and not has_explicit_total:
-        def weighted(key: str) -> float:
-            return sum(
-                float(row.get(key) or 0.0) * float(row.get("weight") or 0.0) / 100.0
-                for row in detail_rows
-            )
-
-        total_previous = weighted("previous")
-        total_this = weighted("this_month")
-        total_to_date = weighted("to_date")
-        total_plan = weighted("plan")
-        rows.append({
-            "description": "Total Overall",
-            "weight": round(weight_total, 4),
-            "previous": round(total_previous, 4),
-            "this_month": round(total_this, 4),
-            "to_date": round(total_to_date, 4),
-            "plan": round(total_plan, 4),
-            "variance": round(total_to_date - total_plan, 4),
-            "is_total": True,
-        })
-
+    _append_weighted_progress_total(rows)
     result: dict[str, Any] = {"rows": rows}
-    metadata_aliases = {
-        "source_period_label": ("source_period_label",),
-        "source_snapshot_date": ("source_snapshot_date", "latest_snapshot_date"),
-        "source_type": ("source_type",),
-    }
-    for key, aliases in metadata_aliases.items():
-        value = review_map.get(key)
-        if value in (None, ""):
-            for alias in aliases:
-                value = baseline_map.get(alias)
-                if value not in (None, ""):
-                    break
-        if key == "source_type" and value in (None, "") and source_snapshot:
-            value = "latest_daily_overall_progress_snapshot"
-        if value not in (None, ""):
-            result[key] = value
+    _copy_progress_metadata(
+        result,
+        review_map,
+        baseline_map,
+        source_snapshot=source_snapshot,
+    )
     return result
 
 
@@ -3989,57 +4333,65 @@ def _manual_source_meta(review: Mapping[str, Any], section: str, actor: str) -> 
     }
 
 
-def _apply_review(draft: dict[str, Any], review: dict[str, Any], *, actor: str = "") -> dict[str, Any]:
-    value = copy.deepcopy(draft)
-    kind = _report_type(value.get("report_type") or "monthly")
-    mode = _normalise_report_mode(kind, review.get("report_mode") or value.get("report_mode"))
-    period = value.get("period") if isinstance(value.get("period"), dict) else {}
-    _parse_period(period.get("start"), period.get("end"), kind, mode)
+def _apply_source_validation_review(
+    value: dict[str, Any],
+    review: Mapping[str, Any],
+) -> None:
     stored_validation = value.get("source_validation")
-    if isinstance(stored_validation, dict):
-        validation_applied = bool(
-            stored_validation.get("applied") and stored_validation.get("confirmed")
-        )
-        incoming_raw = review.get("source_validation")
-        if incoming_raw is not None:
-            incoming_validation = _source_validation_payload(incoming_raw)
-            if validation_applied:
-                if not incoming_validation["confirmed"]:
-                    raise ValueError("Source Data Validation was already applied; keep it confirmed or apply the changed decisions again.")
-                if (
-                    incoming_validation["project_no"] != str(value.get("project_no") or "")
-                    or incoming_validation["project_title"] != str(value.get("project_title") or "")
-                ):
-                    raise ValueError("Project identity changed. Apply Source Data Validation again.")
-                stored_decisions = {
-                    str(group.get("key") or ""): str(group.get("decision") or "")
-                    for group in stored_validation.get("project_groups", [])
-                    if isinstance(group, dict)
-                }
-                incoming_decisions = {
-                    str(row.get("group_key") or ""): str(row.get("decision") or "")
-                    for row in incoming_validation["project_resolutions"]
-                    if isinstance(row, dict)
-                }
-                if incoming_decisions != stored_decisions:
-                    raise ValueError("Project decisions changed. Apply Source Data Validation again.")
-                stored_duplicates = {
-                    str(group.get("key") or ""): str(group.get("selected_record_id") or "")
-                    for group in stored_validation.get("duplicate_groups", [])
-                    if isinstance(group, dict)
-                }
-                incoming_duplicates = {
-                    str(row.get("group_key") or ""): str(row.get("selected_record_id") or "")
-                    for row in incoming_validation["duplicate_resolutions"]
-                    if isinstance(row, dict)
-                }
-                if incoming_duplicates != stored_duplicates:
-                    raise ValueError("Duplicate source choices changed. Apply Source Data Validation again.")
-            stored_validation["notes"] = incoming_validation["notes"]
-        value["source_validation"] = stored_validation
-    # Pending source/workforce/AI reviews are surfaced by preflight. They do
-    # not prevent a Draft/Preview from rendering; only critical Final checks
-    # may block issue.
+    if not isinstance(stored_validation, dict):
+        return
+    validation_applied = bool(
+        stored_validation.get("applied") and stored_validation.get("confirmed")
+    )
+    incoming_raw = review.get("source_validation")
+    if incoming_raw is not None:
+        incoming_validation = _source_validation_payload(incoming_raw)
+        if validation_applied:
+            if not incoming_validation["confirmed"]:
+                raise ValueError(
+                    "Source Data Validation was already applied; keep it confirmed "
+                    "or apply the changed decisions again."
+                )
+            if (
+                incoming_validation["project_no"] != str(value.get("project_no") or "")
+                or incoming_validation["project_title"] != str(value.get("project_title") or "")
+            ):
+                raise ValueError("Project identity changed. Apply Source Data Validation again.")
+            stored_decisions = {
+                str(group.get("key") or ""): str(group.get("decision") or "")
+                for group in stored_validation.get("project_groups", [])
+                if isinstance(group, dict)
+            }
+            incoming_decisions = {
+                str(row.get("group_key") or ""): str(row.get("decision") or "")
+                for row in incoming_validation["project_resolutions"]
+                if isinstance(row, dict)
+            }
+            if incoming_decisions != stored_decisions:
+                raise ValueError("Project decisions changed. Apply Source Data Validation again.")
+            stored_duplicates = {
+                str(group.get("key") or ""): str(group.get("selected_record_id") or "")
+                for group in stored_validation.get("duplicate_groups", [])
+                if isinstance(group, dict)
+            }
+            incoming_duplicates = {
+                str(row.get("group_key") or ""): str(row.get("selected_record_id") or "")
+                for row in incoming_validation["duplicate_resolutions"]
+                if isinstance(row, dict)
+            }
+            if incoming_duplicates != stored_duplicates:
+                raise ValueError("Duplicate source choices changed. Apply Source Data Validation again.")
+        stored_validation["notes"] = incoming_validation["notes"]
+    value["source_validation"] = stored_validation
+
+
+def _apply_review_progress(
+    value: dict[str, Any],
+    review: Mapping[str, Any],
+    *,
+    kind: str,
+    mode: str,
+) -> None:
     value["report_type"] = kind
     value["report_title"] = f"{_report_name(kind)} Progress Report"
     value["report_mode"] = mode
@@ -4056,6 +4408,13 @@ def _apply_review(draft: dict[str, Any], review: dict[str, Any], *, actor: str =
         baseline=progress_baseline,
     )
 
+
+def _reviewed_safety(
+    value: Mapping[str, Any],
+    review: Mapping[str, Any],
+    *,
+    actor: str,
+) -> dict[str, Any]:
     current_safety = value.get("safety") if isinstance(value.get("safety"), dict) else {}
     safety_review = review.get("safety") if isinstance(review.get("safety"), dict) else {}
     safety = {
@@ -4112,8 +4471,15 @@ def _apply_review(draft: dict[str, Any], review: dict[str, Any], *, actor: str =
         safety["source_meta"] = _manual_source_meta(review, "safety", actor)
     elif isinstance(current_safety.get("source_meta"), dict):
         safety["source_meta"] = copy.deepcopy(current_safety["source_meta"])
-    value["safety"] = safety
+    return safety
 
+
+def _apply_reviewed_summaries(
+    value: dict[str, Any],
+    review: Mapping[str, Any],
+    *,
+    actor: str,
+) -> None:
     for key in ("engineering", "procurement"):
         current = value.get(key) if isinstance(value.get(key), dict) else {}
         incoming = review.get(key) if isinstance(review.get(key), dict) else {}
@@ -4124,10 +4490,11 @@ def _apply_review(draft: dict[str, Any], review: dict[str, Any], *, actor: str =
             current["source_meta"] = _manual_source_meta(review, key, actor)
         value[key] = current
 
-    current_site = value.get("site") if isinstance(value.get("site"), dict) else {}
-    incoming_site = review.get("site") if isinstance(review.get("site"), dict) else {}
-    if "summary" in incoming_site:
-        current_site["summary"] = _clean_text(incoming_site.get("summary"), 4_000)
+
+def _review_activity_values(
+    current_site: Mapping[str, Any],
+    incoming_site: Mapping[str, Any],
+) -> tuple[Any, Any]:
     current_activities = incoming_site.get(
         "current_period_activities",
         incoming_site.get(
@@ -4151,6 +4518,36 @@ def _apply_review(draft: dict[str, Any], review: dict[str, Any], *, actor: str =
             )),
         ),
     )
+    return current_activities, next_activities
+
+
+def _reviewed_concerns(value: Any) -> list[dict[str, str]]:
+    concerns: list[dict[str, str]] = []
+    for item in value[:250]:
+        if isinstance(item, str):
+            concerns.append({"concern": _clean_text(item, 2_000), "corrective_action": ""})
+        elif isinstance(item, dict):
+            concern = _clean_text(item.get("concern", item.get("text", "")), 2_000)
+            action = _clean_text(item.get("corrective_action", item.get("action", "")), 2_000)
+            if concern or action:
+                concerns.append({"concern": concern, "corrective_action": action})
+    return concerns
+
+
+def _apply_reviewed_site(
+    value: dict[str, Any],
+    review: Mapping[str, Any],
+    *,
+    kind: str,
+) -> None:
+    current_site = value.get("site") if isinstance(value.get("site"), dict) else {}
+    incoming_site = review.get("site") if isinstance(review.get("site"), dict) else {}
+    if "summary" in incoming_site:
+        current_site["summary"] = _clean_text(incoming_site.get("summary"), 4_000)
+    current_activities, next_activities = _review_activity_values(
+        current_site,
+        incoming_site,
+    )
     # Preserve Area labels for deterministic/AI activity groups through the
     # Preview/Generate review round-trip. Older plain-string rows remain valid;
     # when they correspond to deterministic rows, their Area + Workstream metadata
@@ -4169,17 +4566,26 @@ def _apply_review(draft: dict[str, Any], review: dict[str, Any], *, actor: str =
     if kind == "weekly":
         current_site["this_week_activities"] = current_site["this_month_activities"]
         current_site["next_week_activities"] = current_site["next_month_activities"]
-    concerns = []
-    for item in incoming_site.get("concerns", current_site.get("concerns", []))[:250]:
-        if isinstance(item, str):
-            concerns.append({"concern": _clean_text(item, 2_000), "corrective_action": ""})
-        elif isinstance(item, dict):
-            concern = _clean_text(item.get("concern", item.get("text", "")), 2_000)
-            action = _clean_text(item.get("corrective_action", item.get("action", "")), 2_000)
-            if concern or action:
-                concerns.append({"concern": concern, "corrective_action": action})
-    current_site["concerns"] = concerns
+    current_site["concerns"] = _reviewed_concerns(
+        incoming_site.get("concerns", current_site.get("concerns", []))
+    )
     value["site"] = current_site
+
+
+def _apply_review(draft: dict[str, Any], review: dict[str, Any], *, actor: str = "") -> dict[str, Any]:
+    value = copy.deepcopy(draft)
+    kind = _report_type(value.get("report_type") or "monthly")
+    mode = _normalise_report_mode(kind, review.get("report_mode") or value.get("report_mode"))
+    period = value.get("period") if isinstance(value.get("period"), dict) else {}
+    _parse_period(period.get("start"), period.get("end"), kind, mode)
+    _apply_source_validation_review(value, review)
+    # Pending source/workforce/AI reviews are surfaced by preflight. They do
+    # not prevent a Draft/Preview from rendering; only critical Final checks
+    # may block issue.
+    _apply_review_progress(value, review, kind=kind, mode=mode)
+    value["safety"] = _reviewed_safety(value, review, actor=actor)
+    _apply_reviewed_summaries(value, review, actor=actor)
+    _apply_reviewed_site(value, review, kind=kind)
     value["updated_at"] = datetime.now().isoformat(timespec="seconds")
     return value
 
@@ -4571,35 +4977,22 @@ def _audit_source_manifest(value: Any) -> list[dict[str, Any]]:
     return result
 
 
-def _workforce_issue_audit(value: Any) -> dict[str, Any] | None:
-    """Remove employee-level workbook data from an issued report JSON.
-
-    Full previews remain in the owner's editable draft.  The issued artifact
-    needs only reproducible source hashes, deterministic totals, decisions,
-    and reviewer metadata; names, per-day attendance statuses, raw overtime
-    rows, and workbook filenames are not report content.
-    """
-
-    if not isinstance(value, dict):
-        return None
-    result: dict[str, Any] = {
-        "version": value.get("version"),
-        "privacy_compacted": True,
-        "effective": copy.deepcopy(value.get("effective", {})),
-    }
-
-    timesheet = value.get("timesheet") if isinstance(value.get("timesheet"), dict) else {}
-    timesheet_preview = (
-        timesheet.get("preview") if isinstance(timesheet.get("preview"), dict) else {}
-    )
-    timesheet_audit = {
-        key: copy.deepcopy(timesheet.get(key))
+def _workforce_review_audit(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: copy.deepcopy(value.get(key))
         for key in (
             "status", "reviewed_by", "reviewed_at", "decided_by", "decided_at",
             "confirmed_exceptions",
         )
-        if timesheet.get(key) not in (None, "")
+        if value.get(key) not in (None, "")
     }
+
+
+def _timesheet_issue_audit(timesheet: Mapping[str, Any]) -> dict[str, Any]:
+    timesheet_preview = (
+        timesheet.get("preview") if isinstance(timesheet.get("preview"), dict) else {}
+    )
+    timesheet_audit = _workforce_review_audit(timesheet)
     timesheet_audit.update({
         "formula_version": timesheet_preview.get("formula_version"),
         "hours_per_present_day": timesheet_preview.get("hours_per_present_day"),
@@ -4612,17 +5005,10 @@ def _workforce_issue_audit(value: Any) -> dict[str, Any] | None:
         "unresolved_count": len(timesheet_preview.get("unresolved", []))
         if isinstance(timesheet_preview.get("unresolved"), list) else 0,
     })
-    result["timesheet"] = timesheet_audit
+    return timesheet_audit
 
-    overtime = value.get("overtime") if isinstance(value.get("overtime"), dict) else {}
-    overtime_preview = (
-        overtime.get("preview") if isinstance(overtime.get("preview"), dict) else {}
-    )
-    overtime_manifest = (
-        overtime_preview.get("manifest")
-        if isinstance(overtime_preview.get("manifest"), dict)
-        else {}
-    )
+
+def _overtime_resolution_audit_rows(overtime: Mapping[str, Any]) -> list[dict[str, str]]:
     resolution_rows = []
     resolutions = overtime.get("resolutions") if isinstance(overtime.get("resolutions"), dict) else {}
     for employee_key, decision in sorted(resolutions.items()):
@@ -4630,11 +5016,20 @@ def _workforce_issue_audit(value: Any) -> dict[str, Any] | None:
             "employee_hash": hashlib.sha256(str(employee_key).encode("utf-8")).hexdigest(),
             "decision": str(decision),
         })
-    accepted_ids = sorted({
+    return resolution_rows
+
+
+def _accepted_overtime_record_ids(overtime: Mapping[str, Any]) -> list[str]:
+    return sorted({
         str(row.get("record_id"))
         for row in overtime.get("accepted_records", [])
         if isinstance(row, dict) and row.get("record_id")
     }) if isinstance(overtime.get("accepted_records"), list) else []
+
+
+def _overtime_record_resolution_audit_rows(
+    overtime: Mapping[str, Any],
+) -> list[dict[str, Any]]:
     record_resolution_rows = []
     record_resolutions = (
         overtime.get("record_resolutions")
@@ -4649,14 +5044,19 @@ def _workforce_issue_audit(value: Any) -> dict[str, Any] | None:
             "decision": str(decision.get("decision") or ""),
             "duration_hours": decision.get("duration_hours"),
         })
-    overtime_audit = {
-        key: copy.deepcopy(overtime.get(key))
-        for key in (
-            "status", "reviewed_by", "reviewed_at", "decided_by", "decided_at",
-            "confirmed_exceptions",
-        )
-        if overtime.get(key) not in (None, "")
-    }
+    return record_resolution_rows
+
+
+def _overtime_issue_audit(overtime: Mapping[str, Any]) -> dict[str, Any]:
+    overtime_preview = (
+        overtime.get("preview") if isinstance(overtime.get("preview"), dict) else {}
+    )
+    overtime_manifest = (
+        overtime_preview.get("manifest")
+        if isinstance(overtime_preview.get("manifest"), dict)
+        else {}
+    )
+    overtime_audit = _workforce_review_audit(overtime)
     overtime_audit.update({
         "formula_version": overtime_preview.get("formula_version"),
         "calculation_policy": copy.deepcopy(overtime_preview.get("calculation_policy", {})),
@@ -4668,11 +5068,33 @@ def _workforce_issue_audit(value: Any) -> dict[str, Any] | None:
         if isinstance(overtime_preview.get("warnings"), list) else 0,
         "conflict_count": len(overtime_preview.get("conflicts", []))
         if isinstance(overtime_preview.get("conflicts"), list) else 0,
-        "resolutions": resolution_rows,
-        "record_resolutions": record_resolution_rows,
-        "accepted_record_ids": accepted_ids,
+        "resolutions": _overtime_resolution_audit_rows(overtime),
+        "record_resolutions": _overtime_record_resolution_audit_rows(overtime),
+        "accepted_record_ids": _accepted_overtime_record_ids(overtime),
     })
-    result["overtime"] = overtime_audit
+    return overtime_audit
+
+
+def _workforce_issue_audit(value: Any) -> dict[str, Any] | None:
+    """Remove employee-level workbook data from an issued report JSON.
+
+    Full previews remain in the owner's editable draft.  The issued artifact
+    needs only reproducible source hashes, deterministic totals, decisions,
+    and reviewer metadata; names, per-day attendance statuses, raw overtime
+    rows, and workbook filenames are not report content.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    timesheet = value.get("timesheet") if isinstance(value.get("timesheet"), dict) else {}
+    overtime = value.get("overtime") if isinstance(value.get("overtime"), dict) else {}
+    result: dict[str, Any] = {
+        "version": value.get("version"),
+        "privacy_compacted": True,
+        "effective": copy.deepcopy(value.get("effective", {})),
+        "timesheet": _timesheet_issue_audit(timesheet),
+        "overtime": _overtime_issue_audit(overtime),
+    }
     return result
 
 
@@ -5069,6 +5491,2719 @@ def _render(
     raise TypeError(f"{_report_name(draft.get('report_type') or 'monthly')} PDF renderer did not return a BytesIO object")
 
 
+def _analyze_legacy_excel_source_request(app, *, data_dir: str):
+    if (
+        request.content_length is not None
+        and request.content_length > _MAX_LEGACY_EXCEL_REQUEST_BYTES
+    ):
+        return jsonify({
+            "error": (
+                "Excel upload exceeds the "
+                f"{LEGACY_EXCEL_LIMITS.max_file_bytes // (1024 * 1024)} MB limit."
+            )
+        }), 413
+
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return jsonify({"error": "Choose one legacy Daily Report .xlsx workbook."}), 400
+    filename = os.path.basename(str(upload.filename or ""))
+    if not filename.lower().endswith(".xlsx"):
+        return jsonify({"error": f"{filename or 'Upload'} is not an .xlsx workbook."}), 400
+
+    username = session["username"]
+    upload_session_id = uuid.uuid4().hex
+    directory: Path | None = None
+    try:
+        _cleanup_upload_sessions(data_dir, username)
+        root = _upload_sessions_dir(data_dir, username)
+        active_count = sum(
+            1
+            for path in root.iterdir()
+            if path.is_dir()
+            and _DRAFT_ID_RE.fullmatch(path.name)
+            and not (path / "result.json").is_file()
+        )
+        if active_count >= _MAX_ACTIVE_UPLOAD_SESSIONS:
+            return jsonify({
+                "error": "Too many unfinished upload sessions. Finish or remove the current source first."
+            }), 429
+
+        directory = root / upload_session_id
+        directory.mkdir()
+        workbook_path = directory / "workbook.xlsx"
+        size_bytes, digest = _save_legacy_excel_upload(upload, workbook_path)
+        analysis = analyze_legacy_daily_workbook(
+            workbook_path,
+            filename=filename,
+            sha256=digest,
+        )
+        manifest = {
+            "schema_version": "legacy-excel-source-session/1",
+            "upload_session_id": upload_session_id,
+            "owner": username,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "filename": filename,
+            "size_bytes": size_bytes,
+            "sha256": digest,
+            "analysis": analysis,
+        }
+        _atomic_json(directory / "session.json", manifest)
+        return jsonify({
+            "ok": True,
+            "upload_session_id": upload_session_id,
+            "analysis": _public_legacy_excel_analysis(analysis),
+        })
+    except (LegacyExcelError, ValueError) as exc:
+        if directory is not None and directory.exists():
+            _remove_upload_session(data_dir, username, upload_session_id)
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        if directory is not None and directory.exists():
+            _remove_upload_session(data_dir, username, upload_session_id)
+        app.logger.exception("Legacy Excel source analysis failed for %s", filename)
+        return jsonify({
+            "error": "Excel source could not be analyzed. Check the workbook or server logs."
+        }), 500
+
+
+def _legacy_excel_compile_context(
+    body: Any,
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise ValueError("Invalid Excel compile request.")
+    kind = _report_type(body.get("report_type") or "monthly")
+    mode = _normalise_report_mode(kind, body.get("report_mode"))
+    start, end = _parse_period(body.get("date_from"), body.get("date_to"), kind, mode)
+    project_no = _clean_text(body.get("project_no"), 250)
+    project_title = _clean_text(body.get("project_title"), 500)
+    if not project_no:
+        raise ValueError("Select a project first.")
+
+    analysis = manifest.get("analysis") if isinstance(manifest.get("analysis"), dict) else {}
+    if analysis.get("duplicate_dates"):
+        raise ValueError("Resolve duplicate worksheet dates before compiling this workbook.")
+    available = {
+        _clean_text(value, 10)
+        for value in analysis.get("available_dates", [])
+        if _clean_text(value, 10)
+    }
+    start_text = start.strftime("%Y-%m-%d")
+    end_text = end.strftime("%Y-%m-%d")
+    if start_text not in available or end_text not in available:
+        raise ValueError("The From and To dates must be dates available in the workbook.")
+
+    requested_dates = body.get("selected_dates")
+    if requested_dates is None:
+        selected_dates = sorted(
+            value for value in available if start_text <= value <= end_text
+        )
+    elif isinstance(requested_dates, list):
+        selected_dates = sorted({
+            _clean_text(value, 10)
+            for value in requested_dates
+            if _clean_text(value, 10)
+        })
+    else:
+        raise ValueError("Selected workbook dates must be a list.")
+    if not selected_dates:
+        raise ValueError("Choose at least one workbook date to compile.")
+    unavailable = [value for value in selected_dates if value not in available]
+    outside = [value for value in selected_dates if not (start_text <= value <= end_text)]
+    if unavailable:
+        raise ValueError(
+            f"Selected date(s) are not available in the workbook: {', '.join(unavailable)}"
+        )
+    if outside:
+        raise ValueError(
+            f"Selected date(s) are outside the reporting period: {', '.join(outside)}"
+        )
+    return {
+        "kind": kind,
+        "mode": mode,
+        "start": start,
+        "end": end,
+        "project_no": project_no,
+        "project_title": project_title,
+        "analysis": analysis,
+        "selected_dates": selected_dates,
+    }
+
+
+def _build_legacy_excel_source_draft(
+    workbook_path: Path,
+    context: Mapping[str, Any],
+    *,
+    data_dir: str,
+    directory: Path,
+    config_provider: Callable[[], dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    kind = context["kind"]
+    selected_dates = context["selected_dates"]
+    photo_limits = periodic_photo_limits(kind)
+    records, parser_warnings = extract_legacy_daily_records(
+        workbook_path,
+        analysis=context["analysis"],
+        selected_dates=selected_dates,
+        username=session["username"],
+        project_no=context["project_no"],
+        project_title=context["project_title"],
+        asset_directory=directory / "assets",
+        photo_limits=photo_limits,
+    )
+    warnings: list[Any] = [
+        "Uploaded Excel data was normalized from date-named Daily Report worksheets. "
+        "Review date warnings, manpower, man-hours, progress, and photo captions before issue."
+    ]
+    warnings.extend(parser_warnings)
+    draft = _build_uploaded_pdf_draft(
+        records,
+        warnings,
+        project_no=context["project_no"],
+        project_title=context["project_title"],
+        date_from=context["start"],
+        date_to=context["end"],
+        report_mode=context["mode"],
+        report_type=kind,
+        config=config_provider(),
+        source_method="uploaded_excel",
+        expected_dates=selected_dates,
+    )
+    pending_draft_id = uuid.uuid4().hex
+    draft_photo_dir = _draft_photo_dir(
+        data_dir,
+        session["username"],
+        pending_draft_id,
+    )
+    if draft_photo_dir is None:
+        raise ValueError("Invalid report draft photo directory")
+    copy_photo_assets(
+        _all_photo_references(records),
+        directory / "assets",
+        draft_photo_dir,
+    )
+    draft_id = _save_draft(
+        data_dir,
+        session["username"],
+        draft,
+        draft_id=pending_draft_id,
+    )
+    draft["draft_id"] = draft_id
+    return draft_id, draft
+
+
+def _compile_legacy_excel_source_request(
+    app,
+    *,
+    data_dir: str,
+    config_provider: Callable[[], dict[str, Any]],
+    upload_session_id: str,
+):
+    loaded = _load_upload_session(data_dir, session["username"], upload_session_id)
+    if loaded is None:
+        return jsonify({"error": "Excel source session was not found or has expired."}), 404
+    directory, manifest = loaded
+    if manifest.get("schema_version") != "legacy-excel-source-session/1":
+        return jsonify({"error": "This session is not an Excel source session."}), 400
+
+    operation_lock = _acquire_upload_operation_lock(directory)
+    if operation_lock is None:
+        return jsonify({"error": "This Excel source is already being compiled. Please wait."}), 409
+    try:
+        context = _legacy_excel_compile_context(
+            request.get_json(silent=True),
+            manifest,
+        )
+        workbook_path = directory / "workbook.xlsx"
+        if not workbook_path.is_file():
+            return jsonify({"error": "The uploaded Excel source is no longer available."}), 410
+        draft_id, draft = _build_legacy_excel_source_draft(
+            workbook_path,
+            context,
+            data_dir=data_dir,
+            directory=directory,
+            config_provider=config_provider,
+        )
+        return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+    except (LegacyExcelError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        app.logger.exception("Legacy Excel source compilation failed")
+        return jsonify({
+            "error": "Excel source compilation failed. Retry or check the server logs."
+        }), 500
+    finally:
+        try:
+            operation_lock.rmdir()
+        except OSError:
+            pass
+
+
+def _planned_upload_files(raw_files: list[Any]) -> tuple[dict[str, dict[str, Any]], Any]:
+    planned_files: dict[str, dict[str, Any]] = {}
+    for raw in raw_files:
+        if not isinstance(raw, dict):
+            raise ValueError("Invalid PDF upload list.")
+        file_id = str(raw.get("file_id") or "")
+        if not _UPLOAD_FILE_ID_RE.fullmatch(file_id) or file_id in planned_files:
+            raise ValueError("Each PDF must have a unique upload ID.")
+        filename = _clean_text(raw.get("filename"), 255) or "report.pdf"
+        try:
+            size_bytes = int(raw.get("size_bytes") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{filename}: invalid file size.") from exc
+        if size_bytes < 0:
+            raise ValueError(f"{filename}: invalid file size.")
+        if size_bytes > DEFAULT_LIMITS.max_bytes:
+            return {}, (jsonify({
+                "error": (
+                    f"{filename} is larger than the {DEFAULT_LIMITS.max_bytes // (1024 * 1024)} MB "
+                    "per-file limit."
+                )
+            }), 413)
+        planned_files[file_id] = {
+            "file_id": file_id,
+            "filename": filename,
+            "size_bytes": size_bytes,
+        }
+    return planned_files, None
+
+
+def _existing_upload_session_response(
+    directory: Path,
+    *,
+    data_dir: str,
+    username: str,
+    upload_session_id: str,
+    kind: str,
+    mode: str,
+    project_no: str,
+    project_title: str,
+    start: datetime,
+    end: datetime,
+    planned_files: dict[str, dict[str, Any]],
+):
+    if not directory.exists():
+        return None
+    loaded = _load_upload_session(data_dir, username, upload_session_id)
+    if loaded is None:
+        return jsonify({
+            "error": "This upload session is still being prepared. Retry shortly."
+        }), 409
+    _, existing = loaded
+    comparable_keys = (
+        "report_type", "report_mode", "project_no", "project_title", "date_from", "date_to", "files"
+    )
+    candidate = {
+        "report_type": kind,
+        "report_mode": mode,
+        "project_no": project_no,
+        "project_title": project_title,
+        "date_from": start.strftime("%Y-%m-%d"),
+        "date_to": end.strftime("%Y-%m-%d"),
+        "files": planned_files,
+    }
+    if all(existing.get(key) == candidate.get(key) for key in comparable_keys):
+        return jsonify({
+            "ok": True,
+            "cached": True,
+            "upload_session_id": upload_session_id,
+            "file_count": len(planned_files),
+            "max_file_bytes": DEFAULT_LIMITS.max_bytes,
+        })
+    return jsonify({
+        "error": "Upload session ID is already used for a different report setup."
+    }), 409
+
+
+def _active_upload_session_count(root: Path) -> int:
+    return sum(
+        1
+        for path in root.iterdir()
+        if path.is_dir()
+        and _DRAFT_ID_RE.fullmatch(path.name)
+        and not (path / "result.json").is_file()
+    )
+
+
+def _create_upload_session(
+    directory: Path,
+    *,
+    username: str,
+    upload_session_id: str,
+    kind: str,
+    mode: str,
+    project_no: str,
+    project_title: str,
+    start: datetime,
+    end: datetime,
+    planned_files: dict[str, dict[str, Any]],
+):
+    directory.mkdir()
+    (directory / "items").mkdir()
+    manifest = {
+        "schema_version": "report-upload-session/1",
+        "upload_session_id": upload_session_id,
+        "owner": username,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "report_type": kind,
+        "report_mode": mode,
+        "project_no": project_no,
+        "project_title": project_title,
+        "date_from": start.strftime("%Y-%m-%d"),
+        "date_to": end.strftime("%Y-%m-%d"),
+        "files": planned_files,
+    }
+    _atomic_json(directory / "session.json", manifest)
+    return jsonify({
+        "ok": True,
+        "cached": False,
+        "upload_session_id": upload_session_id,
+        "file_count": len(planned_files),
+        "max_file_bytes": DEFAULT_LIMITS.max_bytes,
+    })
+
+
+def _start_periodic_upload_session_request(app, *, data_dir: str):
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid upload session request."}), 400
+    try:
+        kind = _report_type(body.get("report_type") or "monthly")
+        mode = _normalise_report_mode(kind, body.get("report_mode"))
+        start, end = _parse_period(body.get("date_from"), body.get("date_to"), kind, mode)
+        project_no = _clean_text(body.get("project_no"), 250)
+        project_title = _clean_text(body.get("project_title"), 500)
+        if not project_no:
+            raise ValueError("Select a project first.")
+
+        raw_files = body.get("files")
+        if not isinstance(raw_files, list) or not raw_files:
+            raise ValueError("Choose at least one Daily Report PDF.")
+        if len(raw_files) > _MAX_UPLOAD_FILES:
+            return jsonify({
+                "error": f"A maximum of {_MAX_UPLOAD_FILES} PDF files can be compiled at once."
+            }), 413
+        planned_files, file_error = _planned_upload_files(raw_files)
+        if file_error is not None:
+            return file_error
+
+        username = session["username"]
+        _cleanup_upload_sessions(data_dir, username)
+        root = _upload_sessions_dir(data_dir, username)
+        requested_session_id = str(body.get("upload_session_id") or "")
+        if requested_session_id and not _DRAFT_ID_RE.fullmatch(requested_session_id):
+            raise ValueError("Invalid upload session ID.")
+        upload_session_id = requested_session_id or uuid.uuid4().hex
+        directory = root / upload_session_id
+        existing_response = _existing_upload_session_response(
+            directory,
+            data_dir=data_dir,
+            username=username,
+            upload_session_id=upload_session_id,
+            kind=kind,
+            mode=mode,
+            project_no=project_no,
+            project_title=project_title,
+            start=start,
+            end=end,
+            planned_files=planned_files,
+        )
+        if existing_response is not None:
+            return existing_response
+
+        if _active_upload_session_count(root) >= _MAX_ACTIVE_UPLOAD_SESSIONS:
+            return jsonify({
+                "error": "Too many unfinished upload sessions. Finish or retry the current report first."
+            }), 429
+        return _create_upload_session(
+            directory,
+            username=username,
+            upload_session_id=upload_session_id,
+            kind=kind,
+            mode=mode,
+            project_no=project_no,
+            project_title=project_title,
+            start=start,
+            end=end,
+            planned_files=planned_files,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        app.logger.exception("Could not start PDF upload session")
+        return jsonify({
+            "error": "Could not start PDF upload session. Retry or check the server logs."
+        }), 500
+
+
+def _extract_staged_pdf_upload(
+    upload: Any,
+    *,
+    filename: str,
+    source_size: int,
+    manifest: Mapping[str, Any],
+    directory: Path,
+    config_provider: Callable[[], dict[str, Any]],
+) -> tuple[dict[str, Any] | None, list[str], int]:
+    warnings: list[str] = []
+    try:
+        config = config_provider()
+        known_projects = config.get("projects", []) if isinstance(config, dict) else []
+        imported = import_daily_report_pdf(
+            upload.stream,
+            filename=filename,
+            known_projects=known_projects,
+        )
+        record, warnings = _record_from_uploaded_pdf(
+            imported,
+            filename=filename,
+            username=session["username"],
+            project_no=str(manifest.get("project_no") or ""),
+            project_title=str(manifest.get("project_title") or ""),
+            date_from=str(manifest.get("date_from") or ""),
+            date_to=str(manifest.get("date_to") or ""),
+            report_type=str(manifest.get("report_type") or "monthly"),
+        )
+        if record is not None:
+            photo_limits = periodic_photo_limits(manifest.get("report_type"))
+            candidates, photo_warnings = extract_pdf_photo_candidates(
+                upload.stream,
+                filename=filename,
+                areas=_record_photo_areas(record),
+                limits=photo_limits,
+            )
+            report_date = _record_date(record)
+            for candidate in candidates:
+                candidate.setdefault("source_date", report_date)
+                candidate.setdefault("source_type", "legacy_pdf_extraction")
+            photo_references = store_photo_candidates(
+                candidates,
+                directory / "assets",
+                source_report_id=str(record.get("report_id") or ""),
+                maximum=photo_limits.max_images_per_pdf,
+                max_total_bytes=photo_limits.max_total_asset_bytes_per_draft,
+            )
+            record["_photo_candidates"] = photo_references
+            if len(photo_references) < len(candidates):
+                warnings.append(
+                    f"{filename}: some photos were excluded by the report draft asset limit."
+                )
+            warnings.extend(photo_warnings)
+        source = imported.get("source") if isinstance(imported.get("source"), dict) else {}
+        source_size = int(source.get("size_bytes") or source_size)
+        return record, warnings, source_size
+    except PDFImportError as exc:
+        warnings.append(f"{filename}: {exc}; file excluded.")
+        return None, warnings, source_size
+
+
+def _store_staged_upload_item(
+    *,
+    directory: Path,
+    file_id: str,
+    filename: str,
+    record: dict[str, Any] | None,
+    source_size: int,
+    warnings: list[str],
+) -> dict[str, Any]:
+    item = {
+        "file_id": file_id,
+        "filename": filename,
+        "status": "uploaded" if record is not None else "skipped",
+        "included": record is not None,
+        "report_date": _record_date(record) if record is not None else "",
+        "size_bytes": source_size,
+        "warnings": warnings,
+        "record": record,
+    }
+    _atomic_json(directory / "items" / f"{file_id}.json", item)
+    try:
+        os.utime(directory, None)
+    except OSError:
+        pass
+    return item
+
+
+def _upload_periodic_session_file_request(
+    app,
+    *,
+    data_dir: str,
+    config_provider: Callable[[], dict[str, Any]],
+    upload_session_id: str,
+):
+    if request.content_length is not None and request.content_length > _MAX_STAGED_REQUEST_BYTES:
+        return jsonify({
+            "error": f"Upload exceeds the {DEFAULT_LIMITS.max_bytes // (1024 * 1024)} MB per-file limit."
+        }), 413
+    loaded = _load_upload_session(data_dir, session["username"], upload_session_id)
+    if loaded is None:
+        return jsonify({"error": "Upload session not found or expired."}), 404
+    directory, manifest = loaded
+    if (directory / "result.json").is_file():
+        return jsonify({"error": "This upload session has already been compiled."}), 409
+
+    # The UI sends the stable ID as a header so a retry can be rejected as
+    # busy before Werkzeug parses another large multipart body.
+    file_id = str(request.headers.get("X-Upload-File-ID") or "")
+    if not file_id:
+        file_id = str(request.form.get("file_id") or "")
+    planned = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
+    if not _UPLOAD_FILE_ID_RE.fullmatch(file_id) or file_id not in planned:
+        return jsonify({"error": "Unknown PDF upload ID."}), 400
+
+    existing = _load_upload_item(directory, file_id)
+    if existing is not None:
+        return jsonify({"ok": True, "cached": True, "item": _public_upload_item(existing)})
+
+    operation_lock = _acquire_upload_operation_lock(directory)
+    if operation_lock is None:
+        return jsonify({
+            "error": "This upload session is busy processing another request. Retry this file shortly."
+        }), 409
+    try:
+        loaded = _load_upload_session(data_dir, session["username"], upload_session_id)
+        if loaded is None:
+            return jsonify({"error": "Upload session not found or expired."}), 404
+        directory, manifest = loaded
+        if (directory / "result.json").is_file():
+            return jsonify({"error": "This upload session has already been compiled."}), 409
+        existing = _load_upload_item(directory, file_id)
+        if existing is not None:
+            return jsonify({"ok": True, "cached": True, "item": _public_upload_item(existing)})
+
+        uploads = request.files.getlist("file")
+        if len(uploads) != 1:
+            return jsonify({"error": "Upload exactly one Daily Report PDF per request."}), 400
+        upload = uploads[0]
+        planned_file = planned[file_id] if isinstance(planned[file_id], dict) else {}
+        filename = _clean_text(upload.filename, 255) or str(planned_file.get("filename") or "report.pdf")
+        warnings: list[str] = []
+        record: dict[str, Any] | None = None
+        source_size = int(planned_file.get("size_bytes") or 0)
+
+        if not filename.lower().endswith(".pdf"):
+            warnings.append(f"{filename}: only PDF files can be uploaded; file excluded.")
+        else:
+            try:
+                record, warnings, source_size = _extract_staged_pdf_upload(
+                    upload,
+                    filename=filename,
+                    source_size=source_size,
+                    manifest=manifest,
+                    directory=directory,
+                    config_provider=config_provider,
+                )
+            except Exception:
+                app.logger.exception("Staged PDF import failed for %s", filename)
+                return jsonify({
+                    "error": f"{filename}: PDF processing failed. Retry this file or check the server logs."
+                }), 500
+
+        item = _store_staged_upload_item(
+            directory=directory,
+            file_id=file_id,
+            filename=filename,
+            record=record,
+            source_size=source_size,
+            warnings=warnings,
+        )
+        return jsonify({"ok": True, "cached": False, "item": _public_upload_item(item)})
+    finally:
+        try:
+            operation_lock.rmdir()
+        except OSError:
+            pass
+
+
+def _cached_upload_session_result(
+    *,
+    data_dir: str,
+    directory: Path,
+    result_path: Path,
+):
+    if not result_path.is_file():
+        return None
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        result = {}
+    draft_id = str(result.get("draft_id") or "") if isinstance(result, dict) else ""
+    draft = _load_draft(data_dir, session["username"], draft_id)
+    if draft is None:
+        return jsonify({"error": "The compiled upload draft is no longer available."}), 410
+    return jsonify({"ok": True, "cached": True, "draft_id": draft_id, "draft": draft})
+
+
+def _staged_upload_items(
+    directory: Path,
+    manifest: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    planned = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
+    items: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for file_id in planned:
+        item = _load_upload_item(directory, file_id)
+        if item is None:
+            missing.append(file_id)
+        else:
+            items.append(item)
+    return items, missing
+
+
+def _staged_upload_records(
+    items: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[Any]]:
+    records: list[dict[str, Any]] = []
+    seen_hashes: set[str] = set()
+    warnings: list[Any] = [
+        "Uploaded PDF data was normalized from a Daily Report template. "
+        "Project identity, manpower, man-hours, warnings, and editable summaries must be validated before issue."
+    ]
+    for item in items:
+        for warning in item.get("warnings", []):
+            if isinstance(warning, Mapping):
+                warnings.append(dict(warning))
+            else:
+                warning_text = str(warning).strip()
+                if warning_text:
+                    warnings.append(warning_text)
+        record = item.get("record") if isinstance(item.get("record"), dict) else None
+        if record is None:
+            continue
+        source = record.get("source") if isinstance(record.get("source"), dict) else {}
+        digest = str(source.get("sha256") or "")
+        if digest and digest in seen_hashes:
+            warnings.append(f"{item.get('filename', 'report.pdf')}: duplicate PDF skipped.")
+            continue
+        if digest:
+            seen_hashes.add(digest)
+        records.append(record)
+    return records, warnings
+
+
+def _save_compiled_upload_session(
+    records: list[dict[str, Any]],
+    warnings: list[Any],
+    *,
+    data_dir: str,
+    directory: Path,
+    result_path: Path,
+    upload_session_id: str,
+    kind: str,
+    mode: str,
+    start: datetime,
+    end: datetime,
+    project_no: str,
+    project_title: str,
+    config_provider: Callable[[], dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    records, start, end = _apply_uploaded_pdf_period(
+        records,
+        warnings,
+        report_type=kind,
+        date_from=start,
+        date_to=end,
+    )
+    draft = _build_uploaded_pdf_draft(
+        records,
+        warnings,
+        project_no=project_no,
+        project_title=project_title,
+        date_from=start,
+        date_to=end,
+        report_mode=mode,
+        report_type=kind,
+        config=config_provider(),
+    )
+    # Reusing the random upload-session ID closes the crash window
+    # between saving the draft and writing the small result tombstone.
+    draft_photo_dir = _draft_photo_dir(
+        data_dir,
+        session["username"],
+        upload_session_id,
+    )
+    if draft_photo_dir is None:
+        raise ValueError("Invalid report draft photo directory")
+    copy_photo_assets(
+        _all_photo_references(records),
+        directory / "assets",
+        draft_photo_dir,
+    )
+    draft_id = _save_draft(
+        data_dir,
+        session["username"],
+        draft,
+        draft_id=upload_session_id,
+    )
+    draft["draft_id"] = draft_id
+    _atomic_json(result_path, {
+        "status": "compiled",
+        "draft_id": draft_id,
+        "compiled_at": datetime.now().isoformat(timespec="seconds"),
+    })
+    try:
+        shutil.rmtree(directory / "items")
+    except OSError:
+        pass
+    return draft_id, draft
+
+
+def _compile_periodic_upload_session_request(
+    app,
+    *,
+    data_dir: str,
+    config_provider: Callable[[], dict[str, Any]],
+    upload_session_id: str,
+):
+    loaded = _load_upload_session(data_dir, session["username"], upload_session_id)
+    if loaded is None:
+        return jsonify({"error": "Upload session not found or expired."}), 404
+    directory, manifest = loaded
+
+    result_path = directory / "result.json"
+    cached = _cached_upload_session_result(
+        data_dir=data_dir,
+        directory=directory,
+        result_path=result_path,
+    )
+    if cached is not None:
+        return cached
+
+    operation_lock = _acquire_upload_operation_lock(directory)
+    if operation_lock is None:
+        return jsonify({"error": "This upload session is already being compiled. Please wait."}), 409
+
+    try:
+        cached = _cached_upload_session_result(
+            data_dir=data_dir,
+            directory=directory,
+            result_path=result_path,
+        )
+        if cached is not None:
+            return cached
+
+        items, missing = _staged_upload_items(directory, manifest)
+        if missing:
+            return jsonify({
+                "error": f"{len(missing)} PDF file(s) are still waiting to upload or retry.",
+                "pending_file_ids": missing,
+            }), 409
+
+        kind = _report_type(manifest.get("report_type") or "monthly")
+        mode = _normalise_report_mode(kind, manifest.get("report_mode"))
+        start, end = _parse_period(
+            manifest.get("date_from"),
+            manifest.get("date_to"),
+            kind,
+            mode,
+        )
+        project_no = _clean_text(manifest.get("project_no"), 250)
+        project_title = _clean_text(manifest.get("project_title"), 500)
+        records, warnings = _staged_upload_records(items)
+
+        if not records:
+            return jsonify({
+                "error": _empty_uploaded_pdf_error(kind),
+                "warnings": warnings,
+            }), 400
+
+        draft_id, draft = _save_compiled_upload_session(
+            records,
+            warnings,
+            data_dir=data_dir,
+            directory=directory,
+            result_path=result_path,
+            upload_session_id=upload_session_id,
+            kind=kind,
+            mode=mode,
+            start=start,
+            end=end,
+            project_no=project_no,
+            project_title=project_title,
+            config_provider=config_provider,
+        )
+        return jsonify({"ok": True, "cached": False, "draft_id": draft_id, "draft": draft})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        kind = manifest.get("report_type") or "monthly"
+        app.logger.exception("Staged uploaded PDF %s compilation failed", kind)
+        return jsonify({
+            "error": f"{_report_name(kind)} PDF compilation failed. Retry or check the server logs."
+        }), 500
+    finally:
+        try:
+            operation_lock.rmdir()
+        except OSError:
+            pass
+
+
+def _delete_periodic_upload_session_request(*, data_dir: str, upload_session_id: str):
+    directory = _upload_session_dir(data_dir, session["username"], upload_session_id)
+    if directory is None or not directory.is_dir():
+        return jsonify({"error": "Upload session not found or expired."}), 404
+    operation_lock = _acquire_upload_operation_lock(directory)
+    if operation_lock is None:
+        return jsonify({"error": "Upload session is currently busy."}), 409
+    try:
+        _remove_upload_session(data_dir, session["username"], upload_session_id)
+        return jsonify({"ok": True})
+    finally:
+        try:
+            operation_lock.rmdir()
+        except OSError:
+            pass
+
+
+def _direct_uploaded_pdf_records(
+    uploads: list[Any],
+    *,
+    data_dir: str,
+    pending_draft_id: str,
+    username: str,
+    project_no: str,
+    project_title: str,
+    date_from: datetime,
+    date_to: datetime,
+    kind: str,
+    known_projects: Any,
+) -> tuple[list[dict[str, Any]], list[Any]]:
+    records: list[dict[str, Any]] = []
+    warnings: list[Any] = [
+        "Uploaded PDF data was normalized from a Daily Report template. "
+        "Project identity, manpower, man-hours, warnings, and editable summaries must be validated before issue."
+    ]
+    for upload in uploads:
+        filename = str(upload.filename or "report.pdf")
+        if not filename.lower().endswith(".pdf"):
+            warnings.append(f"Skipped non-PDF file: {filename}")
+            continue
+        try:
+            imported = import_daily_report_pdf(
+                upload.stream,
+                filename=filename,
+                known_projects=known_projects,
+            )
+        except PDFImportError as exc:
+            warnings.append(f"{filename}: {exc}")
+            continue
+        record, imported_warnings = _record_from_uploaded_pdf(
+            imported,
+            filename=filename,
+            username=username,
+            project_no=project_no,
+            project_title=project_title,
+            date_from=date_from.strftime("%Y-%m-%d"),
+            date_to=date_to.strftime("%Y-%m-%d"),
+            report_type=kind,
+        )
+        warnings.extend(imported_warnings)
+        if record is None:
+            continue
+        photo_limits = periodic_photo_limits(kind)
+        candidates, photo_warnings = extract_pdf_photo_candidates(
+            upload.stream,
+            filename=filename,
+            areas=_record_photo_areas(record),
+            limits=photo_limits,
+        )
+        report_date = _record_date(record)
+        for candidate in candidates:
+            candidate.setdefault("source_date", report_date)
+            candidate.setdefault("source_type", "legacy_pdf_extraction")
+        pending_assets = _draft_photo_dir(
+            data_dir,
+            username,
+            pending_draft_id,
+        )
+        if pending_assets is None:
+            raise ValueError("Invalid report draft photo directory")
+        photo_references = store_photo_candidates(
+            candidates,
+            pending_assets,
+            source_report_id=str(record.get("report_id") or ""),
+            maximum=photo_limits.max_images_per_pdf,
+            max_total_bytes=photo_limits.max_total_asset_bytes_per_draft,
+        )
+        record["_photo_candidates"] = photo_references
+        if len(photo_references) < len(candidates):
+            warnings.append(
+                f"{filename}: some photos were excluded by the report draft asset limit."
+            )
+        warnings.extend(photo_warnings)
+        records.append(record)
+    return records, warnings
+
+
+def _save_direct_uploaded_pdf_draft(
+    records: list[dict[str, Any]],
+    warnings: list[Any],
+    *,
+    data_dir: str,
+    pending_draft_id: str,
+    username: str,
+    project_no: str,
+    project_title: str,
+    start: datetime,
+    end: datetime,
+    mode: str,
+    kind: str,
+    config: Mapping[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    records, start, end = _apply_uploaded_pdf_period(
+        records,
+        warnings,
+        report_type=kind,
+        date_from=start,
+        date_to=end,
+    )
+    draft = _build_uploaded_pdf_draft(
+        records,
+        warnings,
+        project_no=project_no,
+        project_title=project_title,
+        date_from=start,
+        date_to=end,
+        report_mode=mode,
+        report_type=kind,
+        config=config,
+    )
+    draft_id = _save_draft(
+        data_dir,
+        username,
+        draft,
+        draft_id=pending_draft_id,
+    )
+    draft["draft_id"] = draft_id
+    return draft_id, draft
+
+
+def _compile_uploaded_pdf_request(
+    app,
+    *,
+    data_dir: str,
+    config_provider: Callable[[], dict[str, Any]],
+):
+    uploads = request.files.getlist("files")
+    if not uploads:
+        return jsonify({"error": "Choose at least one Daily Report PDF."}), 400
+    if len(uploads) > _MAX_UPLOAD_FILES:
+        return jsonify({"error": f"A maximum of {_MAX_UPLOAD_FILES} PDF files can be compiled at once."}), 413
+    kind = "monthly"
+    pending_draft_id = uuid.uuid4().hex
+    draft_saved = False
+    try:
+        kind = _report_type(request.form.get("report_type") or "monthly")
+        mode = _normalise_report_mode(kind, request.form.get("report_mode"))
+        start, end = _parse_period(
+            request.form.get("date_from"),
+            request.form.get("date_to"),
+            kind,
+            mode,
+        )
+        project_no = _clean_text(request.form.get("project_no"), 250)
+        project_title = _clean_text(request.form.get("project_title"), 500)
+        if not project_no:
+            raise ValueError("Select a project first.")
+        config = config_provider()
+        known_projects = config.get("projects", []) if isinstance(config, dict) else []
+        records, warnings = _direct_uploaded_pdf_records(
+            uploads,
+            data_dir=data_dir,
+            pending_draft_id=pending_draft_id,
+            username=session["username"],
+            project_no=project_no,
+            project_title=project_title,
+            date_from=start,
+            date_to=end,
+            kind=kind,
+            known_projects=known_projects,
+        )
+
+        if not records:
+            _remove_draft_assets(data_dir, session["username"], pending_draft_id)
+            return jsonify({
+                "error": _empty_uploaded_pdf_error(kind),
+                "warnings": warnings,
+            }), 400
+        draft_id, draft = _save_direct_uploaded_pdf_draft(
+            records,
+            warnings,
+            data_dir=data_dir,
+            pending_draft_id=pending_draft_id,
+            username=session["username"],
+            project_no=project_no,
+            project_title=project_title,
+            start=start,
+            end=end,
+            mode=mode,
+            kind=kind,
+            config=config,
+        )
+        draft_saved = True
+        return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+    except ValueError as exc:
+        if not draft_saved:
+            _remove_draft_assets(data_dir, session["username"], pending_draft_id)
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        if not draft_saved:
+            _remove_draft_assets(data_dir, session["username"], pending_draft_id)
+        app.logger.exception("Uploaded PDF %s compilation failed", kind)
+        prefix = "Weekly PDF" if kind == "weekly" else "PDF"
+        return jsonify({"error": f"{prefix} compilation failed: {exc}"}), 500
+
+
+def _validation_source_selection(
+    raw_records: list[dict[str, Any]],
+    validation: Mapping[str, Any],
+    review: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    project_records, project_excluded_records = resolve_project_records(
+        raw_records,
+        validation,
+        project_no=review["project_no"],
+        project_title=review["project_title"],
+        resolutions=review["project_resolutions"],
+    )
+    included_records, duplicate_excluded_records = resolve_duplicate_records(
+        project_records,
+        validation,
+        resolutions=review["duplicate_resolutions"],
+    )
+    return included_records, project_excluded_records, duplicate_excluded_records
+
+
+def _validation_expected_dates(
+    draft: Mapping[str, Any],
+    *,
+    source_method: str,
+    start: datetime,
+    end: datetime,
+) -> list[str]:
+    expected_dates = _expected_dates(start, end)
+    # Excel users may deliberately compile only some of the worksheets
+    # inside a period. Preserve that explicit selection when Source Data
+    # Validation re-aggregates the draft.
+    if source_method != "uploaded_excel":
+        return expected_dates
+    coverage = draft.get("coverage") if isinstance(draft.get("coverage"), dict) else {}
+    selected_expected: list[str] = []
+    seen_expected: set[str] = set()
+    for value in coverage.get("expected_dates", []):
+        text = str(value or "").strip()
+        try:
+            selected_day = datetime.strptime(text, "%Y-%m-%d")
+        except ValueError:
+            continue
+        if start <= selected_day <= end and text not in seen_expected:
+            seen_expected.add(text)
+            selected_expected.append(text)
+    return sorted(selected_expected) if selected_expected else expected_dates
+
+
+def _aggregate_validated_source_records(
+    included_records: list[dict[str, Any]],
+    *,
+    start: datetime,
+    end: datetime,
+    project_no: str,
+    project_title: str,
+    expected_dates: list[str],
+    config_provider: Callable[[], dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    aggregated = aggregate_monthly_records(
+        included_records,
+        date_from=start.strftime("%Y-%m-%d"),
+        date_to=end.strftime("%Y-%m-%d"),
+        project_no=project_no,
+        expected_dates=expected_dates,
+        work_hours_policy=_project_work_hours_policy(
+            config_provider(), project_no=project_no, project_title=project_title
+        ),
+    )
+    selected_ids = {
+        str(item.get("report_id") or "")
+        for item in aggregated.get("source_records", [])
+        if isinstance(item, dict)
+    }
+    selected_records = [
+        record for record in included_records
+        if not selected_ids or str(record.get("report_id") or "") in selected_ids
+    ]
+    return aggregated, selected_records
+
+
+def _validation_photo_warnings(
+    *,
+    source_method: str,
+    kind: str,
+    selected_records: list[dict[str, Any]],
+    data_dir: str,
+    username: str,
+    draft_id: str,
+) -> tuple[Any, list[str]]:
+    photo_limits = periodic_photo_limits(kind)
+    if source_method != "stored_json":
+        return photo_limits, []
+    draft_photo_dir = _draft_photo_dir(data_dir, username, draft_id)
+    if draft_photo_dir is None:
+        raise ValueError("Invalid report draft photo directory")
+    # A changed project/revision choice gets a fresh, bounded
+    # hydration pass. Canonical files remain read-only.
+    photo_limits = periodic_photo_limits(kind)
+    warnings = attach_canonical_photo_candidates(
+        selected_records,
+        data_dir,
+        draft_photo_dir,
+        limits=photo_limits,
+    )
+    warnings.extend(_bound_record_photo_candidates(selected_records, limits=photo_limits))
+    return photo_limits, _compact_review_warnings(warnings)
+
+
+def _validated_source_warnings(
+    draft: Mapping[str, Any],
+    *,
+    source_method: str,
+    project_excluded_records: list[dict[str, Any]],
+    duplicate_excluded_records: list[dict[str, Any]],
+    photo_warnings: list[str],
+) -> list[str]:
+    warnings = [
+        str(value).strip()
+        for value in draft.get("warnings", [])
+        if str(value).strip()
+        and not (
+            source_method == "stored_json"
+            and _is_generated_stored_photo_warning(value)
+        )
+        and not re.fullmatch(
+            r"(?:\d+ Daily Report source\(s\) were kept separate and excluded from this report"
+            r"|\d+ duplicate Daily Report source\(s\) were not selected for this report)\.",
+            str(value).strip(),
+        )
+    ]
+    if project_excluded_records:
+        warnings.append(
+            f"{len(project_excluded_records)} Daily Report source(s) were kept separate and excluded from this report."
+        )
+    if duplicate_excluded_records:
+        warnings.append(
+            f"{len(duplicate_excluded_records)} duplicate Daily Report source(s) were not selected for this report."
+        )
+    warnings.extend(photo_warnings)
+    return warnings
+
+
+def _applied_source_validation(
+    validation: Mapping[str, Any],
+    review: Mapping[str, Any],
+    *,
+    source_method: str,
+    photo_warnings: list[str],
+    username: str,
+    selected_records: list[dict[str, Any]],
+    excluded_records: list[dict[str, Any]],
+    project_excluded_records: list[dict[str, Any]],
+    duplicate_excluded_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    decisions = {
+        str(row.get("group_key") or ""): str(row.get("decision") or "")
+        for row in review["project_resolutions"]
+        if isinstance(row, dict)
+    }
+    applied_validation = copy.deepcopy(validation)
+    if source_method == "stored_json":
+        retained_issues = []
+        for issue in applied_validation.get("issues", []):
+            if not isinstance(issue, dict):
+                continue
+            if not _is_generated_stored_photo_warning(issue.get("message")):
+                retained_issues.append(issue)
+        retained_issues.extend(
+            {"severity": "warning", "message": message}
+            for message in photo_warnings
+        )
+        applied_validation["issues"] = retained_issues
+    for group in applied_validation.get("project_groups", []):
+        if isinstance(group, dict):
+            group["decision"] = decisions.get(str(group.get("key") or ""), "")
+    duplicate_decisions = {
+        str(row.get("group_key") or ""): str(row.get("selected_record_id") or "")
+        for row in review["duplicate_resolutions"]
+        if isinstance(row, dict)
+    }
+    for group in applied_validation.get("duplicate_groups", []):
+        if isinstance(group, dict):
+            group["selected_record_id"] = duplicate_decisions.get(
+                str(group.get("key") or ""),
+                "",
+            )
+    applied_validation.update({
+        "applied": True,
+        "confirmed": True,
+        "confirmed_by": username,
+        "confirmed_at": datetime.now().isoformat(timespec="seconds"),
+        "selected_project_no": review["project_no"],
+        "selected_project_title": review["project_title"],
+        "notes": review["notes"],
+        "included_record_count": len(selected_records),
+        "excluded_record_count": len(excluded_records),
+        "project_excluded_record_count": len(project_excluded_records),
+        "duplicate_excluded_record_count": len(duplicate_excluded_records),
+    })
+    return applied_validation
+
+
+def _validate_periodic_report_sources_request(
+    app,
+    *,
+    data_dir: str,
+    config_provider: Callable[[], dict[str, Any]],
+    draft_id: str,
+):
+    username = session["username"]
+    draft = _load_draft(data_dir, username, draft_id)
+    if draft is None:
+        return jsonify({"error": "Report draft not found."}), 404
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid Source Data Validation."}), 400
+    try:
+        review = _source_validation_payload(body.get("source_validation"))
+        if not review["confirmed"]:
+            raise ValueError("Confirm Source Data Validation before applying it.")
+        validation = draft.get("source_validation")
+        if not isinstance(validation, dict):
+            raise ValueError("This draft has no source validation data. Compile it again.")
+        raw_records = draft.get("_source_records")
+        if not isinstance(raw_records, list):
+            raise ValueError("The source records are unavailable. Compile the report again.")
+
+        included_records, project_excluded_records, duplicate_excluded_records = (
+            _validation_source_selection(
+                raw_records,
+                validation,
+                review,
+            )
+        )
+        excluded_records = project_excluded_records + duplicate_excluded_records
+        kind = _draft_report_type(draft)
+        mode = _normalise_report_mode(kind, draft.get("report_mode"))
+        period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
+        start, end = _parse_period(period.get("start"), period.get("end"), kind, mode)
+        project_no = review["project_no"]
+        project_title = review["project_title"]
+        source_method = str(draft.get("source_method") or "stored_json")
+        expected_dates = _validation_expected_dates(
+            draft,
+            source_method=source_method,
+            start=start,
+            end=end,
+        )
+        aggregated, selected_records = _aggregate_validated_source_records(
+            included_records,
+            start=start,
+            end=end,
+            project_no=project_no,
+            project_title=project_title,
+            expected_dates=expected_dates,
+            config_provider=config_provider,
+        )
+        photo_limits, photo_warnings = _validation_photo_warnings(
+            source_method=source_method,
+            kind=kind,
+            selected_records=selected_records,
+            data_dir=data_dir,
+            username=username,
+            draft_id=draft_id,
+        )
+        warnings = _validated_source_warnings(
+            draft,
+            source_method=source_method,
+            project_excluded_records=project_excluded_records,
+            duplicate_excluded_records=duplicate_excluded_records,
+            photo_warnings=photo_warnings,
+        )
+        refreshed = _prepare_draft(
+            aggregated,
+            project_no=project_no,
+            project_title=project_title,
+            date_from=start.strftime("%Y-%m-%d"),
+            date_to=end.strftime("%Y-%m-%d"),
+            report_mode=mode,
+            source_method=source_method,
+            source_manifest=_source_manifest(
+                selected_records,
+                source_method,
+            ),
+            report_context=_latest_report_context(selected_records),
+            extra_warnings=warnings,
+            report_type=kind,
+        )
+        applied_validation = _applied_source_validation(
+            validation,
+            review,
+            source_method=source_method,
+            photo_warnings=photo_warnings,
+            username=username,
+            selected_records=selected_records,
+            excluded_records=excluded_records,
+            project_excluded_records=project_excluded_records,
+            duplicate_excluded_records=duplicate_excluded_records,
+        )
+        refreshed["source_validation"] = applied_validation
+        refreshed["_source_records"] = copy.deepcopy(raw_records)
+        refreshed["photo_documentation"] = _photo_references_for_records(
+            selected_records,
+            previous=draft.get("photo_documentation"),
+            limits=photo_limits,
+        )
+        refreshed["photo_coverage"] = _photo_coverage_metadata(
+            selected_records, refreshed["photo_documentation"]
+        )
+        refreshed["draft_id"] = draft_id
+        refreshed["owner"] = username
+        refreshed["created_at"] = draft.get(
+            "created_at", datetime.now().isoformat(timespec="seconds")
+        )
+        _update_draft(data_dir, username, refreshed)
+        if source_method == "stored_json":
+            _prune_draft_photo_assets(
+                data_dir,
+                username,
+                draft_id,
+                refreshed.get("photo_documentation"),
+            )
+        return jsonify({"ok": True, "draft_id": draft_id, "draft": refreshed})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        app.logger.exception("Source validation failed for report draft %s", draft_id)
+        return jsonify({"error": "Source validation failed. Retry or check the server logs."}), 500
+
+
+def _preview_periodic_timesheet_request(
+    app,
+    *,
+    data_dir: str,
+    activity_logger: Callable[[str, str, str], None] | None,
+    draft_id: str,
+):
+    username = session["username"]
+    draft = _load_draft(data_dir, username, draft_id)
+    if draft is None:
+        return jsonify({"error": "Report draft not found."}), 404
+    try:
+        _require_applied_source_validation(draft)
+        period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
+        preview = compile_timesheets(
+            _workbook_uploads(),
+            start_date=period.get("start"),
+            end_date=period.get("end"),
+            cutoff_date=request.form.get("cutoff_date") or None,
+        )
+        set_timesheet_preview(draft, preview, actor=username)
+        draft.pop("ai_summary", None)
+        _update_draft(data_dir, username, draft)
+        if activity_logger:
+            activity_logger(username, "periodic_timesheet_reviewed", f"draft={draft_id}")
+        return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+    except (TimesheetError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        app.logger.exception("Timesheet preview failed for draft %s", draft_id)
+        return jsonify({"error": "Timesheet could not be analyzed. Check the workbook format."}), 500
+
+
+def _decide_periodic_timesheet_request(*, data_dir: str, draft_id: str):
+    username = session["username"]
+    draft = _load_draft(data_dir, username, draft_id)
+    if draft is None:
+        return jsonify({"error": "Report draft not found."}), 404
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid timesheet decision."}), 400
+    try:
+        _require_applied_source_validation(draft)
+        decide_timesheet(
+            draft,
+            str(body.get("decision") or ""),
+            confirm_exceptions=bool(body.get("confirm_exceptions")),
+            actor=username,
+        )
+        _refresh_deterministic_summary(draft)
+        draft.pop("ai_summary", None)
+        _update_draft(data_dir, username, draft)
+        return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+def _preview_periodic_overtime_request(
+    app,
+    *,
+    data_dir: str,
+    activity_logger: Callable[[str, str, str], None] | None,
+    draft_id: str,
+):
+    username = session["username"]
+    draft = _load_draft(data_dir, username, draft_id)
+    if draft is None:
+        return jsonify({"error": "Report draft not found."}), 404
+    try:
+        _require_applied_source_validation(draft)
+        period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
+        preview = parse_overtime_workbooks(
+            _workbook_uploads(),
+            period_start=period.get("start"),
+            period_end=period.get("end"),
+        )
+        set_overtime_preview(draft, preview, actor=username)
+        draft.pop("ai_summary", None)
+        _update_draft(data_dir, username, draft)
+        if activity_logger:
+            activity_logger(username, "periodic_overtime_reviewed", f"draft={draft_id}")
+        return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        app.logger.exception("Overtime preview failed for draft %s", draft_id)
+        return jsonify({"error": "Overtime workbook could not be analyzed."}), 500
+
+
+def _decide_periodic_overtime_request(*, data_dir: str, draft_id: str):
+    username = session["username"]
+    draft = _load_draft(data_dir, username, draft_id)
+    if draft is None:
+        return jsonify({"error": "Report draft not found."}), 404
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid overtime decision."}), 400
+    try:
+        _require_applied_source_validation(draft)
+        decide_overtime(
+            draft,
+            str(body.get("decision") or ""),
+            resolutions=body.get("resolutions"),
+            record_resolutions=body.get("record_resolutions"),
+            confirm_exceptions=bool(body.get("confirm_exceptions")),
+            actor=username,
+        )
+        _refresh_deterministic_summary(draft)
+        draft.pop("ai_summary", None)
+        _update_draft(data_dir, username, draft)
+        return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+def _reset_periodic_workforce_request(*, data_dir: str, draft_id: str):
+    username = session["username"]
+    draft = _load_draft(data_dir, username, draft_id)
+    if draft is None:
+        return jsonify({"error": "Report draft not found."}), 404
+    reset_workforce(draft)
+    _refresh_deterministic_summary(draft)
+    draft.pop("ai_summary", None)
+    _update_draft(data_dir, username, draft)
+    return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+
+
+def _ai_concern_suggestions(raw: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    concerns: list[dict[str, Any]] = []
+    evidence: list[dict[str, Any]] = []
+    rows = raw.get("concern_actions") if isinstance(raw.get("concern_actions"), list) else []
+    for row in rows[:75]:
+        if not isinstance(row, dict):
+            continue
+        concern = _clean_text(row.get("concern"), 2_000)
+        action = _clean_text(row.get("corrective_action"), 2_000)
+        if concern or action:
+            references = _clean_ai_references(row)
+            concerns.append({
+                "concern": concern,
+                "corrective_action": action,
+                **references,
+            })
+            evidence.append(references)
+    return concerns, evidence
+
+
+def _ai_lookahead_suggestions(raw: Mapping[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+    lookahead: list[str] = []
+    evidence: list[dict[str, Any]] = []
+    rows = raw.get("lookahead") if isinstance(raw.get("lookahead"), list) else []
+    for row in rows[:75]:
+        text = _claim_text(row)
+        if text:
+            lookahead.append(text)
+            evidence.append(_clean_ai_references(row))
+    return lookahead, evidence
+
+
+def _ai_current_activity_suggestions(
+    raw: Mapping[str, Any],
+    grounded_draft: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    activities: list[dict[str, Any]] = []
+    evidence: list[dict[str, Any]] = []
+    rows = raw.get("current_activities") if isinstance(raw.get("current_activities"), list) else []
+    for row in rows[:75]:
+        if not isinstance(row, dict):
+            continue
+        text = _claim_text(row)
+        area = _clean_text(row.get("area"), 200)
+        workstream = _clean_text(row.get("workstream"), 200)
+        stable_id = _clean_text(row.get("stable_id"), 100)
+        if text:
+            references = _clean_ai_references(row)
+            activities.append({
+                "stable_id": stable_id,
+                "area": area,
+                "workstream": workstream,
+                "text": text,
+                **references,
+            })
+            evidence.append(references)
+
+    # Claude may polish wording, but deterministic Area + Workstream
+    # grouping remains authoritative and is restored before review.
+    activities = _align_ai_activity_rows(
+        activities, grounded_draft, preserve_unmatched_baseline=True
+    )
+    # Preserve deterministic source status even when Claude omits it.
+    activities = _enrich_activity_statuses(activities, grounded_draft)
+    return activities, evidence
+
+
+def _ai_summary_display(raw: Mapping[str, Any], grounded_draft: Mapping[str, Any]) -> dict[str, Any]:
+    concerns, concern_evidence = _ai_concern_suggestions(raw)
+    lookahead, lookahead_evidence = _ai_lookahead_suggestions(raw)
+    current_activities, current_activity_evidence = _ai_current_activity_suggestions(
+        raw,
+        grounded_draft,
+    )
+    claim_evidence = [
+        _clean_ai_references(row)
+        for row in (raw.get("claims", [])[:75] if isinstance(raw.get("claims"), list) else [])
+    ]
+    citation_evidence = {
+        key: _clean_ai_references(raw.get(key))
+        for key in (
+            "executive_summary",
+            "engineering_summary",
+            "procurement_summary",
+            "site_summary",
+        )
+    }
+    citation_evidence.update({
+        "current_activities": current_activity_evidence,
+        "concern_actions": concern_evidence,
+        "lookahead": lookahead_evidence,
+        "claims": claim_evidence,
+    })
+    current_engineering = (
+        grounded_draft.get("engineering")
+        if isinstance(grounded_draft.get("engineering"), dict)
+        else {}
+    )
+    current_procurement = (
+        grounded_draft.get("procurement")
+        if isinstance(grounded_draft.get("procurement"), dict)
+        else {}
+    )
+    current_site = (
+        grounded_draft.get("site")
+        if isinstance(grounded_draft.get("site"), dict)
+        else {}
+    )
+    return {
+        # A missing AI section must never make the review look worse
+        # than the deterministic draft that existed before AI.
+        "executive_summary": _executive_ai_candidate(
+            grounded_draft, raw.get("executive_summary")
+        ),
+        "engineering_summary": _usable_ai_text(raw.get("engineering_summary"))
+        or _clean_text(current_engineering.get("summary"), 4_000),
+        "procurement_summary": _usable_ai_text(raw.get("procurement_summary"))
+        or _clean_text(current_procurement.get("summary"), 4_000),
+        "site_summary": _usable_ai_text(raw.get("site_summary"))
+        or _clean_text(current_site.get("summary"), 4_000),
+        "current_activities": current_activities,
+        "concerns": concerns,
+        "lookahead": lookahead,
+        "citation_evidence": citation_evidence,
+        "missing_data": _clean_ai_missing_data(raw.get("missing_data")),
+    }
+
+
+def _generate_periodic_ai_summary_request(
+    app,
+    *,
+    data_dir: str,
+    activity_logger: Callable[[str, str, str], None] | None,
+    draft_id: str,
+):
+    if _ai_admin_only() and not bool(session.get("is_admin")):
+        return jsonify({"error": "Only an administrator may use the paid AI summary service."}), 403
+    username = session["username"]
+    draft = _load_draft(data_dir, username, draft_id)
+    if draft is None:
+        return jsonify({"error": "Report draft not found."}), 404
+    ai_lock: tuple[Path, str] | None = None
+    try:
+        _require_applied_source_validation(draft)
+        if has_pending_workforce_review(draft):
+            raise ValueError("Apply or keep every timesheet/overtime preview before generating AI suggestions.")
+        ai_lock = _acquire_ai_draft_lock(data_dir, username, draft_id)
+        if ai_lock is None:
+            return _ai_retry_response(
+                "AI summary generation is already running for this report draft.",
+                code="ai_generation_in_progress",
+                status=409,
+                retry_after=_AI_DRAFT_LOCK_RETRY_SECONDS,
+            )
+
+        # Reload after taking the cross-process lock. Another request may
+        # have updated validation or workforce decisions while this
+        # request was waiting to acquire it.
+        draft = _load_draft(data_dir, username, draft_id)
+        if draft is None:
+            return jsonify({"error": "Report draft not found."}), 404
+        _require_applied_source_validation(draft)
+        if has_pending_workforce_review(draft):
+            raise ValueError("Apply or keep every timesheet/overtime preview before generating AI suggestions.")
+        # Build the provider input from a refreshed deterministic snapshot,
+        # but do not mutate client-facing draft fields merely because the
+        # user requested an AI suggestion. Those fields change only after
+        # the reviewer explicitly accepts the suggestion.
+        grounded_draft = copy.deepcopy(draft)
+        _refresh_deterministic_summary(grounded_draft)
+
+        remaining = _ai_cooldown_remaining(draft)
+        if remaining:
+            return _ai_retry_response(
+                f"Wait {remaining} seconds before retrying AI for this report draft.",
+                code="ai_cooldown_active",
+                status=429,
+                retry_after=remaining,
+            )
+
+        # Persist the cooldown before the billable provider request. This
+        # prevents rapid retries after timeouts/provider failures and also
+        # closes the race between multiple Railway workers.
+        started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        draft["ai_request_control"] = {
+            "version": "periodic-ai-request-control/1",
+            "last_started_at": started_at,
+            "last_started_by": username,
+            "attempt_id": uuid.uuid4().hex,
+        }
+        _update_draft(data_dir, username, draft)
+        envelope = generate_ai_summary(grounded_draft)
+        raw = envelope.get("suggestion") if isinstance(envelope.get("suggestion"), dict) else {}
+        display = _ai_summary_display(raw, grounded_draft)
+        draft["ai_summary"] = {
+            "status": "suggested",
+            "requested_at": started_at,
+            "requested_by": username,
+            "suggestion": display,
+            "provider_envelope": envelope,
+        }
+        _update_draft(data_dir, username, draft)
+        if activity_logger:
+            activity_logger(username, "periodic_ai_suggestion_generated", f"draft={draft_id} model={envelope.get('model', '')}")
+        return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except AISummaryError as exc:
+        diagnostic = exc.to_dict()
+        app.logger.warning(
+            "AI summary failed code=%s status=%s retryable=%s type=%s request_id=%s detail=%s",
+            exc.code,
+            diagnostic.get("status_code", ""),
+            exc.retryable,
+            diagnostic.get("provider_error_type", ""),
+            diagnostic.get("provider_request_id", ""),
+            diagnostic.get("provider_detail", ""),
+        )
+        if exc.code == "rate_limited":
+            return _ai_retry_response(
+                str(exc),
+                code="rate_limited",
+                status=429,
+                retry_after=30,
+            )
+        status = 503 if exc.code in {"missing_api_key", "billing_required", "connection_error"} else 502
+        payload = dict(diagnostic)
+        payload["error"] = payload.pop("message", str(exc))
+        return jsonify(payload), status
+    except Exception:
+        app.logger.exception("AI summary failed for draft %s", draft_id)
+        return jsonify({"error": "AI summary failed unexpectedly. The report content is unchanged."}), 500
+    finally:
+        _release_ai_draft_lock(ai_lock)
+
+
+def _accepted_ai_narrative_meta(
+    state: Mapping[str, Any],
+    *,
+    username: str,
+) -> dict[str, Any]:
+    provider_envelope = (
+        state.get("provider_envelope")
+        if isinstance(state.get("provider_envelope"), dict)
+        else {}
+    )
+    return {
+        "source_type": "ai_narrative",
+        "accepted_by": username,
+        "accepted_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "provider_model": _clean_text(provider_envelope.get("model"), 200),
+    }
+
+
+def _apply_accepted_ai_section_summary(
+    section: dict[str, Any],
+    *,
+    summary: str,
+    ai_meta: Mapping[str, Any],
+    citation_evidence: Any,
+    evidence_key: str,
+) -> None:
+    if not summary or summary.casefold() == "not supplied":
+        return
+    section["summary"] = summary
+    section["narrative_source_meta"] = {
+        **ai_meta,
+        "evidence": copy.deepcopy(citation_evidence.get(evidence_key, {}))
+        if isinstance(citation_evidence, dict) else {},
+    }
+
+
+def _apply_accepted_ai_activities(
+    site: dict[str, Any],
+    *,
+    accepted: Mapping[str, Any],
+    draft: Mapping[str, Any],
+) -> None:
+    if not accepted["current_activities"]:
+        return
+    ai_activities = _align_ai_activity_rows(
+        copy.deepcopy(accepted["current_activities"]),
+        draft,
+        preserve_unmatched_baseline=True,
+    )
+    ai_activities = _enrich_activity_statuses(ai_activities, draft)
+    site["this_month_activities"] = ai_activities
+    site["current_period_activities"] = ai_activities
+    site["this_period_activities"] = ai_activities
+    if _draft_report_type(draft) == "weekly":
+        site["this_week_activities"] = ai_activities
+
+
+def _accepted_ai_lookahead(
+    site: Mapping[str, Any],
+    accepted_lookahead: list[str],
+) -> list[Any]:
+    existing = site.get("next_period_activities", site.get("next_month_activities", []))
+    existing_text = _list_text(existing)
+    if existing_text:
+        # Source/manual look-ahead is authoritative. Claude may polish
+        # narrative elsewhere, but it must not append paraphrases of already
+        # extracted period-end Activity Tomorrow items.
+        preserved = copy.deepcopy(existing)
+        return preserved if isinstance(preserved, list) else existing_text
+
+    merged: list[Any] = []
+    seen: set[str] = set()
+    for item in accepted_lookahead:
+        key = re.sub(r"[^a-z0-9]+", " ", item.casefold()).strip()
+        if key and key not in seen:
+            merged.append(item)
+            seen.add(key)
+    return merged
+
+
+def _apply_accepted_ai_review(
+    draft: dict[str, Any],
+    state: dict[str, Any],
+    accepted: dict[str, Any],
+    *,
+    username: str,
+) -> None:
+    engineering = draft.get("engineering") if isinstance(draft.get("engineering"), dict) else {}
+    procurement = draft.get("procurement") if isinstance(draft.get("procurement"), dict) else {}
+    site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
+
+    # Accept AI only where it actually improved/provided narrative.
+    # Empty/Not supplied values preserve the deterministic draft.
+    executive_summary = accepted["executive_summary"]
+    if executive_summary and executive_summary.casefold() != "not supplied":
+        draft["executive_summary"] = executive_summary
+    ai_meta = _accepted_ai_narrative_meta(state, username=username)
+    suggestion = state.get("suggestion") if isinstance(state.get("suggestion"), dict) else {}
+    citation_evidence = suggestion.get("citation_evidence")
+    for section, accepted_key, evidence_key in (
+        (engineering, "engineering_summary", "engineering_summary"),
+        (procurement, "procurement_summary", "procurement_summary"),
+        (site, "site_summary", "site_summary"),
+    ):
+        _apply_accepted_ai_section_summary(
+            section,
+            summary=accepted[accepted_key],
+            ai_meta=ai_meta,
+            citation_evidence=citation_evidence,
+            evidence_key=evidence_key,
+        )
+
+    # The original deterministic activities remain in draft["activities"].
+    # An explicitly accepted suggestion may supply the client-facing 5.2 bullets.
+    _apply_accepted_ai_activities(site, accepted=accepted, draft=draft)
+
+    # Accepted AI wording must not erase extracted constraints or look-ahead.
+    existing_concerns = site.get("concerns") if isinstance(site.get("concerns"), list) else []
+    site["concerns"] = _merge_concern_rows(existing_concerns, accepted["concerns"])
+    merged_lookahead = _accepted_ai_lookahead(site, accepted["lookahead"])
+    site["next_month_activities"] = merged_lookahead
+    site["next_period_activities"] = merged_lookahead
+    if _draft_report_type(draft) == "weekly":
+        site["next_week_activities"] = merged_lookahead
+
+    draft["engineering"] = engineering
+    draft["procurement"] = procurement
+    draft["site"] = site
+    draft["narrative_mode"] = "ai_enhanced"
+    state["accepted_values"] = accepted
+
+
+def _decide_periodic_ai_summary_request(*, data_dir: str, draft_id: str):
+    username = session["username"]
+    draft = _load_draft(data_dir, username, draft_id)
+    if draft is None:
+        return jsonify({"error": "Report draft not found."}), 404
+    state = draft.get("ai_summary") if isinstance(draft.get("ai_summary"), dict) else None
+    if state is None or state.get("status") != "suggested":
+        return jsonify({"error": "Generate an AI suggestion before saving a decision."}), 400
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or body.get("decision") not in {"accept", "reject"}:
+        return jsonify({"error": "AI decision must be accept or reject."}), 400
+    decision = str(body["decision"])
+    if decision == "accept":
+        try:
+            accepted = _clean_ai_review(body.get("suggestion"))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        _apply_accepted_ai_review(draft, state, accepted, username=username)
+    else:
+        draft["narrative_mode"] = "deterministic"
+    state["status"] = "accepted" if decision == "accept" else "rejected"
+    state["decided_by"] = username
+    state["decided_at"] = datetime.now().isoformat(timespec="seconds")
+    _update_draft(data_dir, username, draft)
+    return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+
+
+def _get_periodic_draft_photo_request(
+    *,
+    data_dir: str,
+    draft_id: str,
+    asset_id: str,
+):
+    username = session["username"]
+    draft = _load_draft(data_dir, username, draft_id)
+    if draft is None or not is_asset_id(asset_id):
+        return jsonify({"error": "Photo not found."}), 404
+    photos = draft.get("photo_documentation")
+    allowed = {
+        str(item.get("asset_id") or "")
+        for item in (photos if isinstance(photos, list) else []) if isinstance(item, dict)
+    }
+    if asset_id not in allowed:
+        return jsonify({"error": "Photo not found."}), 404
+    directory = _draft_photo_dir(data_dir, username, draft_id, create=False)
+    path = directory / asset_filename(asset_id) if directory is not None else None
+    if path is None or not path.is_file():
+        return jsonify({"error": "Photo asset is unavailable."}), 404
+    return send_file(
+        path,
+        mimetype="image/jpeg",
+        as_attachment=False,
+        conditional=True,
+        max_age=3600,
+    )
+
+
+def _update_periodic_draft_photos_request(*, data_dir: str, draft_id: str):
+    if request.content_length is not None and request.content_length > _MAX_PHOTO_REVIEW_BYTES:
+        return jsonify({"error": "Photo review request is too large."}), 413
+    username = session["username"]
+    draft = _load_draft(data_dir, username, draft_id)
+    if draft is None:
+        return jsonify({"error": "Report draft not found."}), 404
+    body = request.get_json(silent=True)
+    photos = body.get("photos") if isinstance(body, dict) else None
+    if not isinstance(photos, list):
+        return jsonify({"error": "photos must be a list."}), 400
+    photo_limits = periodic_photo_limits(_draft_report_type(draft))
+    if len(photos) > photo_limits.max_images_per_draft:
+        return jsonify({
+            "error": f"A {_report_name(_draft_report_type(draft))} report may contain at most {photo_limits.max_images_per_draft} photos."
+        }), 400
+
+    current = draft.get("photo_documentation")
+    current_by_id = {
+        str(item.get("asset_id") or ""): item
+        for item in (current if isinstance(current, list) else []) if isinstance(item, dict)
+        and is_asset_id(item.get("asset_id"))
+    }
+    cleaned: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(photos):
+        if not isinstance(item, dict):
+            return jsonify({"error": "Each photo review item must be an object."}), 400
+        asset_id = str(item.get("asset_id") or "")
+        if asset_id in seen or asset_id not in current_by_id:
+            return jsonify({"error": "Photo review contains an unknown or duplicate asset."}), 400
+        seen.add(asset_id)
+        reference = copy.deepcopy(current_by_id[asset_id])
+        reference.pop("data", None)
+        reference.pop("path", None)
+        reference["caption"] = _clean_text(item.get("caption"), 500)
+        reference["order"] = index
+        cleaned.append(reference)
+
+    draft["photo_documentation"] = cleaned
+    draft["photo_review"] = {
+        "confirmed": True,
+        "confirmed_by": username,
+        "confirmed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "count": len(cleaned),
+    }
+    _update_draft(data_dir, username, draft)
+    return jsonify({"ok": True, "count": len(cleaned), "photos": cleaned, "photo_review": draft["photo_review"]})
+
+
+def _preview_periodic_report_request(
+    app,
+    *,
+    data_dir: str,
+    config_provider: Callable[[], dict[str, Any]],
+    draft_id: str,
+):
+    draft = _load_draft(data_dir, session["username"], draft_id)
+    if draft is None:
+        return jsonify({"error": "Report draft not found."}), 404
+    kind = _draft_report_type(draft)
+    report_name = _report_name(kind)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid review data."}), 400
+    try:
+        reviewed = _apply_review(draft, body, actor=session.get("username", ""))
+        _refresh_deterministic_summary(reviewed)
+        _update_draft(data_dir, session["username"], reviewed)
+        buffer = _render(
+            reviewed,
+            config_provider(),
+            photo_base_dir=_draft_photo_dir(
+                data_dir,
+                session["username"],
+                draft_id,
+                create=False,
+            ),
+        )
+        return send_file(
+            buffer,
+            mimetype="application/pdf",
+            as_attachment=False,
+            download_name=f"{report_name} Progress Report Preview.pdf",
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception("%s preview failed", report_name)
+        return jsonify({"error": f"{report_name} preview failed: {exc}"}), 500
+
+
+def _periodic_report_preflight_request(*, data_dir: str, draft_id: str):
+    draft = _load_draft(data_dir, session["username"], draft_id)
+    if draft is None:
+        return jsonify({"error": "Report draft not found."}), 404
+    for_final = str(request.args.get("final") or "").strip().lower() in {"1", "true", "yes"}
+    preflight = build_report_preflight(draft, for_final=for_final)
+    preflight = _append_runtime_preflight_blockers(
+        preflight,
+        data_dir=data_dir,
+        username=session["username"],
+        draft_id=draft_id,
+        report=draft,
+        for_final=for_final,
+    )
+    return jsonify({"ok": True, "preflight": preflight})
+
+
+def _update_periodic_structured_source_request(*, data_dir: str, draft_id: str):
+    username = session["username"]
+    draft = _load_draft(data_dir, username, draft_id)
+    if draft is None:
+        return jsonify({"error": "Report draft not found."}), 404
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid structured source payload."}), 400
+    try:
+        _require_applied_source_validation(draft)
+        section = _clean_text(body.get("section"), 80).lower()
+        _apply_structured_source(
+            draft,
+            section=section,
+            payload=body.get("payload"),
+            actor=username,
+            reference=_clean_text(body.get("reference"), 1_000),
+        )
+        _refresh_deterministic_summary(draft)
+        draft.pop("ai_summary", None)
+        _update_draft(data_dir, username, draft)
+        return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+def _aggregate_stored_report_records(
+    records: list[dict[str, Any]],
+    *,
+    start: datetime,
+    end: datetime,
+    project_no: str,
+    project_title: str,
+    config_provider: Callable[[], dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    source_validation = build_source_validation(
+        records,
+        selected_project_no=project_no,
+        selected_project_title=project_title,
+    )
+    provisional_records = _provisional_project_records(
+        records,
+        source_validation,
+        project_no=project_no,
+        project_title=project_title,
+    )
+    aggregated = aggregate_monthly_records(
+        provisional_records,
+        date_from=start.strftime("%Y-%m-%d"),
+        date_to=end.strftime("%Y-%m-%d"),
+        project_no=project_no,
+        expected_dates=_expected_dates(start, end),
+        work_hours_policy=_project_work_hours_policy(
+            config_provider(), project_no=project_no, project_title=project_title
+        ),
+    )
+    selected_ids = {
+        str(item.get("report_id") or "")
+        for item in aggregated.get("source_records", [])
+        if isinstance(item, dict)
+    }
+    selected_records = [
+        record for record in provisional_records
+        if not selected_ids or str(record.get("report_id") or "") in selected_ids
+    ]
+    return aggregated, selected_records
+
+
+def _save_stored_periodic_draft(
+    records: list[dict[str, Any]],
+    selected_records: list[dict[str, Any]],
+    aggregated: dict[str, Any],
+    *,
+    data_dir: str,
+    pending_draft_id: str,
+    username: str,
+    kind: str,
+    mode: str,
+    start: datetime,
+    end: datetime,
+    project_no: str,
+    project_title: str,
+) -> tuple[str, dict[str, Any]]:
+    # Hydrate only the records that aggregation actually selected.
+    # Unrelated projects and superseded revisions must not consume the
+    # draft's report-specific photo/byte budget.
+    draft_photo_dir = _draft_photo_dir(
+        data_dir,
+        username,
+        pending_draft_id,
+    )
+    if draft_photo_dir is None:
+        raise ValueError("Invalid report draft photo directory")
+    photo_limits = periodic_photo_limits(kind)
+    photo_warnings = attach_canonical_photo_candidates(
+        selected_records,
+        data_dir,
+        draft_photo_dir,
+        limits=photo_limits,
+    )
+    photo_warnings.extend(_bound_record_photo_candidates(selected_records, limits=photo_limits))
+    photo_warnings = _compact_review_warnings(photo_warnings)
+    # Rebuild the same source groups with photo warnings included in
+    # the confirmation form. Selection itself remains unchanged.
+    source_validation = build_source_validation(
+        records,
+        selected_project_no=project_no,
+        selected_project_title=project_title,
+        issues=photo_warnings,
+    )
+    manifest = _source_manifest(selected_records, "stored_json")
+    draft = _prepare_draft(
+        aggregated,
+        project_no=project_no,
+        project_title=project_title,
+        date_from=start.strftime("%Y-%m-%d"),
+        date_to=end.strftime("%Y-%m-%d"),
+        report_mode=mode,
+        source_method="stored_json",
+        source_manifest=manifest,
+        report_context=_latest_report_context(selected_records),
+        extra_warnings=photo_warnings,
+        report_type=kind,
+    )
+    draft["source_validation"] = source_validation
+    draft["_source_records"] = copy.deepcopy(records)
+    draft["photo_documentation"] = _photo_references_for_records(
+        selected_records, limits=photo_limits
+    )
+    draft["photo_coverage"] = _photo_coverage_metadata(
+        selected_records, draft["photo_documentation"]
+    )
+    draft_id = _save_draft(
+        data_dir,
+        username,
+        draft,
+        draft_id=pending_draft_id,
+    )
+    draft["draft_id"] = draft_id
+    return draft_id, draft
+
+
+def _compile_stored_periodic_report_request(
+    app,
+    *,
+    data_dir: str,
+    config_provider: Callable[[], dict[str, Any]],
+):
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid report compile request."}), 400
+    kind = "monthly"
+    pending_draft_id = ""
+    draft_saved = False
+    try:
+        kind = _report_type(body.get("report_type") or "monthly")
+        mode = _normalise_report_mode(kind, body.get("report_mode"))
+        start, end = _parse_period(body.get("date_from"), body.get("date_to"), kind, mode)
+        project_no = _clean_text(body.get("project_no"), 250)
+        project_title = _clean_text(body.get("project_title"), 500)
+        if not project_no:
+            raise ValueError("Select a project first.")
+        include_all = bool(body.get("include_all_users")) and bool(session.get("is_admin"))
+        username = None if include_all else session["username"]
+        records = list_canonical_records(
+            data_dir,
+            username=username,
+            date_from=start.strftime("%Y-%m-%d"),
+            date_to=end.strftime("%Y-%m-%d"),
+        )
+        if not records:
+            error = (
+                "No final stored JSON was found for this project and weekly period. "
+                "Use Upload Daily Report PDF for older reports."
+                if kind == "weekly"
+                else "No final stored JSON was found for this project and period. Use Upload Daily Report PDF for older reports."
+            )
+            return jsonify({
+                "error": error
+            }), 404
+
+        aggregated, selected_records = _aggregate_stored_report_records(
+            records,
+            start=start,
+            end=end,
+            project_no=project_no,
+            project_title=project_title,
+            config_provider=config_provider,
+        )
+        pending_draft_id = uuid.uuid4().hex
+        draft_id, draft = _save_stored_periodic_draft(
+            records,
+            selected_records,
+            aggregated,
+            data_dir=data_dir,
+            pending_draft_id=pending_draft_id,
+            username=session["username"],
+            kind=kind,
+            mode=mode,
+            start=start,
+            end=end,
+            project_no=project_no,
+            project_title=project_title,
+        )
+        draft_saved = True
+        return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+    except ValueError as exc:
+        if pending_draft_id and not draft_saved:
+            _remove_draft_assets(data_dir, session["username"], pending_draft_id)
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        if pending_draft_id and not draft_saved:
+            _remove_draft_assets(data_dir, session["username"], pending_draft_id)
+        report_name = _report_name(kind)
+        app.logger.exception("Stored JSON %s compilation failed", kind)
+        return jsonify({"error": f"{report_name} compilation failed: {exc}"}), 500
+
+
+def _periodic_generation_preflight(
+    reviewed: Mapping[str, Any],
+    *,
+    data_dir: str,
+    username: str,
+    draft_id: str,
+) -> tuple[bool, dict[str, Any]]:
+    is_final = reviewed.get("status") == "final"
+    preflight = build_report_preflight(reviewed, for_final=is_final)
+    preflight = _append_runtime_preflight_blockers(
+        preflight,
+        data_dir=data_dir,
+        username=username,
+        draft_id=draft_id,
+        report=reviewed,
+        for_final=is_final,
+    )
+    return is_final, preflight
+
+
+def _final_review_override_reason(
+    reviewed: Mapping[str, Any],
+    body: Mapping[str, Any],
+    preflight: Mapping[str, Any],
+    *,
+    is_final: bool,
+) -> str:
+    reason = _clean_text(
+        body.get("final_review_reason")
+        or body.get("notes")
+        or (reviewed.get("source_validation", {}).get("notes")
+            if isinstance(reviewed.get("source_validation"), dict) else ""),
+        2_000,
+    )
+    if (
+        is_final and preflight.get("requires_override_reason")
+        and not reason and bool(body.get("confirm_final"))
+    ):
+        # Backward-compatible with the existing Final-confirmation UI:
+        # the system still persists an explicit reason and approver.
+        reason = "Partial Daily Report coverage explicitly confirmed for Final issue."
+    return reason
+
+
+def _periodic_revision_state(
+    index: list[dict[str, Any]],
+    reviewed: Mapping[str, Any],
+    kind: str,
+) -> tuple[list[dict[str, Any]], int, list[dict[str, Any]]]:
+    same_period = [row for row in index if (
+        (row.get("report_type") or "monthly") == kind
+        and row.get("project_no") == reviewed.get("project_no")
+        and row.get("period_start") == reviewed.get("period", {}).get("start")
+        and row.get("period_end") == reviewed.get("period", {}).get("end")
+    )]
+    revision = max([int(row.get("revision", 0)) for row in same_period] or [0]) + 1
+    prior_final = [row for row in same_period if str(row.get("status") or "").lower() == "final"]
+    return same_period, revision, prior_final
+
+
+def _render_and_store_periodic_report(
+    reviewed: dict[str, Any],
+    *,
+    data_dir: str,
+    username: str,
+    draft_id: str,
+    kind: str,
+    revision: int,
+    filename: str,
+    reports_dir: Path,
+    config_provider: Callable[[], dict[str, Any]],
+) -> tuple[bytes, str]:
+    pdf_path = reports_dir / filename
+    json_filename = f"{Path(filename).stem}.json"
+    json_path = reports_dir / json_filename
+    buffer = _render(
+        reviewed,
+        config_provider(),
+        photo_base_dir=_draft_photo_dir(
+            data_dir,
+            username,
+            draft_id,
+            create=False,
+        ),
+    )
+    pdf_bytes = buffer.getvalue()
+    temporary = pdf_path.with_name(f"{pdf_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("wb") as handle:
+            handle.write(pdf_bytes)
+        os.replace(temporary, pdf_path)
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+    reviewed["monthly_report_id"] = uuid.uuid4().hex
+    reviewed["report_id"] = reviewed["monthly_report_id"]
+    if kind == "weekly":
+        reviewed["weekly_report_id"] = reviewed["monthly_report_id"]
+    reviewed["revision"] = revision
+    reviewed["generated_at"] = datetime.now().isoformat(timespec="seconds")
+    reviewed["filename"] = filename
+    _atomic_json(json_path, _issued_report_copy(reviewed))
+    return pdf_bytes, json_filename
+
+
+def _periodic_report_index_entry(
+    reviewed: Mapping[str, Any],
+    *,
+    kind: str,
+    filename: str,
+    json_filename: str,
+    revision: int,
+    revision_reason: str,
+    pdf_bytes: bytes,
+) -> dict[str, Any]:
+    return {
+        "monthly_report_id": reviewed["monthly_report_id"],
+        "report_id": reviewed["monthly_report_id"],
+        "report_type": kind,
+        "filename": filename,
+        "json_filename": json_filename,
+        "project_no": reviewed.get("project_no", ""),
+        "project_title": reviewed.get("project_title", ""),
+        "period_start": reviewed.get("period", {}).get("start", ""),
+        "period_end": reviewed.get("period", {}).get("end", ""),
+        "status": reviewed.get("status", "draft"),
+        "source_method": reviewed.get("source_method", ""),
+        "revision": revision,
+        "revision_reason": revision_reason,
+        "issued_date": _clean_text(reviewed.get("issued_date"), 20)[:10],
+        "revision_row": copy.deepcopy(reviewed.get("revision_rows", [{}])[-1])
+        if isinstance(reviewed.get("revision_rows"), list) and reviewed.get("revision_rows")
+        else {},
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "size_kb": round(len(pdf_bytes) / 1024, 1),
+        "lifecycle_status": "active",
+    }
+
+
+def _supersede_periodic_finals(
+    index: list[dict[str, Any]],
+    *,
+    kind: str,
+    entry: Mapping[str, Any],
+    report_id: str,
+) -> None:
+    for row in index:
+        if (
+            (row.get("report_type") or "monthly") == kind
+            and row.get("project_no") == entry["project_no"]
+            and row.get("period_start") == entry["period_start"]
+            and row.get("period_end") == entry["period_end"]
+            and str(row.get("status") or "").lower() == "final"
+            and str(row.get("lifecycle_status") or "active") == "active"
+        ):
+            row["lifecycle_status"] = "superseded"
+            row["superseded_by"] = report_id
+            row["superseded_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _log_periodic_report_generation(
+    activity_logger: Callable[[str, str, str], None] | None,
+    *,
+    username: str,
+    kind: str,
+    entry: Mapping[str, Any],
+    revision: int,
+) -> None:
+    if not activity_logger:
+        return
+    detail = (
+        f"project={entry['project_no']} period={entry['period_start']}..{entry['period_end']} revision={revision}"
+    )
+    if kind == "weekly":
+        detail = f"type=weekly {detail}"
+    activity_logger(
+        username,
+        f"{kind}_report_generated",
+        detail,
+    )
+
+
+def _generate_periodic_report_request(
+    app,
+    *,
+    data_dir: str,
+    config_provider: Callable[[], dict[str, Any]],
+    activity_logger: Callable[[str, str, str], None] | None,
+    draft_id: str,
+):
+    username = session["username"]
+    draft = _load_draft(data_dir, username, draft_id)
+    if draft is None:
+        return jsonify({"error": "Report draft not found."}), 404
+    kind = _draft_report_type(draft)
+    report_name = _report_name(kind)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid review data."}), 400
+    try:
+        reviewed = _apply_review(draft, body, actor=session.get("username", ""))
+        _refresh_deterministic_summary(reviewed)
+        is_final, preflight = _periodic_generation_preflight(
+            reviewed,
+            data_dir=data_dir,
+            username=username,
+            draft_id=draft_id,
+        )
+        if preflight["blockers"]:
+            return jsonify({
+                "error": _preflight_failure_message(preflight),
+                "preflight": preflight,
+            }), 400
+        if is_final and not bool(body.get("confirm_final")):
+            return jsonify({
+                "error": f"Confirm that all warnings, missing dates, and {kind} values were reviewed before saving a Final report.",
+                "preflight": preflight,
+            }), 400
+        override_reason = _final_review_override_reason(
+            reviewed,
+            body,
+            preflight,
+            is_final=is_final,
+        )
+        if is_final:
+            reviewed["final_review"] = {
+                "confirmed": True,
+                "confirmed_by": username,
+                "confirmed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "override_reason": override_reason,
+                "preflight": preflight,
+            }
+        # Draft-local raw sources are needed only while applying project
+        # decisions. Do not copy them into the issued report JSON.
+        reviewed.pop("_source_records", None)
+        index = get_monthly_reports_index(data_dir, username)
+        same_period, revision, prior_final = _periodic_revision_state(index, reviewed, kind)
+        revision_reason = _clean_text(body.get("revision_reason"), 2_000)
+        if (
+            is_final
+            and prior_final
+            and not revision_reason
+            and _REQUIRE_FINAL_REVISION_REASON
+        ):
+            return jsonify({
+                "error": "Revision reason is required when issuing a new Final revision for the same period."
+            }), 400
+        reviewed["revision_reason"] = revision_reason
+        filename = _monthly_filename(reviewed, revision)
+        reports_dir = _monthly_user_dir(data_dir, username) / "reports"
+        reviewed["revision_rows"] = _revision_history_rows(
+            reports_dir, same_period, reviewed, revision
+        )
+        pdf_bytes, json_filename = _render_and_store_periodic_report(
+            reviewed,
+            data_dir=data_dir,
+            username=username,
+            draft_id=draft_id,
+            kind=kind,
+            revision=revision,
+            filename=filename,
+            reports_dir=reports_dir,
+            config_provider=config_provider,
+        )
+        entry = _periodic_report_index_entry(
+            reviewed,
+            kind=kind,
+            filename=filename,
+            json_filename=json_filename,
+            revision=revision,
+            revision_reason=revision_reason,
+            pdf_bytes=pdf_bytes,
+        )
+        if is_final:
+            _supersede_periodic_finals(
+                index,
+                kind=kind,
+                entry=entry,
+                report_id=reviewed["monthly_report_id"],
+            )
+        index.insert(0, entry)
+        _save_monthly_index(data_dir, username, index)
+        _update_draft(data_dir, username, reviewed)
+        _log_periodic_report_generation(
+            activity_logger,
+            username=username,
+            kind=kind,
+            entry=entry,
+            revision=revision,
+        )
+        return jsonify({
+            "ok": True,
+            "filename": filename,
+            "download_url": url_for("download_monthly_report", filename=filename),
+            "report": entry,
+        })
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception("%s report generation failed", report_name)
+        return jsonify({"error": f"{report_name} report generation failed: {exc}"}), 500
+
+
+def _download_periodic_report_request(*, data_dir: str, filename: str):
+    if "username" not in session:
+        return "Login required", 401
+    username = session["username"]
+    basename = os.path.basename(filename)
+    if filename != basename:
+        return "Invalid filename", 400
+    index = get_monthly_reports_index(data_dir, username)
+    if not any(row.get("filename") == basename for row in index):
+        return "Not found", 404
+    path = _monthly_user_dir(data_dir, username) / "reports" / basename
+    if not path.is_file():
+        return "Not found", 404
+    return send_file(path, as_attachment=True, download_name=basename, mimetype="application/pdf")
+
+
+def _delete_periodic_report_request(
+    *,
+    data_dir: str,
+    activity_logger: Callable[[str, str, str], None] | None,
+):
+    body = request.get_json(silent=True) or {}
+    filename = str(body.get("filename") or "")
+    basename = os.path.basename(filename)
+    if not basename or filename != basename:
+        return jsonify({"error": "Invalid filename."}), 400
+    username = session["username"]
+    index = get_monthly_reports_index(data_dir, username)
+    matches = [row for row in index if row.get("filename") == basename]
+    if not matches:
+        return jsonify({"error": "Report not found."}), 404
+    deleting_final = any(str(row.get("status") or "").lower() == "final" for row in matches)
+    if deleting_final and not _ALLOW_FINAL_REPORT_DELETE:
+        return jsonify({
+            "error": (
+                "Final reports are protected and cannot be deleted while "
+                "PROTECT_FINAL_PERIODIC_REPORTS=true."
+            )
+        }), 409
+
+    reports_dir = _monthly_user_dir(data_dir, username) / "reports"
+    for match in matches:
+        for name in (match.get("filename"), match.get("json_filename")):
+            if not name or os.path.basename(str(name)) != str(name):
+                continue
+            path = reports_dir / str(name)
+            if path.is_file():
+                path.unlink()
+
+    remaining_index = [row for row in index if row.get("filename") != basename]
+
+    # When the active/latest Final is hard-deleted during testing, restore the
+    # newest remaining Final for the same project/period to "active".  Without
+    # this repair, an older revision can remain permanently marked superseded
+    # even though the revision that superseded it no longer exists.
+    if deleting_final:
+        deleted = matches[0]
+        kind = str(deleted.get("report_type") or "monthly")
+        project_no = deleted.get("project_no")
+        period_start = deleted.get("period_start")
+        period_end = deleted.get("period_end")
+        same_period_finals = [
+            row for row in remaining_index
+            if (
+                (row.get("report_type") or "monthly") == kind
+                and row.get("project_no") == project_no
+                and row.get("period_start") == period_start
+                and row.get("period_end") == period_end
+                and str(row.get("status") or "").lower() == "final"
+                and str(row.get("lifecycle_status") or "active").lower() != "void"
+            )
+        ]
+        if same_period_finals and not any(
+            str(row.get("lifecycle_status") or "active").lower() == "active"
+            for row in same_period_finals
+        ):
+            latest_remaining = max(
+                same_period_finals,
+                key=lambda row: int(row.get("revision", 0) or 0),
+            )
+            latest_remaining["lifecycle_status"] = "active"
+            latest_remaining.pop("superseded_by", None)
+            latest_remaining.pop("superseded_at", None)
+
+    _save_monthly_index(data_dir, username, remaining_index)
+    if activity_logger:
+        report_type = str(matches[0].get("report_type") or "monthly")
+        detail = basename
+        if deleting_final:
+            detail = f"{basename} [FINAL hard-delete sandbox/testing]"
+        activity_logger(username, f"{report_type}_report_deleted", detail)
+    return jsonify({
+        "ok": True,
+        "deleted_final": deleting_final,
+        "testing_override": bool(deleting_final and _ALLOW_FINAL_REPORT_DELETE),
+        "final_protection_enabled": _PROTECT_FINAL_PERIODIC_REPORTS,
+    })
+
+
+def _void_periodic_report_request(
+    *,
+    data_dir: str,
+    activity_logger: Callable[[str, str, str], None] | None,
+):
+    body = request.get_json(silent=True) or {}
+    filename = str(body.get("filename") or "")
+    basename = os.path.basename(filename)
+    reason = _clean_text(body.get("reason"), 2_000)
+    if not basename or filename != basename:
+        return jsonify({"error": "Invalid filename."}), 400
+    if not reason:
+        return jsonify({"error": "A void reason is required."}), 400
+    username = session["username"]
+    index = get_monthly_reports_index(data_dir, username)
+    matches = [row for row in index if row.get("filename") == basename]
+    if not matches:
+        return jsonify({"error": "Report not found."}), 404
+    if not all(str(row.get("status") or "").lower() == "final" for row in matches):
+        return jsonify({"error": "Only Final reports use the void lifecycle action."}), 400
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    for row in index:
+        if row.get("filename") == basename:
+            row["lifecycle_status"] = "void"
+            row["void_reason"] = reason
+            row["voided_by"] = username
+            row["voided_at"] = now
+    _save_monthly_index(data_dir, username, index)
+    if activity_logger:
+        report_type = str(matches[0].get("report_type") or "monthly")
+        activity_logger(username, f"{report_type}_report_voided", f"{basename} reason={reason}")
+    return jsonify({"ok": True, "filename": basename, "lifecycle_status": "void"})
+
+
 def register_monthly_routes(
     app,
     *,
@@ -5088,1677 +8223,200 @@ def register_monthly_routes(
         auth = require_login_json()
         if auth:
             return auth
-        draft = _load_draft(data_dir, session["username"], draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        for_final = str(request.args.get("final") or "").strip().lower() in {"1", "true", "yes"}
-        preflight = build_report_preflight(draft, for_final=for_final)
-        preflight = _append_runtime_preflight_blockers(
-            preflight,
+        return _periodic_report_preflight_request(
             data_dir=data_dir,
-            username=session["username"],
             draft_id=draft_id,
-            report=draft,
-            for_final=for_final,
         )
-        return jsonify({"ok": True, "preflight": preflight})
 
     @app.post("/monthly/structured-source/<draft_id>")
     def update_periodic_structured_source(draft_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return jsonify({"error": "Invalid structured source payload."}), 400
-        try:
-            _require_applied_source_validation(draft)
-            section = _clean_text(body.get("section"), 80).lower()
-            _apply_structured_source(
-                draft,
-                section=section,
-                payload=body.get("payload"),
-                actor=username,
-                reference=_clean_text(body.get("reference"), 1_000),
-            )
-            _refresh_deterministic_summary(draft)
-            draft.pop("ai_summary", None)
-            _update_draft(data_dir, username, draft)
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+        return _update_periodic_structured_source_request(
+            data_dir=data_dir,
+            draft_id=draft_id,
+        )
 
     @app.post("/monthly/compile/stored")
     def compile_monthly_stored():
         auth = require_login_json()
         if auth:
             return auth
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return jsonify({"error": "Invalid report compile request."}), 400
-        kind = "monthly"
-        pending_draft_id = ""
-        draft_saved = False
-        try:
-            kind = _report_type(body.get("report_type") or "monthly")
-            mode = _normalise_report_mode(kind, body.get("report_mode"))
-            start, end = _parse_period(body.get("date_from"), body.get("date_to"), kind, mode)
-            project_no = _clean_text(body.get("project_no"), 250)
-            project_title = _clean_text(body.get("project_title"), 500)
-            if not project_no:
-                raise ValueError("Select a project first.")
-            include_all = bool(body.get("include_all_users")) and bool(session.get("is_admin"))
-            username = None if include_all else session["username"]
-            records = list_canonical_records(
-                data_dir,
-                username=username,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-            )
-            if not records:
-                error = (
-                    "No final stored JSON was found for this project and weekly period. "
-                    "Use Upload Daily Report PDF for older reports."
-                    if kind == "weekly"
-                    else "No final stored JSON was found for this project and period. Use Upload Daily Report PDF for older reports."
-                )
-                return jsonify({
-                    "error": error
-                }), 404
-
-            source_validation = build_source_validation(
-                records,
-                selected_project_no=project_no,
-                selected_project_title=project_title,
-            )
-            provisional_records = _provisional_project_records(
-                records,
-                source_validation,
-                project_no=project_no,
-                project_title=project_title,
-            )
-            aggregated = aggregate_monthly_records(
-                provisional_records,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                project_no=project_no,
-                expected_dates=_expected_dates(start, end),
-                work_hours_policy=_project_work_hours_policy(
-                    config_provider(), project_no=project_no, project_title=project_title
-                ),
-            )
-            selected_ids = {
-                str(item.get("report_id") or "")
-                for item in aggregated.get("source_records", [])
-                if isinstance(item, dict)
-            }
-            selected_records = [
-                record for record in provisional_records
-                if not selected_ids or str(record.get("report_id") or "") in selected_ids
-            ]
-
-            # Hydrate only the records that aggregation actually selected.
-            # Unrelated projects and superseded revisions must not consume the
-            # draft's report-specific photo/byte budget.
-            pending_draft_id = uuid.uuid4().hex
-            draft_photo_dir = _draft_photo_dir(
-                data_dir,
-                session["username"],
-                pending_draft_id,
-            )
-            if draft_photo_dir is None:
-                raise ValueError("Invalid report draft photo directory")
-            photo_limits = periodic_photo_limits(kind)
-            photo_warnings = attach_canonical_photo_candidates(
-                selected_records,
-                data_dir,
-                draft_photo_dir,
-                limits=photo_limits,
-            )
-            photo_warnings.extend(_bound_record_photo_candidates(selected_records, limits=photo_limits))
-            photo_warnings = _compact_review_warnings(photo_warnings)
-            # Rebuild the same source groups with photo warnings included in
-            # the confirmation form. Selection itself remains unchanged.
-            source_validation = build_source_validation(
-                records,
-                selected_project_no=project_no,
-                selected_project_title=project_title,
-                issues=photo_warnings,
-            )
-            manifest = _source_manifest(selected_records, "stored_json")
-            draft = _prepare_draft(
-                aggregated,
-                project_no=project_no,
-                project_title=project_title,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                report_mode=mode,
-                source_method="stored_json",
-                source_manifest=manifest,
-                report_context=_latest_report_context(selected_records),
-                extra_warnings=photo_warnings,
-                report_type=kind,
-            )
-            draft["source_validation"] = source_validation
-            draft["_source_records"] = copy.deepcopy(records)
-            draft["photo_documentation"] = _photo_references_for_records(
-                selected_records, limits=photo_limits
-            )
-            draft["photo_coverage"] = _photo_coverage_metadata(
-                selected_records, draft["photo_documentation"]
-            )
-            draft_id = _save_draft(
-                data_dir,
-                session["username"],
-                draft,
-                draft_id=pending_draft_id,
-            )
-            draft_saved = True
-            draft["draft_id"] = draft_id
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except ValueError as exc:
-            if pending_draft_id and not draft_saved:
-                _remove_draft_assets(data_dir, session["username"], pending_draft_id)
-            return jsonify({"error": str(exc)}), 400
-        except Exception as exc:
-            if pending_draft_id and not draft_saved:
-                _remove_draft_assets(data_dir, session["username"], pending_draft_id)
-            report_name = _report_name(kind)
-            app.logger.exception("Stored JSON %s compilation failed", kind)
-            return jsonify({"error": f"{report_name} compilation failed: {exc}"}), 500
+        return _compile_stored_periodic_report_request(
+            app,
+            data_dir=data_dir,
+            config_provider=config_provider,
+        )
 
     @app.post("/monthly/excel-source/analyze")
     def analyze_monthly_excel_source():
         auth = require_login_json()
         if auth:
             return auth
-        if (
-            request.content_length is not None
-            and request.content_length > _MAX_LEGACY_EXCEL_REQUEST_BYTES
-        ):
-            return jsonify({
-                "error": (
-                    "Excel upload exceeds the "
-                    f"{LEGACY_EXCEL_LIMITS.max_file_bytes // (1024 * 1024)} MB limit."
-                )
-            }), 413
-
-        upload = request.files.get("file")
-        if upload is None or not upload.filename:
-            return jsonify({"error": "Choose one legacy Daily Report .xlsx workbook."}), 400
-        filename = os.path.basename(str(upload.filename or ""))
-        if not filename.lower().endswith(".xlsx"):
-            return jsonify({"error": f"{filename or 'Upload'} is not an .xlsx workbook."}), 400
-
-        username = session["username"]
-        upload_session_id = uuid.uuid4().hex
-        directory: Path | None = None
-        try:
-            _cleanup_upload_sessions(data_dir, username)
-            root = _upload_sessions_dir(data_dir, username)
-            active_count = sum(
-                1
-                for path in root.iterdir()
-                if path.is_dir()
-                and _DRAFT_ID_RE.fullmatch(path.name)
-                and not (path / "result.json").is_file()
-            )
-            if active_count >= _MAX_ACTIVE_UPLOAD_SESSIONS:
-                return jsonify({
-                    "error": "Too many unfinished upload sessions. Finish or remove the current source first."
-                }), 429
-
-            directory = root / upload_session_id
-            directory.mkdir()
-            workbook_path = directory / "workbook.xlsx"
-            size_bytes, digest = _save_legacy_excel_upload(upload, workbook_path)
-            analysis = analyze_legacy_daily_workbook(
-                workbook_path,
-                filename=filename,
-                sha256=digest,
-            )
-            manifest = {
-                "schema_version": "legacy-excel-source-session/1",
-                "upload_session_id": upload_session_id,
-                "owner": username,
-                "created_at": datetime.now().isoformat(timespec="seconds"),
-                "filename": filename,
-                "size_bytes": size_bytes,
-                "sha256": digest,
-                "analysis": analysis,
-            }
-            _atomic_json(directory / "session.json", manifest)
-            return jsonify({
-                "ok": True,
-                "upload_session_id": upload_session_id,
-                "analysis": _public_legacy_excel_analysis(analysis),
-            })
-        except (LegacyExcelError, ValueError) as exc:
-            if directory is not None and directory.exists():
-                _remove_upload_session(data_dir, username, upload_session_id)
-            return jsonify({"error": str(exc)}), 400
-        except Exception:
-            if directory is not None and directory.exists():
-                _remove_upload_session(data_dir, username, upload_session_id)
-            app.logger.exception("Legacy Excel source analysis failed for %s", filename)
-            return jsonify({
-                "error": "Excel source could not be analyzed. Check the workbook or server logs."
-            }), 500
+        return _analyze_legacy_excel_source_request(app, data_dir=data_dir)
 
     @app.post("/monthly/excel-source/<upload_session_id>/compile")
     def compile_monthly_excel_source(upload_session_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        loaded = _load_upload_session(data_dir, session["username"], upload_session_id)
-        if loaded is None:
-            return jsonify({"error": "Excel source session was not found or has expired."}), 404
-        directory, manifest = loaded
-        if manifest.get("schema_version") != "legacy-excel-source-session/1":
-            return jsonify({"error": "This session is not an Excel source session."}), 400
-
-        operation_lock = _acquire_upload_operation_lock(directory)
-        if operation_lock is None:
-            return jsonify({"error": "This Excel source is already being compiled. Please wait."}), 409
-        try:
-            body = request.get_json(silent=True)
-            if not isinstance(body, dict):
-                raise ValueError("Invalid Excel compile request.")
-            kind = _report_type(body.get("report_type") or "monthly")
-            mode = _normalise_report_mode(kind, body.get("report_mode"))
-            start, end = _parse_period(body.get("date_from"), body.get("date_to"), kind, mode)
-            project_no = _clean_text(body.get("project_no"), 250)
-            project_title = _clean_text(body.get("project_title"), 500)
-            if not project_no:
-                raise ValueError("Select a project first.")
-
-            analysis = manifest.get("analysis") if isinstance(manifest.get("analysis"), dict) else {}
-            if analysis.get("duplicate_dates"):
-                raise ValueError("Resolve duplicate worksheet dates before compiling this workbook.")
-            available = {
-                _clean_text(value, 10)
-                for value in analysis.get("available_dates", [])
-                if _clean_text(value, 10)
-            }
-            start_text = start.strftime("%Y-%m-%d")
-            end_text = end.strftime("%Y-%m-%d")
-            if start_text not in available or end_text not in available:
-                raise ValueError("The From and To dates must be dates available in the workbook.")
-
-            requested_dates = body.get("selected_dates")
-            if requested_dates is None:
-                selected_dates = sorted(
-                    value for value in available if start_text <= value <= end_text
-                )
-            elif isinstance(requested_dates, list):
-                selected_dates = sorted({
-                    _clean_text(value, 10) for value in requested_dates if _clean_text(value, 10)
-                })
-            else:
-                raise ValueError("Selected workbook dates must be a list.")
-            if not selected_dates:
-                raise ValueError("Choose at least one workbook date to compile.")
-            unavailable = [value for value in selected_dates if value not in available]
-            outside = [value for value in selected_dates if not (start_text <= value <= end_text)]
-            if unavailable:
-                raise ValueError(
-                    f"Selected date(s) are not available in the workbook: {', '.join(unavailable)}"
-                )
-            if outside:
-                raise ValueError(
-                    f"Selected date(s) are outside the reporting period: {', '.join(outside)}"
-                )
-
-            workbook_path = directory / "workbook.xlsx"
-            if not workbook_path.is_file():
-                return jsonify({"error": "The uploaded Excel source is no longer available."}), 410
-            photo_limits = periodic_photo_limits(kind)
-            records, parser_warnings = extract_legacy_daily_records(
-                workbook_path,
-                analysis=analysis,
-                selected_dates=selected_dates,
-                username=session["username"],
-                project_no=project_no,
-                project_title=project_title,
-                asset_directory=directory / "assets",
-                photo_limits=photo_limits,
-            )
-            warnings: list[Any] = [
-                "Uploaded Excel data was normalized from date-named Daily Report worksheets. "
-                "Review date warnings, manpower, man-hours, progress, and photo captions before issue."
-            ]
-            warnings.extend(parser_warnings)
-            draft = _build_uploaded_pdf_draft(
-                records,
-                warnings,
-                project_no=project_no,
-                project_title=project_title,
-                date_from=start,
-                date_to=end,
-                report_mode=mode,
-                report_type=kind,
-                config=config_provider(),
-                source_method="uploaded_excel",
-                expected_dates=selected_dates,
-            )
-            pending_draft_id = uuid.uuid4().hex
-            draft_photo_dir = _draft_photo_dir(
-                data_dir,
-                session["username"],
-                pending_draft_id,
-            )
-            if draft_photo_dir is None:
-                raise ValueError("Invalid report draft photo directory")
-            copy_photo_assets(
-                _all_photo_references(records),
-                directory / "assets",
-                draft_photo_dir,
-            )
-            draft_id = _save_draft(
-                data_dir,
-                session["username"],
-                draft,
-                draft_id=pending_draft_id,
-            )
-            draft["draft_id"] = draft_id
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except (LegacyExcelError, ValueError) as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception:
-            app.logger.exception("Legacy Excel source compilation failed")
-            return jsonify({
-                "error": "Excel source compilation failed. Retry or check the server logs."
-            }), 500
-        finally:
-            try:
-                operation_lock.rmdir()
-            except OSError:
-                pass
+        return _compile_legacy_excel_source_request(
+            app,
+            data_dir=data_dir,
+            config_provider=config_provider,
+            upload_session_id=upload_session_id,
+        )
 
     @app.post("/monthly/upload-session/start")
     def start_monthly_upload_session():
         auth = require_login_json()
         if auth:
             return auth
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return jsonify({"error": "Invalid upload session request."}), 400
-        try:
-            kind = _report_type(body.get("report_type") or "monthly")
-            mode = _normalise_report_mode(kind, body.get("report_mode"))
-            start, end = _parse_period(body.get("date_from"), body.get("date_to"), kind, mode)
-            project_no = _clean_text(body.get("project_no"), 250)
-            project_title = _clean_text(body.get("project_title"), 500)
-            if not project_no:
-                raise ValueError("Select a project first.")
-
-            raw_files = body.get("files")
-            if not isinstance(raw_files, list) or not raw_files:
-                raise ValueError("Choose at least one Daily Report PDF.")
-            if len(raw_files) > _MAX_UPLOAD_FILES:
-                return jsonify({
-                    "error": f"A maximum of {_MAX_UPLOAD_FILES} PDF files can be compiled at once."
-                }), 413
-
-            planned_files: dict[str, dict[str, Any]] = {}
-            for raw in raw_files:
-                if not isinstance(raw, dict):
-                    raise ValueError("Invalid PDF upload list.")
-                file_id = str(raw.get("file_id") or "")
-                if not _UPLOAD_FILE_ID_RE.fullmatch(file_id) or file_id in planned_files:
-                    raise ValueError("Each PDF must have a unique upload ID.")
-                filename = _clean_text(raw.get("filename"), 255) or "report.pdf"
-                try:
-                    size_bytes = int(raw.get("size_bytes") or 0)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(f"{filename}: invalid file size.") from exc
-                if size_bytes < 0:
-                    raise ValueError(f"{filename}: invalid file size.")
-                if size_bytes > DEFAULT_LIMITS.max_bytes:
-                    return jsonify({
-                        "error": (
-                            f"{filename} is larger than the {DEFAULT_LIMITS.max_bytes // (1024 * 1024)} MB "
-                            "per-file limit."
-                        )
-                    }), 413
-                planned_files[file_id] = {
-                    "file_id": file_id,
-                    "filename": filename,
-                    "size_bytes": size_bytes,
-                }
-
-            username = session["username"]
-            _cleanup_upload_sessions(data_dir, username)
-            root = _upload_sessions_dir(data_dir, username)
-            requested_session_id = str(body.get("upload_session_id") or "")
-            if requested_session_id and not _DRAFT_ID_RE.fullmatch(requested_session_id):
-                raise ValueError("Invalid upload session ID.")
-            upload_session_id = requested_session_id or uuid.uuid4().hex
-            directory = root / upload_session_id
-            if directory.exists():
-                loaded = _load_upload_session(data_dir, username, upload_session_id)
-                if loaded is None:
-                    return jsonify({
-                        "error": "This upload session is still being prepared. Retry shortly."
-                    }), 409
-                _, existing = loaded
-                comparable_keys = (
-                    "report_type", "report_mode", "project_no", "project_title", "date_from", "date_to", "files"
-                )
-                candidate = {
-                    "report_type": kind,
-                    "report_mode": mode,
-                    "project_no": project_no,
-                    "project_title": project_title,
-                    "date_from": start.strftime("%Y-%m-%d"),
-                    "date_to": end.strftime("%Y-%m-%d"),
-                    "files": planned_files,
-                }
-                if all(existing.get(key) == candidate.get(key) for key in comparable_keys):
-                    return jsonify({
-                        "ok": True,
-                        "cached": True,
-                        "upload_session_id": upload_session_id,
-                        "file_count": len(planned_files),
-                        "max_file_bytes": DEFAULT_LIMITS.max_bytes,
-                    })
-                return jsonify({
-                    "error": "Upload session ID is already used for a different report setup."
-                }), 409
-
-            active_count = sum(
-                1
-                for path in root.iterdir()
-                if path.is_dir()
-                and _DRAFT_ID_RE.fullmatch(path.name)
-                and not (path / "result.json").is_file()
-            )
-            if active_count >= _MAX_ACTIVE_UPLOAD_SESSIONS:
-                return jsonify({
-                    "error": "Too many unfinished upload sessions. Finish or retry the current report first."
-                }), 429
-
-            directory.mkdir()
-            (directory / "items").mkdir()
-            manifest = {
-                "schema_version": "report-upload-session/1",
-                "upload_session_id": upload_session_id,
-                "owner": username,
-                "created_at": datetime.now().isoformat(timespec="seconds"),
-                "report_type": kind,
-                "report_mode": mode,
-                "project_no": project_no,
-                "project_title": project_title,
-                "date_from": start.strftime("%Y-%m-%d"),
-                "date_to": end.strftime("%Y-%m-%d"),
-                "files": planned_files,
-            }
-            _atomic_json(directory / "session.json", manifest)
-            return jsonify({
-                "ok": True,
-                "cached": False,
-                "upload_session_id": upload_session_id,
-                "file_count": len(planned_files),
-                "max_file_bytes": DEFAULT_LIMITS.max_bytes,
-            })
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception:
-            app.logger.exception("Could not start PDF upload session")
-            return jsonify({"error": "Could not start PDF upload session. Retry or check the server logs."}), 500
+        return _start_periodic_upload_session_request(app, data_dir=data_dir)
 
     @app.post("/monthly/upload-session/<upload_session_id>/file")
     def upload_monthly_session_file(upload_session_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        if request.content_length is not None and request.content_length > _MAX_STAGED_REQUEST_BYTES:
-            return jsonify({
-                "error": f"Upload exceeds the {DEFAULT_LIMITS.max_bytes // (1024 * 1024)} MB per-file limit."
-            }), 413
-        loaded = _load_upload_session(data_dir, session["username"], upload_session_id)
-        if loaded is None:
-            return jsonify({"error": "Upload session not found or expired."}), 404
-        directory, manifest = loaded
-        if (directory / "result.json").is_file():
-            return jsonify({"error": "This upload session has already been compiled."}), 409
-
-        # The UI sends the stable ID as a header so a retry can be rejected as
-        # busy before Werkzeug parses another large multipart body.
-        file_id = str(request.headers.get("X-Upload-File-ID") or "")
-        if not file_id:
-            file_id = str(request.form.get("file_id") or "")
-        planned = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
-        if not _UPLOAD_FILE_ID_RE.fullmatch(file_id) or file_id not in planned:
-            return jsonify({"error": "Unknown PDF upload ID."}), 400
-
-        existing = _load_upload_item(directory, file_id)
-        if existing is not None:
-            return jsonify({"ok": True, "cached": True, "item": _public_upload_item(existing)})
-
-        operation_lock = _acquire_upload_operation_lock(directory)
-        if operation_lock is None:
-            return jsonify({
-                "error": "This upload session is busy processing another request. Retry this file shortly."
-            }), 409
-        try:
-            loaded = _load_upload_session(data_dir, session["username"], upload_session_id)
-            if loaded is None:
-                return jsonify({"error": "Upload session not found or expired."}), 404
-            directory, manifest = loaded
-            if (directory / "result.json").is_file():
-                return jsonify({"error": "This upload session has already been compiled."}), 409
-            existing = _load_upload_item(directory, file_id)
-            if existing is not None:
-                return jsonify({"ok": True, "cached": True, "item": _public_upload_item(existing)})
-
-            uploads = request.files.getlist("file")
-            if len(uploads) != 1:
-                return jsonify({"error": "Upload exactly one Daily Report PDF per request."}), 400
-            upload = uploads[0]
-            planned_file = planned[file_id] if isinstance(planned[file_id], dict) else {}
-            filename = _clean_text(upload.filename, 255) or str(planned_file.get("filename") or "report.pdf")
-            warnings: list[str] = []
-            record: dict[str, Any] | None = None
-            source_size = int(planned_file.get("size_bytes") or 0)
-
-            if not filename.lower().endswith(".pdf"):
-                warnings.append(f"{filename}: only PDF files can be uploaded; file excluded.")
-            else:
-                try:
-                    config = config_provider()
-                    known_projects = config.get("projects", []) if isinstance(config, dict) else []
-                    imported = import_daily_report_pdf(
-                        upload.stream,
-                        filename=filename,
-                        known_projects=known_projects,
-                    )
-                    record, warnings = _record_from_uploaded_pdf(
-                        imported,
-                        filename=filename,
-                        username=session["username"],
-                        project_no=str(manifest.get("project_no") or ""),
-                        project_title=str(manifest.get("project_title") or ""),
-                        date_from=str(manifest.get("date_from") or ""),
-                        date_to=str(manifest.get("date_to") or ""),
-                        report_type=str(manifest.get("report_type") or "monthly"),
-                    )
-                    if record is not None:
-                        photo_limits = periodic_photo_limits(manifest.get("report_type"))
-                        candidates, photo_warnings = extract_pdf_photo_candidates(
-                            upload.stream,
-                            filename=filename,
-                            areas=_record_photo_areas(record),
-                            limits=photo_limits,
-                        )
-                        report_date = _record_date(record)
-                        for candidate in candidates:
-                            candidate.setdefault("source_date", report_date)
-                            candidate.setdefault("source_type", "legacy_pdf_extraction")
-                        photo_references = store_photo_candidates(
-                            candidates,
-                            directory / "assets",
-                            source_report_id=str(record.get("report_id") or ""),
-                            maximum=photo_limits.max_images_per_pdf,
-                            max_total_bytes=photo_limits.max_total_asset_bytes_per_draft,
-                        )
-                        record["_photo_candidates"] = photo_references
-                        if len(photo_references) < len(candidates):
-                            warnings.append(
-                                f"{filename}: some photos were excluded by the report draft asset limit."
-                            )
-                        warnings.extend(photo_warnings)
-                    source = imported.get("source") if isinstance(imported.get("source"), dict) else {}
-                    source_size = int(source.get("size_bytes") or source_size)
-                except PDFImportError as exc:
-                    warnings.append(f"{filename}: {exc}; file excluded.")
-                except Exception:
-                    app.logger.exception("Staged PDF import failed for %s", filename)
-                    return jsonify({
-                        "error": f"{filename}: PDF processing failed. Retry this file or check the server logs."
-                    }), 500
-
-            item = {
-                "file_id": file_id,
-                "filename": filename,
-                "status": "uploaded" if record is not None else "skipped",
-                "included": record is not None,
-                "report_date": _record_date(record) if record is not None else "",
-                "size_bytes": source_size,
-                "warnings": warnings,
-                "record": record,
-            }
-            _atomic_json(directory / "items" / f"{file_id}.json", item)
-            try:
-                os.utime(directory, None)
-            except OSError:
-                pass
-            return jsonify({"ok": True, "cached": False, "item": _public_upload_item(item)})
-        finally:
-            try:
-                operation_lock.rmdir()
-            except OSError:
-                pass
+        return _upload_periodic_session_file_request(
+            app,
+            data_dir=data_dir,
+            config_provider=config_provider,
+            upload_session_id=upload_session_id,
+        )
 
     @app.post("/monthly/upload-session/<upload_session_id>/compile")
     def compile_monthly_upload_session(upload_session_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        loaded = _load_upload_session(data_dir, session["username"], upload_session_id)
-        if loaded is None:
-            return jsonify({"error": "Upload session not found or expired."}), 404
-        directory, manifest = loaded
-
-        result_path = directory / "result.json"
-        if result_path.is_file():
-            try:
-                result = json.loads(result_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError):
-                result = {}
-            draft_id = str(result.get("draft_id") or "") if isinstance(result, dict) else ""
-            draft = _load_draft(data_dir, session["username"], draft_id)
-            if draft is None:
-                return jsonify({"error": "The compiled upload draft is no longer available."}), 410
-            return jsonify({"ok": True, "cached": True, "draft_id": draft_id, "draft": draft})
-
-        operation_lock = _acquire_upload_operation_lock(directory)
-        if operation_lock is None:
-            return jsonify({"error": "This upload session is already being compiled. Please wait."}), 409
-
-        try:
-            if result_path.is_file():
-                try:
-                    result = json.loads(result_path.read_text(encoding="utf-8"))
-                except (OSError, ValueError, TypeError):
-                    result = {}
-                draft_id = str(result.get("draft_id") or "") if isinstance(result, dict) else ""
-                draft = _load_draft(data_dir, session["username"], draft_id)
-                if draft is None:
-                    return jsonify({"error": "The compiled upload draft is no longer available."}), 410
-                return jsonify({"ok": True, "cached": True, "draft_id": draft_id, "draft": draft})
-
-            planned = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
-            items: list[dict[str, Any]] = []
-            missing: list[str] = []
-            for file_id in planned:
-                item = _load_upload_item(directory, file_id)
-                if item is None:
-                    missing.append(file_id)
-                else:
-                    items.append(item)
-            if missing:
-                return jsonify({
-                    "error": f"{len(missing)} PDF file(s) are still waiting to upload or retry.",
-                    "pending_file_ids": missing,
-                }), 409
-
-            kind = _report_type(manifest.get("report_type") or "monthly")
-            mode = _normalise_report_mode(kind, manifest.get("report_mode"))
-            start, end = _parse_period(
-                manifest.get("date_from"),
-                manifest.get("date_to"),
-                kind,
-                mode,
-            )
-            project_no = _clean_text(manifest.get("project_no"), 250)
-            project_title = _clean_text(manifest.get("project_title"), 500)
-            records: list[dict[str, Any]] = []
-            seen_hashes: set[str] = set()
-            warnings: list[Any] = [
-                "Uploaded PDF data was normalized from a Daily Report template. "
-                "Project identity, manpower, man-hours, warnings, and editable summaries must be validated before issue."
-            ]
-            for item in items:
-                for warning in item.get("warnings", []):
-                    if isinstance(warning, Mapping):
-                        warnings.append(dict(warning))
-                    else:
-                        warning_text = str(warning).strip()
-                        if warning_text:
-                            warnings.append(warning_text)
-                record = item.get("record") if isinstance(item.get("record"), dict) else None
-                if record is None:
-                    continue
-                source = record.get("source") if isinstance(record.get("source"), dict) else {}
-                digest = str(source.get("sha256") or "")
-                if digest and digest in seen_hashes:
-                    warnings.append(f"{item.get('filename', 'report.pdf')}: duplicate PDF skipped.")
-                    continue
-                if digest:
-                    seen_hashes.add(digest)
-                records.append(record)
-
-            if not records:
-                return jsonify({
-                    "error": _empty_uploaded_pdf_error(kind),
-                    "warnings": warnings,
-                }), 400
-
-            records, start, end = _apply_uploaded_pdf_period(
-                records,
-                warnings,
-                report_type=kind,
-                date_from=start,
-                date_to=end,
-            )
-            draft = _build_uploaded_pdf_draft(
-                records,
-                warnings,
-                project_no=project_no,
-                project_title=project_title,
-                date_from=start,
-                date_to=end,
-                report_mode=mode,
-                report_type=kind,
-                config=config_provider(),
-            )
-            # Reusing the random upload-session ID closes the crash window
-            # between saving the draft and writing the small result tombstone.
-            draft_photo_dir = _draft_photo_dir(
-                data_dir,
-                session["username"],
-                upload_session_id,
-            )
-            if draft_photo_dir is None:
-                raise ValueError("Invalid report draft photo directory")
-            copy_photo_assets(
-                _all_photo_references(records),
-                directory / "assets",
-                draft_photo_dir,
-            )
-            draft_id = _save_draft(
-                data_dir,
-                session["username"],
-                draft,
-                draft_id=upload_session_id,
-            )
-            draft["draft_id"] = draft_id
-            _atomic_json(result_path, {
-                "status": "compiled",
-                "draft_id": draft_id,
-                "compiled_at": datetime.now().isoformat(timespec="seconds"),
-            })
-            try:
-                shutil.rmtree(directory / "items")
-            except OSError:
-                pass
-            return jsonify({"ok": True, "cached": False, "draft_id": draft_id, "draft": draft})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception:
-            kind = manifest.get("report_type") or "monthly"
-            app.logger.exception("Staged uploaded PDF %s compilation failed", kind)
-            return jsonify({
-                "error": f"{_report_name(kind)} PDF compilation failed. Retry or check the server logs."
-            }), 500
-        finally:
-            try:
-                operation_lock.rmdir()
-            except OSError:
-                pass
+        return _compile_periodic_upload_session_request(
+            app,
+            data_dir=data_dir,
+            config_provider=config_provider,
+            upload_session_id=upload_session_id,
+        )
 
     @app.delete("/monthly/upload-session/<upload_session_id>")
     def delete_monthly_upload_session(upload_session_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        directory = _upload_session_dir(data_dir, session["username"], upload_session_id)
-        if directory is None or not directory.is_dir():
-            return jsonify({"error": "Upload session not found or expired."}), 404
-        operation_lock = _acquire_upload_operation_lock(directory)
-        if operation_lock is None:
-            return jsonify({"error": "Upload session is currently busy."}), 409
-        try:
-            _remove_upload_session(data_dir, session["username"], upload_session_id)
-            return jsonify({"ok": True})
-        finally:
-            try:
-                operation_lock.rmdir()
-            except OSError:
-                pass
+        return _delete_periodic_upload_session_request(
+            data_dir=data_dir,
+            upload_session_id=upload_session_id,
+        )
 
     @app.post("/monthly/compile/upload")
     def compile_monthly_upload():
         auth = require_login_json()
         if auth:
             return auth
-        uploads = request.files.getlist("files")
-        if not uploads:
-            return jsonify({"error": "Choose at least one Daily Report PDF."}), 400
-        if len(uploads) > _MAX_UPLOAD_FILES:
-            return jsonify({"error": f"A maximum of {_MAX_UPLOAD_FILES} PDF files can be compiled at once."}), 413
-        kind = "monthly"
-        pending_draft_id = uuid.uuid4().hex
-        draft_saved = False
-        try:
-            kind = _report_type(request.form.get("report_type") or "monthly")
-            mode = _normalise_report_mode(kind, request.form.get("report_mode"))
-            start, end = _parse_period(
-                request.form.get("date_from"),
-                request.form.get("date_to"),
-                kind,
-                mode,
-            )
-            project_no = _clean_text(request.form.get("project_no"), 250)
-            project_title = _clean_text(request.form.get("project_title"), 500)
-            if not project_no:
-                raise ValueError("Select a project first.")
-            config = config_provider()
-            known_projects = config.get("projects", []) if isinstance(config, dict) else []
-            records = []
-            warnings: list[Any] = [
-                "Uploaded PDF data was normalized from a Daily Report template. "
-                "Project identity, manpower, man-hours, warnings, and editable summaries must be validated before issue."
-            ]
-            for upload in uploads:
-                filename = str(upload.filename or "report.pdf")
-                if not filename.lower().endswith(".pdf"):
-                    warnings.append(f"Skipped non-PDF file: {filename}")
-                    continue
-                try:
-                    imported = import_daily_report_pdf(
-                        upload.stream,
-                        filename=filename,
-                        known_projects=known_projects,
-                    )
-                except PDFImportError as exc:
-                    warnings.append(f"{filename}: {exc}")
-                    continue
-                record, imported_warnings = _record_from_uploaded_pdf(
-                    imported,
-                    filename=filename,
-                    username=session["username"],
-                    project_no=project_no,
-                    project_title=project_title,
-                    date_from=start.strftime("%Y-%m-%d"),
-                    date_to=end.strftime("%Y-%m-%d"),
-                    report_type=kind,
-                )
-                warnings.extend(imported_warnings)
-                if record is not None:
-                    photo_limits = periodic_photo_limits(kind)
-                    candidates, photo_warnings = extract_pdf_photo_candidates(
-                        upload.stream,
-                        filename=filename,
-                        areas=_record_photo_areas(record),
-                        limits=photo_limits,
-                    )
-                    report_date = _record_date(record)
-                    for candidate in candidates:
-                        candidate.setdefault("source_date", report_date)
-                        candidate.setdefault("source_type", "legacy_pdf_extraction")
-                    pending_assets = _draft_photo_dir(
-                        data_dir,
-                        session["username"],
-                        pending_draft_id,
-                    )
-                    if pending_assets is None:
-                        raise ValueError("Invalid report draft photo directory")
-                    photo_references = store_photo_candidates(
-                        candidates,
-                        pending_assets,
-                        source_report_id=str(record.get("report_id") or ""),
-                        maximum=photo_limits.max_images_per_pdf,
-                        max_total_bytes=photo_limits.max_total_asset_bytes_per_draft,
-                    )
-                    record["_photo_candidates"] = photo_references
-                    if len(photo_references) < len(candidates):
-                        warnings.append(
-                            f"{filename}: some photos were excluded by the report draft asset limit."
-                        )
-                    warnings.extend(photo_warnings)
-                    records.append(record)
-
-            if not records:
-                _remove_draft_assets(data_dir, session["username"], pending_draft_id)
-                return jsonify({
-                    "error": _empty_uploaded_pdf_error(kind),
-                    "warnings": warnings,
-                }), 400
-            records, start, end = _apply_uploaded_pdf_period(
-                records,
-                warnings,
-                report_type=kind,
-                date_from=start,
-                date_to=end,
-            )
-            draft = _build_uploaded_pdf_draft(
-                records,
-                warnings,
-                project_no=project_no,
-                project_title=project_title,
-                date_from=start,
-                date_to=end,
-                report_mode=mode,
-                report_type=kind,
-                config=config,
-            )
-            draft_id = _save_draft(
-                data_dir,
-                session["username"],
-                draft,
-                draft_id=pending_draft_id,
-            )
-            draft_saved = True
-            draft["draft_id"] = draft_id
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except ValueError as exc:
-            if not draft_saved:
-                _remove_draft_assets(data_dir, session["username"], pending_draft_id)
-            return jsonify({"error": str(exc)}), 400
-        except Exception as exc:
-            if not draft_saved:
-                _remove_draft_assets(data_dir, session["username"], pending_draft_id)
-            app.logger.exception("Uploaded PDF %s compilation failed", kind)
-            prefix = "Weekly PDF" if kind == "weekly" else "PDF"
-            return jsonify({"error": f"{prefix} compilation failed: {exc}"}), 500
+        return _compile_uploaded_pdf_request(
+            app,
+            data_dir=data_dir,
+            config_provider=config_provider,
+        )
 
     @app.post("/monthly/validate/<draft_id>")
     def validate_monthly_report_sources(draft_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return jsonify({"error": "Invalid Source Data Validation."}), 400
-        try:
-            review = _source_validation_payload(body.get("source_validation"))
-            if not review["confirmed"]:
-                raise ValueError("Confirm Source Data Validation before applying it.")
-            validation = draft.get("source_validation")
-            if not isinstance(validation, dict):
-                raise ValueError("This draft has no source validation data. Compile it again.")
-            raw_records = draft.get("_source_records")
-            if not isinstance(raw_records, list):
-                raise ValueError("The source records are unavailable. Compile the report again.")
-
-            project_records, project_excluded_records = resolve_project_records(
-                raw_records,
-                validation,
-                project_no=review["project_no"],
-                project_title=review["project_title"],
-                resolutions=review["project_resolutions"],
-            )
-            included_records, duplicate_excluded_records = resolve_duplicate_records(
-                project_records,
-                validation,
-                resolutions=review["duplicate_resolutions"],
-            )
-            excluded_records = project_excluded_records + duplicate_excluded_records
-            kind = _draft_report_type(draft)
-            mode = _normalise_report_mode(kind, draft.get("report_mode"))
-            period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
-            start, end = _parse_period(period.get("start"), period.get("end"), kind, mode)
-            project_no = review["project_no"]
-            project_title = review["project_title"]
-            source_method = str(draft.get("source_method") or "stored_json")
-            expected_dates = _expected_dates(start, end)
-            # Excel users may deliberately compile only some of the worksheets
-            # inside a period. Preserve that explicit selection when Source Data
-            # Validation re-aggregates the draft.
-            if source_method == "uploaded_excel":
-                coverage = draft.get("coverage") if isinstance(draft.get("coverage"), dict) else {}
-                selected_expected: list[str] = []
-                seen_expected: set[str] = set()
-                for value in coverage.get("expected_dates", []):
-                    text = str(value or "").strip()
-                    try:
-                        selected_day = datetime.strptime(text, "%Y-%m-%d")
-                    except ValueError:
-                        continue
-                    if start <= selected_day <= end and text not in seen_expected:
-                        seen_expected.add(text)
-                        selected_expected.append(text)
-                if selected_expected:
-                    expected_dates = sorted(selected_expected)
-            aggregated = aggregate_monthly_records(
-                included_records,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                project_no=project_no,
-                expected_dates=expected_dates,
-                work_hours_policy=_project_work_hours_policy(
-                    config_provider(), project_no=project_no, project_title=project_title
-                ),
-            )
-            selected_ids = {
-                str(item.get("report_id") or "")
-                for item in aggregated.get("source_records", [])
-                if isinstance(item, dict)
-            }
-            selected_records = [
-                record for record in included_records
-                if not selected_ids or str(record.get("report_id") or "") in selected_ids
-            ]
-            photo_limits = periodic_photo_limits(kind)
-            photo_warnings: list[str] = []
-            if source_method == "stored_json":
-                draft_photo_dir = _draft_photo_dir(data_dir, username, draft_id)
-                if draft_photo_dir is None:
-                    raise ValueError("Invalid report draft photo directory")
-                # A changed project/revision choice gets a fresh, bounded
-                # hydration pass. Canonical files remain read-only.
-                photo_limits = periodic_photo_limits(kind)
-                photo_warnings = attach_canonical_photo_candidates(
-                    selected_records,
-                    data_dir,
-                    draft_photo_dir,
-                    limits=photo_limits,
-                )
-                photo_warnings.extend(_bound_record_photo_candidates(selected_records, limits=photo_limits))
-                photo_warnings = _compact_review_warnings(photo_warnings)
-            warnings = [
-                str(value).strip()
-                for value in draft.get("warnings", [])
-                if str(value).strip()
-                and not (
-                    source_method == "stored_json"
-                    and _is_generated_stored_photo_warning(value)
-                )
-                and not re.fullmatch(
-                    r"(?:\d+ Daily Report source\(s\) were kept separate and excluded from this report"
-                    r"|\d+ duplicate Daily Report source\(s\) were not selected for this report)\.",
-                    str(value).strip(),
-                )
-            ]
-            if project_excluded_records:
-                warnings.append(
-                    f"{len(project_excluded_records)} Daily Report source(s) were kept separate and excluded from this report."
-                )
-            if duplicate_excluded_records:
-                warnings.append(
-                    f"{len(duplicate_excluded_records)} duplicate Daily Report source(s) were not selected for this report."
-                )
-            warnings.extend(photo_warnings)
-            refreshed = _prepare_draft(
-                aggregated,
-                project_no=project_no,
-                project_title=project_title,
-                date_from=start.strftime("%Y-%m-%d"),
-                date_to=end.strftime("%Y-%m-%d"),
-                report_mode=mode,
-                source_method=source_method,
-                source_manifest=_source_manifest(
-                    selected_records,
-                    source_method,
-                ),
-                report_context=_latest_report_context(selected_records),
-                extra_warnings=warnings,
-                report_type=kind,
-            )
-            decisions = {
-                str(row.get("group_key") or ""): str(row.get("decision") or "")
-                for row in review["project_resolutions"]
-                if isinstance(row, dict)
-            }
-            applied_validation = copy.deepcopy(validation)
-            if source_method == "stored_json":
-                retained_issues = []
-                for issue in applied_validation.get("issues", []):
-                    if not isinstance(issue, dict):
-                        continue
-                    if not _is_generated_stored_photo_warning(issue.get("message")):
-                        retained_issues.append(issue)
-                retained_issues.extend(
-                    {"severity": "warning", "message": message}
-                    for message in photo_warnings
-                )
-                applied_validation["issues"] = retained_issues
-            for group in applied_validation.get("project_groups", []):
-                if isinstance(group, dict):
-                    group["decision"] = decisions.get(str(group.get("key") or ""), "")
-            duplicate_decisions = {
-                str(row.get("group_key") or ""): str(row.get("selected_record_id") or "")
-                for row in review["duplicate_resolutions"]
-                if isinstance(row, dict)
-            }
-            for group in applied_validation.get("duplicate_groups", []):
-                if isinstance(group, dict):
-                    group["selected_record_id"] = duplicate_decisions.get(
-                        str(group.get("key") or ""),
-                        "",
-                    )
-            applied_validation.update({
-                "applied": True,
-                "confirmed": True,
-                "confirmed_by": username,
-                "confirmed_at": datetime.now().isoformat(timespec="seconds"),
-                "selected_project_no": project_no,
-                "selected_project_title": project_title,
-                "notes": review["notes"],
-                "included_record_count": len(selected_records),
-                "excluded_record_count": len(excluded_records),
-                "project_excluded_record_count": len(project_excluded_records),
-                "duplicate_excluded_record_count": len(duplicate_excluded_records),
-            })
-            refreshed["source_validation"] = applied_validation
-            refreshed["_source_records"] = copy.deepcopy(raw_records)
-            refreshed["photo_documentation"] = _photo_references_for_records(
-                selected_records,
-                previous=draft.get("photo_documentation"),
-                limits=photo_limits,
-            )
-            refreshed["photo_coverage"] = _photo_coverage_metadata(
-                selected_records, refreshed["photo_documentation"]
-            )
-            refreshed["draft_id"] = draft_id
-            refreshed["owner"] = username
-            refreshed["created_at"] = draft.get(
-                "created_at", datetime.now().isoformat(timespec="seconds")
-            )
-            _update_draft(data_dir, username, refreshed)
-            if source_method == "stored_json":
-                _prune_draft_photo_assets(
-                    data_dir,
-                    username,
-                    draft_id,
-                    refreshed.get("photo_documentation"),
-                )
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": refreshed})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception:
-            app.logger.exception("Source validation failed for report draft %s", draft_id)
-            return jsonify({"error": "Source validation failed. Retry or check the server logs."}), 500
+        return _validate_periodic_report_sources_request(
+            app,
+            data_dir=data_dir,
+            config_provider=config_provider,
+            draft_id=draft_id,
+        )
 
     @app.post("/monthly/workforce/timesheet/<draft_id>/preview")
     def preview_monthly_timesheet(draft_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        try:
-            _require_applied_source_validation(draft)
-            period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
-            preview = compile_timesheets(
-                _workbook_uploads(),
-                start_date=period.get("start"),
-                end_date=period.get("end"),
-                cutoff_date=request.form.get("cutoff_date") or None,
-            )
-            set_timesheet_preview(draft, preview, actor=username)
-            draft.pop("ai_summary", None)
-            _update_draft(data_dir, username, draft)
-            if activity_logger:
-                activity_logger(username, "periodic_timesheet_reviewed", f"draft={draft_id}")
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except (TimesheetError, ValueError) as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception:
-            app.logger.exception("Timesheet preview failed for draft %s", draft_id)
-            return jsonify({"error": "Timesheet could not be analyzed. Check the workbook format."}), 500
+        return _preview_periodic_timesheet_request(
+            app,
+            data_dir=data_dir,
+            activity_logger=activity_logger,
+            draft_id=draft_id,
+        )
 
     @app.post("/monthly/workforce/timesheet/<draft_id>/decision")
     def decide_monthly_timesheet(draft_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return jsonify({"error": "Invalid timesheet decision."}), 400
-        try:
-            _require_applied_source_validation(draft)
-            decide_timesheet(
-                draft,
-                str(body.get("decision") or ""),
-                confirm_exceptions=bool(body.get("confirm_exceptions")),
-                actor=username,
-            )
-            _refresh_deterministic_summary(draft)
-            draft.pop("ai_summary", None)
-            _update_draft(data_dir, username, draft)
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+        return _decide_periodic_timesheet_request(
+            data_dir=data_dir,
+            draft_id=draft_id,
+        )
 
     @app.post("/monthly/workforce/overtime/<draft_id>/preview")
     def preview_monthly_overtime(draft_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        try:
-            _require_applied_source_validation(draft)
-            period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
-            preview = parse_overtime_workbooks(
-                _workbook_uploads(),
-                period_start=period.get("start"),
-                period_end=period.get("end"),
-            )
-            set_overtime_preview(draft, preview, actor=username)
-            draft.pop("ai_summary", None)
-            _update_draft(data_dir, username, draft)
-            if activity_logger:
-                activity_logger(username, "periodic_overtime_reviewed", f"draft={draft_id}")
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception:
-            app.logger.exception("Overtime preview failed for draft %s", draft_id)
-            return jsonify({"error": "Overtime workbook could not be analyzed."}), 500
+        return _preview_periodic_overtime_request(
+            app,
+            data_dir=data_dir,
+            activity_logger=activity_logger,
+            draft_id=draft_id,
+        )
 
     @app.post("/monthly/workforce/overtime/<draft_id>/decision")
     def decide_monthly_overtime(draft_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return jsonify({"error": "Invalid overtime decision."}), 400
-        try:
-            _require_applied_source_validation(draft)
-            decide_overtime(
-                draft,
-                str(body.get("decision") or ""),
-                resolutions=body.get("resolutions"),
-                record_resolutions=body.get("record_resolutions"),
-                confirm_exceptions=bool(body.get("confirm_exceptions")),
-                actor=username,
-            )
-            _refresh_deterministic_summary(draft)
-            draft.pop("ai_summary", None)
-            _update_draft(data_dir, username, draft)
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+        return _decide_periodic_overtime_request(
+            data_dir=data_dir,
+            draft_id=draft_id,
+        )
 
     @app.post("/monthly/workforce/reset/<draft_id>")
     def reset_monthly_workforce(draft_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        reset_workforce(draft)
-        _refresh_deterministic_summary(draft)
-        draft.pop("ai_summary", None)
-        _update_draft(data_dir, username, draft)
-        return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+        return _reset_periodic_workforce_request(
+            data_dir=data_dir,
+            draft_id=draft_id,
+        )
 
     @app.post("/monthly/ai-summary/<draft_id>")
     def generate_monthly_ai_summary(draft_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        if _ai_admin_only() and not bool(session.get("is_admin")):
-            return jsonify({"error": "Only an administrator may use the paid AI summary service."}), 403
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        ai_lock: tuple[Path, str] | None = None
-        try:
-            _require_applied_source_validation(draft)
-            if has_pending_workforce_review(draft):
-                raise ValueError("Apply or keep every timesheet/overtime preview before generating AI suggestions.")
-            ai_lock = _acquire_ai_draft_lock(data_dir, username, draft_id)
-            if ai_lock is None:
-                return _ai_retry_response(
-                    "AI summary generation is already running for this report draft.",
-                    code="ai_generation_in_progress",
-                    status=409,
-                    retry_after=_AI_DRAFT_LOCK_RETRY_SECONDS,
-                )
-
-            # Reload after taking the cross-process lock. Another request may
-            # have updated validation or workforce decisions while this
-            # request was waiting to acquire it.
-            draft = _load_draft(data_dir, username, draft_id)
-            if draft is None:
-                return jsonify({"error": "Report draft not found."}), 404
-            _require_applied_source_validation(draft)
-            if has_pending_workforce_review(draft):
-                raise ValueError("Apply or keep every timesheet/overtime preview before generating AI suggestions.")
-            # Build the provider input from a refreshed deterministic snapshot,
-            # but do not mutate client-facing draft fields merely because the
-            # user requested an AI suggestion. Those fields change only after
-            # the reviewer explicitly accepts the suggestion.
-            grounded_draft = copy.deepcopy(draft)
-            _refresh_deterministic_summary(grounded_draft)
-
-            remaining = _ai_cooldown_remaining(draft)
-            if remaining:
-                return _ai_retry_response(
-                    f"Wait {remaining} seconds before retrying AI for this report draft.",
-                    code="ai_cooldown_active",
-                    status=429,
-                    retry_after=remaining,
-                )
-
-            # Persist the cooldown before the billable provider request. This
-            # prevents rapid retries after timeouts/provider failures and also
-            # closes the race between multiple Railway workers.
-            started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            draft["ai_request_control"] = {
-                "version": "periodic-ai-request-control/1",
-                "last_started_at": started_at,
-                "last_started_by": username,
-                "attempt_id": uuid.uuid4().hex,
-            }
-            _update_draft(data_dir, username, draft)
-            envelope = generate_ai_summary(grounded_draft)
-            raw = envelope.get("suggestion") if isinstance(envelope.get("suggestion"), dict) else {}
-            concerns = []
-            concern_evidence = []
-            concern_actions = (
-                raw.get("concern_actions")
-                if isinstance(raw.get("concern_actions"), list)
-                else []
-            )
-            for row in concern_actions[:75]:
-                if not isinstance(row, dict):
-                    continue
-                concern = _clean_text(row.get("concern"), 2_000)
-                action = _clean_text(row.get("corrective_action"), 2_000)
-                if concern or action:
-                    references = _clean_ai_references(row)
-                    concerns.append({
-                        "concern": concern,
-                        "corrective_action": action,
-                        **references,
-                    })
-                    concern_evidence.append(references)
-            lookahead = []
-            lookahead_evidence = []
-            for row in raw.get("lookahead", [])[:75] if isinstance(raw.get("lookahead"), list) else []:
-                text = _claim_text(row)
-                if text:
-                    lookahead.append(text)
-                    lookahead_evidence.append(_clean_ai_references(row))
-            current_activities = []
-            current_activity_evidence = []
-            for row in raw.get("current_activities", [])[:75] if isinstance(raw.get("current_activities"), list) else []:
-                if not isinstance(row, dict):
-                    continue
-                text = _claim_text(row)
-                area = _clean_text(row.get("area"), 200)
-                workstream = _clean_text(row.get("workstream"), 200)
-                stable_id = _clean_text(row.get("stable_id"), 100)
-                if text:
-                    references = _clean_ai_references(row)
-                    current_activities.append({
-                        "stable_id": stable_id,
-                        "area": area,
-                        "workstream": workstream,
-                        "text": text,
-                        **references,
-                    })
-                    current_activity_evidence.append(references)
-
-            # Claude may polish wording, but deterministic Area + Workstream
-            # grouping remains authoritative and is restored before review.
-            current_activities = _align_ai_activity_rows(
-                current_activities, grounded_draft, preserve_unmatched_baseline=True
-            )
-            # Preserve deterministic source status even when Claude omits it.
-            current_activities = _enrich_activity_statuses(current_activities, grounded_draft)
-
-            claim_evidence = [
-                _clean_ai_references(row)
-                for row in (raw.get("claims", [])[:75] if isinstance(raw.get("claims"), list) else [])
-            ]
-            citation_evidence = {
-                key: _clean_ai_references(raw.get(key))
-                for key in (
-                    "executive_summary",
-                    "engineering_summary",
-                    "procurement_summary",
-                    "site_summary",
-                )
-            }
-            citation_evidence.update({
-                "current_activities": current_activity_evidence,
-                "concern_actions": concern_evidence,
-                "lookahead": lookahead_evidence,
-                "claims": claim_evidence,
-            })
-            current_engineering = (
-                grounded_draft.get("engineering")
-                if isinstance(grounded_draft.get("engineering"), dict)
-                else {}
-            )
-            current_procurement = (
-                grounded_draft.get("procurement")
-                if isinstance(grounded_draft.get("procurement"), dict)
-                else {}
-            )
-            current_site = (
-                grounded_draft.get("site")
-                if isinstance(grounded_draft.get("site"), dict)
-                else {}
-            )
-            display = {
-                # A missing AI section must never make the review look worse
-                # than the deterministic draft that existed before AI.
-                "executive_summary": _executive_ai_candidate(
-                    grounded_draft, raw.get("executive_summary")
-                ),
-                "engineering_summary": _usable_ai_text(raw.get("engineering_summary"))
-                or _clean_text(current_engineering.get("summary"), 4_000),
-                "procurement_summary": _usable_ai_text(raw.get("procurement_summary"))
-                or _clean_text(current_procurement.get("summary"), 4_000),
-                "site_summary": _usable_ai_text(raw.get("site_summary"))
-                or _clean_text(current_site.get("summary"), 4_000),
-                "current_activities": current_activities,
-                "concerns": concerns,
-                "lookahead": lookahead,
-                "citation_evidence": citation_evidence,
-                "missing_data": _clean_ai_missing_data(raw.get("missing_data")),
-            }
-            draft["ai_summary"] = {
-                "status": "suggested",
-                "requested_at": started_at,
-                "requested_by": username,
-                "suggestion": display,
-                "provider_envelope": envelope,
-            }
-            _update_draft(data_dir, username, draft)
-            if activity_logger:
-                activity_logger(username, "periodic_ai_suggestion_generated", f"draft={draft_id} model={envelope.get('model', '')}")
-            return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except AISummaryError as exc:
-            diagnostic = exc.to_dict()
-            app.logger.warning(
-                "AI summary failed code=%s status=%s retryable=%s type=%s request_id=%s detail=%s",
-                exc.code,
-                diagnostic.get("status_code", ""),
-                exc.retryable,
-                diagnostic.get("provider_error_type", ""),
-                diagnostic.get("provider_request_id", ""),
-                diagnostic.get("provider_detail", ""),
-            )
-            if exc.code == "rate_limited":
-                return _ai_retry_response(
-                    str(exc),
-                    code="rate_limited",
-                    status=429,
-                    retry_after=30,
-                )
-            status = 503 if exc.code in {"missing_api_key", "billing_required", "connection_error"} else 502
-            payload = dict(diagnostic)
-            payload["error"] = payload.pop("message", str(exc))
-            return jsonify(payload), status
-        except Exception:
-            app.logger.exception("AI summary failed for draft %s", draft_id)
-            return jsonify({"error": "AI summary failed unexpectedly. The report content is unchanged."}), 500
-        finally:
-            _release_ai_draft_lock(ai_lock)
+        return _generate_periodic_ai_summary_request(
+            app,
+            data_dir=data_dir,
+            activity_logger=activity_logger,
+            draft_id=draft_id,
+        )
 
     @app.post("/monthly/ai-summary/<draft_id>/decision")
     def decide_monthly_ai_summary(draft_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        state = draft.get("ai_summary") if isinstance(draft.get("ai_summary"), dict) else None
-        if state is None or state.get("status") != "suggested":
-            return jsonify({"error": "Generate an AI suggestion before saving a decision."}), 400
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict) or body.get("decision") not in {"accept", "reject"}:
-            return jsonify({"error": "AI decision must be accept or reject."}), 400
-        decision = str(body["decision"])
-        if decision == "accept":
-            try:
-                accepted = _clean_ai_review(body.get("suggestion"))
-            except ValueError as exc:
-                return jsonify({"error": str(exc)}), 400
-            engineering = draft.get("engineering") if isinstance(draft.get("engineering"), dict) else {}
-            procurement = draft.get("procurement") if isinstance(draft.get("procurement"), dict) else {}
-            site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
-
-            # Accept AI only where it actually improved/provided narrative.
-            # Empty/Not supplied values preserve the deterministic draft.
-            if accepted["executive_summary"] and accepted["executive_summary"].casefold() != "not supplied":
-                draft["executive_summary"] = accepted["executive_summary"]
-            ai_meta = {
-                "source_type": "ai_narrative",
-                "accepted_by": username,
-                "accepted_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                "provider_model": _clean_text(
-                    state.get("provider_envelope", {}).get("model")
-                    if isinstance(state.get("provider_envelope"), dict) else "",
-                    200,
-                ),
-            }
-            citation_evidence = (
-                state.get("suggestion", {}).get("citation_evidence")
-                if isinstance(state.get("suggestion"), dict) else {}
-            )
-            if accepted["engineering_summary"] and accepted["engineering_summary"].casefold() != "not supplied":
-                engineering["summary"] = accepted["engineering_summary"]
-                engineering["narrative_source_meta"] = {
-                    **ai_meta,
-                    "evidence": copy.deepcopy(citation_evidence.get("engineering_summary", {}))
-                    if isinstance(citation_evidence, dict) else {},
-                }
-            if accepted["procurement_summary"] and accepted["procurement_summary"].casefold() != "not supplied":
-                procurement["summary"] = accepted["procurement_summary"]
-                procurement["narrative_source_meta"] = {
-                    **ai_meta,
-                    "evidence": copy.deepcopy(citation_evidence.get("procurement_summary", {}))
-                    if isinstance(citation_evidence, dict) else {},
-                }
-            if accepted["site_summary"] and accepted["site_summary"].casefold() != "not supplied":
-                site["summary"] = accepted["site_summary"]
-                site["narrative_source_meta"] = {
-                    **ai_meta,
-                    "evidence": copy.deepcopy(citation_evidence.get("site_summary", {}))
-                    if isinstance(citation_evidence, dict) else {},
-                }
-
-            # The original deterministic activities remain in draft["activities"].
-            # Once explicitly accepted, the site section may use Claude's
-            # source-grounded, de-duplicated bullets for the client-facing 5.2 section.
-            if accepted["current_activities"]:
-                ai_activities = _align_ai_activity_rows(
-                    copy.deepcopy(accepted["current_activities"]),
-                    draft,
-                    preserve_unmatched_baseline=True,
-                )
-                ai_activities = _enrich_activity_statuses(ai_activities, draft)
-                site["this_month_activities"] = ai_activities
-                site["current_period_activities"] = ai_activities
-                site["this_period_activities"] = ai_activities
-                if _draft_report_type(draft) == "weekly":
-                    site["this_week_activities"] = ai_activities
-
-            # AI suggestions may improve wording, but accepting them must not
-            # erase deterministic constraints or look-ahead items already
-            # extracted from the Daily Reports.
-            existing_concerns = site.get("concerns") if isinstance(site.get("concerns"), list) else []
-            merged_concerns = _merge_concern_rows(existing_concerns, accepted["concerns"])
-            existing_lookahead = site.get("next_period_activities", site.get("next_month_activities", []))
-            existing_lookahead_text = _list_text(existing_lookahead)
-            if existing_lookahead_text:
-                # Source/manual look-ahead is authoritative. Claude may polish
-                # narrative elsewhere, but it must not append paraphrases of
-                # already extracted period-end Activity Tomorrow items because
-                # that creates duplicate client-facing planned activities.
-                merged_lookahead = copy.deepcopy(existing_lookahead)
-                if not isinstance(merged_lookahead, list):
-                    merged_lookahead = existing_lookahead_text
-            else:
-                merged_lookahead = []
-                seen_lookahead: set[str] = set()
-                for item in accepted["lookahead"]:
-                    key = re.sub(r"[^a-z0-9]+", " ", item.casefold()).strip()
-                    if key and key not in seen_lookahead:
-                        merged_lookahead.append(item)
-                        seen_lookahead.add(key)
-            site["concerns"] = merged_concerns
-            site["next_month_activities"] = merged_lookahead
-            site["next_period_activities"] = merged_lookahead
-            if _draft_report_type(draft) == "weekly":
-                site["next_week_activities"] = merged_lookahead
-            draft["engineering"] = engineering
-            draft["procurement"] = procurement
-            draft["site"] = site
-            draft["narrative_mode"] = "ai_enhanced"
-            state["accepted_values"] = accepted
-        elif decision == "reject":
-            draft["narrative_mode"] = "deterministic"
-        state["status"] = "accepted" if decision == "accept" else "rejected"
-        state["decided_by"] = username
-        state["decided_at"] = datetime.now().isoformat(timespec="seconds")
-        _update_draft(data_dir, username, draft)
-        return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
+        return _decide_periodic_ai_summary_request(
+            data_dir=data_dir,
+            draft_id=draft_id,
+        )
 
     @app.get("/monthly/photos/<draft_id>/<asset_id>")
     def get_monthly_draft_photo(draft_id: str, asset_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None or not is_asset_id(asset_id):
-            return jsonify({"error": "Photo not found."}), 404
-        photos = draft.get("photo_documentation")
-        allowed = {
-            str(item.get("asset_id") or "")
-            for item in (photos if isinstance(photos, list) else []) if isinstance(item, dict)
-        }
-        if asset_id not in allowed:
-            return jsonify({"error": "Photo not found."}), 404
-        directory = _draft_photo_dir(data_dir, username, draft_id, create=False)
-        path = directory / asset_filename(asset_id) if directory is not None else None
-        if path is None or not path.is_file():
-            return jsonify({"error": "Photo asset is unavailable."}), 404
-        return send_file(
-            path,
-            mimetype="image/jpeg",
-            as_attachment=False,
-            conditional=True,
-            max_age=3600,
+        return _get_periodic_draft_photo_request(
+            data_dir=data_dir,
+            draft_id=draft_id,
+            asset_id=asset_id,
         )
 
     @app.patch("/monthly/photos/<draft_id>")
@@ -6766,402 +8424,59 @@ def register_monthly_routes(
         auth = require_login_json()
         if auth:
             return auth
-        if request.content_length is not None and request.content_length > _MAX_PHOTO_REVIEW_BYTES:
-            return jsonify({"error": "Photo review request is too large."}), 413
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        body = request.get_json(silent=True)
-        photos = body.get("photos") if isinstance(body, dict) else None
-        if not isinstance(photos, list):
-            return jsonify({"error": "photos must be a list."}), 400
-        photo_limits = periodic_photo_limits(_draft_report_type(draft))
-        if len(photos) > photo_limits.max_images_per_draft:
-            return jsonify({
-                "error": f"A {_report_name(_draft_report_type(draft))} report may contain at most {photo_limits.max_images_per_draft} photos."
-            }), 400
-
-        current = draft.get("photo_documentation")
-        current_by_id = {
-            str(item.get("asset_id") or ""): item
-            for item in (current if isinstance(current, list) else []) if isinstance(item, dict)
-            and is_asset_id(item.get("asset_id"))
-        }
-        cleaned: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for index, item in enumerate(photos):
-            if not isinstance(item, dict):
-                return jsonify({"error": "Each photo review item must be an object."}), 400
-            asset_id = str(item.get("asset_id") or "")
-            if asset_id in seen or asset_id not in current_by_id:
-                return jsonify({"error": "Photo review contains an unknown or duplicate asset."}), 400
-            seen.add(asset_id)
-            reference = copy.deepcopy(current_by_id[asset_id])
-            reference.pop("data", None)
-            reference.pop("path", None)
-            reference["caption"] = _clean_text(item.get("caption"), 500)
-            reference["order"] = index
-            cleaned.append(reference)
-
-        draft["photo_documentation"] = cleaned
-        draft["photo_review"] = {
-            "confirmed": True,
-            "confirmed_by": username,
-            "confirmed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "count": len(cleaned),
-        }
-        _update_draft(data_dir, username, draft)
-        return jsonify({"ok": True, "count": len(cleaned), "photos": cleaned, "photo_review": draft["photo_review"]})
+        return _update_periodic_draft_photos_request(
+            data_dir=data_dir,
+            draft_id=draft_id,
+        )
 
     @app.post("/monthly/preview/<draft_id>")
     def preview_monthly_report(draft_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        draft = _load_draft(data_dir, session["username"], draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        kind = _draft_report_type(draft)
-        report_name = _report_name(kind)
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return jsonify({"error": "Invalid review data."}), 400
-        try:
-            reviewed = _apply_review(draft, body, actor=session.get("username", ""))
-            _refresh_deterministic_summary(reviewed)
-            _update_draft(data_dir, session["username"], reviewed)
-            buffer = _render(
-                reviewed,
-                config_provider(),
-                photo_base_dir=_draft_photo_dir(
-                    data_dir,
-                    session["username"],
-                    draft_id,
-                    create=False,
-                ),
-            )
-            return send_file(
-                buffer,
-                mimetype="application/pdf",
-                as_attachment=False,
-                download_name=f"{report_name} Progress Report Preview.pdf",
-            )
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception as exc:
-            app.logger.exception("%s preview failed", report_name)
-            return jsonify({"error": f"{report_name} preview failed: {exc}"}), 500
+        return _preview_periodic_report_request(
+            app,
+            data_dir=data_dir,
+            config_provider=config_provider,
+            draft_id=draft_id,
+        )
 
     @app.post("/monthly/generate/<draft_id>")
     def generate_monthly_report_route(draft_id: str):
         auth = require_login_json()
         if auth:
             return auth
-        username = session["username"]
-        draft = _load_draft(data_dir, username, draft_id)
-        if draft is None:
-            return jsonify({"error": "Report draft not found."}), 404
-        kind = _draft_report_type(draft)
-        report_name = _report_name(kind)
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return jsonify({"error": "Invalid review data."}), 400
-        try:
-            reviewed = _apply_review(draft, body, actor=session.get("username", ""))
-            _refresh_deterministic_summary(reviewed)
-            is_final = reviewed.get("status") == "final"
-            preflight = build_report_preflight(reviewed, for_final=is_final)
-            preflight = _append_runtime_preflight_blockers(
-                preflight,
-                data_dir=data_dir,
-                username=username,
-                draft_id=draft_id,
-                report=reviewed,
-                for_final=is_final,
-            )
-            if preflight["blockers"]:
-                return jsonify({
-                    "error": _preflight_failure_message(preflight),
-                    "preflight": preflight,
-                }), 400
-            if is_final and not bool(body.get("confirm_final")):
-                return jsonify({
-                    "error": f"Confirm that all warnings, missing dates, and {kind} values were reviewed before saving a Final report.",
-                    "preflight": preflight,
-                }), 400
-            override_reason = _clean_text(
-                body.get("final_review_reason")
-                or body.get("notes")
-                or (reviewed.get("source_validation", {}).get("notes")
-                    if isinstance(reviewed.get("source_validation"), dict) else ""),
-                2_000,
-            )
-            if (
-                is_final and preflight.get("requires_override_reason")
-                and not override_reason and bool(body.get("confirm_final"))
-            ):
-                # Backward-compatible with the existing Final-confirmation UI:
-                # the system still persists an explicit reason and approver.
-                override_reason = "Partial Daily Report coverage explicitly confirmed for Final issue."
-            if is_final:
-                reviewed["final_review"] = {
-                    "confirmed": True,
-                    "confirmed_by": username,
-                    "confirmed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                    "override_reason": override_reason,
-                    "preflight": preflight,
-                }
-            # Draft-local raw sources are needed only while applying project
-            # decisions. Do not copy them into the issued report JSON.
-            reviewed.pop("_source_records", None)
-            index = get_monthly_reports_index(data_dir, username)
-            same_period = [row for row in index if (
-                (row.get("report_type") or "monthly") == kind
-                and row.get("project_no") == reviewed.get("project_no")
-                and row.get("period_start") == reviewed.get("period", {}).get("start")
-                and row.get("period_end") == reviewed.get("period", {}).get("end")
-            )]
-            revision = max([int(row.get("revision", 0)) for row in same_period] or [0]) + 1
-            prior_final = [row for row in same_period if str(row.get("status") or "").lower() == "final"]
-            revision_reason = _clean_text(body.get("revision_reason"), 2_000)
-            if (
-                is_final
-                and prior_final
-                and not revision_reason
-                and _REQUIRE_FINAL_REVISION_REASON
-            ):
-                return jsonify({
-                    "error": "Revision reason is required when issuing a new Final revision for the same period."
-                }), 400
-            reviewed["revision_reason"] = revision_reason
-            filename = _monthly_filename(reviewed, revision)
-            reports_dir = _monthly_user_dir(data_dir, username) / "reports"
-            reviewed["revision_rows"] = _revision_history_rows(
-                reports_dir, same_period, reviewed, revision
-            )
-            pdf_path = reports_dir / filename
-            json_filename = f"{Path(filename).stem}.json"
-            json_path = reports_dir / json_filename
-            buffer = _render(
-                reviewed,
-                config_provider(),
-                photo_base_dir=_draft_photo_dir(
-                    data_dir,
-                    username,
-                    draft_id,
-                    create=False,
-                ),
-            )
-            pdf_bytes = buffer.getvalue()
-            temporary = pdf_path.with_name(f"{pdf_path.name}.{uuid.uuid4().hex}.tmp")
-            try:
-                with temporary.open("wb") as handle:
-                    handle.write(pdf_bytes)
-                os.replace(temporary, pdf_path)
-            finally:
-                if temporary.exists():
-                    try:
-                        temporary.unlink()
-                    except OSError:
-                        pass
-
-            reviewed["monthly_report_id"] = uuid.uuid4().hex
-            reviewed["report_id"] = reviewed["monthly_report_id"]
-            if kind == "weekly":
-                reviewed["weekly_report_id"] = reviewed["monthly_report_id"]
-            reviewed["revision"] = revision
-            reviewed["generated_at"] = datetime.now().isoformat(timespec="seconds")
-            reviewed["filename"] = filename
-            _atomic_json(json_path, _issued_report_copy(reviewed))
-            entry = {
-                "monthly_report_id": reviewed["monthly_report_id"],
-                "report_id": reviewed["monthly_report_id"],
-                "report_type": kind,
-                "filename": filename,
-                "json_filename": json_filename,
-                "project_no": reviewed.get("project_no", ""),
-                "project_title": reviewed.get("project_title", ""),
-                "period_start": reviewed.get("period", {}).get("start", ""),
-                "period_end": reviewed.get("period", {}).get("end", ""),
-                "status": reviewed.get("status", "draft"),
-                "source_method": reviewed.get("source_method", ""),
-                "revision": revision,
-                "revision_reason": revision_reason,
-                "issued_date": _clean_text(reviewed.get("issued_date"), 20)[:10],
-                "revision_row": copy.deepcopy(reviewed.get("revision_rows", [{}])[-1])
-                if isinstance(reviewed.get("revision_rows"), list) and reviewed.get("revision_rows")
-                else {},
-                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "size_kb": round(len(pdf_bytes) / 1024, 1),
-                "lifecycle_status": "active",
-            }
-            if is_final:
-                for row in index:
-                    if (
-                        (row.get("report_type") or "monthly") == kind
-                        and row.get("project_no") == entry["project_no"]
-                        and row.get("period_start") == entry["period_start"]
-                        and row.get("period_end") == entry["period_end"]
-                        and str(row.get("status") or "").lower() == "final"
-                        and str(row.get("lifecycle_status") or "active") == "active"
-                    ):
-                        row["lifecycle_status"] = "superseded"
-                        row["superseded_by"] = reviewed["monthly_report_id"]
-                        row["superseded_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            index.insert(0, entry)
-            _save_monthly_index(data_dir, username, index)
-            _update_draft(data_dir, username, reviewed)
-            if activity_logger:
-                detail = (
-                    f"project={entry['project_no']} period={entry['period_start']}..{entry['period_end']} revision={revision}"
-                )
-                if kind == "weekly":
-                    detail = f"type=weekly {detail}"
-                activity_logger(
-                    username,
-                    f"{kind}_report_generated",
-                    detail,
-                )
-            return jsonify({
-                "ok": True,
-                "filename": filename,
-                "download_url": url_for("download_monthly_report", filename=filename),
-                "report": entry,
-            })
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception as exc:
-            app.logger.exception("%s report generation failed", report_name)
-            return jsonify({"error": f"{report_name} report generation failed: {exc}"}), 500
+        return _generate_periodic_report_request(
+            app,
+            data_dir=data_dir,
+            config_provider=config_provider,
+            activity_logger=activity_logger,
+            draft_id=draft_id,
+        )
 
     @app.get("/monthly/download/<path:filename>")
     def download_monthly_report(filename: str):
-        if "username" not in session:
-            return "Login required", 401
-        username = session["username"]
-        basename = os.path.basename(filename)
-        if filename != basename:
-            return "Invalid filename", 400
-        index = get_monthly_reports_index(data_dir, username)
-        if not any(row.get("filename") == basename for row in index):
-            return "Not found", 404
-        path = _monthly_user_dir(data_dir, username) / "reports" / basename
-        if not path.is_file():
-            return "Not found", 404
-        return send_file(path, as_attachment=True, download_name=basename, mimetype="application/pdf")
+        return _download_periodic_report_request(
+            data_dir=data_dir,
+            filename=filename,
+        )
 
     @app.post("/monthly/delete")
     def delete_monthly_report():
         auth = require_login_json()
         if auth:
             return auth
-        body = request.get_json(silent=True) or {}
-        filename = str(body.get("filename") or "")
-        basename = os.path.basename(filename)
-        if not basename or filename != basename:
-            return jsonify({"error": "Invalid filename."}), 400
-        username = session["username"]
-        index = get_monthly_reports_index(data_dir, username)
-        matches = [row for row in index if row.get("filename") == basename]
-        if not matches:
-            return jsonify({"error": "Report not found."}), 404
-        deleting_final = any(str(row.get("status") or "").lower() == "final" for row in matches)
-        if deleting_final and not _ALLOW_FINAL_REPORT_DELETE:
-            return jsonify({
-                "error": (
-                    "Final reports are protected and cannot be deleted while "
-                    "PROTECT_FINAL_PERIODIC_REPORTS=true."
-                )
-            }), 409
-
-        reports_dir = _monthly_user_dir(data_dir, username) / "reports"
-        for match in matches:
-            for name in (match.get("filename"), match.get("json_filename")):
-                if not name or os.path.basename(str(name)) != str(name):
-                    continue
-                path = reports_dir / str(name)
-                if path.is_file():
-                    path.unlink()
-
-        remaining_index = [row for row in index if row.get("filename") != basename]
-
-        # When the active/latest Final is hard-deleted during testing, restore the
-        # newest remaining Final for the same project/period to "active".  Without
-        # this repair, an older revision can remain permanently marked superseded
-        # even though the revision that superseded it no longer exists.
-        if deleting_final:
-            deleted = matches[0]
-            kind = str(deleted.get("report_type") or "monthly")
-            project_no = deleted.get("project_no")
-            period_start = deleted.get("period_start")
-            period_end = deleted.get("period_end")
-            same_period_finals = [
-                row for row in remaining_index
-                if (
-                    (row.get("report_type") or "monthly") == kind
-                    and row.get("project_no") == project_no
-                    and row.get("period_start") == period_start
-                    and row.get("period_end") == period_end
-                    and str(row.get("status") or "").lower() == "final"
-                    and str(row.get("lifecycle_status") or "active").lower() != "void"
-                )
-            ]
-            if same_period_finals and not any(
-                str(row.get("lifecycle_status") or "active").lower() == "active"
-                for row in same_period_finals
-            ):
-                latest_remaining = max(
-                    same_period_finals,
-                    key=lambda row: int(row.get("revision", 0) or 0),
-                )
-                latest_remaining["lifecycle_status"] = "active"
-                latest_remaining.pop("superseded_by", None)
-                latest_remaining.pop("superseded_at", None)
-
-        _save_monthly_index(data_dir, username, remaining_index)
-        if activity_logger:
-            report_type = str(matches[0].get("report_type") or "monthly")
-            detail = basename
-            if deleting_final:
-                detail = f"{basename} [FINAL hard-delete sandbox/testing]"
-            activity_logger(username, f"{report_type}_report_deleted", detail)
-        return jsonify({
-            "ok": True,
-            "deleted_final": deleting_final,
-            "testing_override": bool(deleting_final and _ALLOW_FINAL_REPORT_DELETE),
-            "final_protection_enabled": _PROTECT_FINAL_PERIODIC_REPORTS,
-        })
+        return _delete_periodic_report_request(
+            data_dir=data_dir,
+            activity_logger=activity_logger,
+        )
 
     @app.post("/monthly/void")
     def void_monthly_report():
         auth = require_login_json()
         if auth:
             return auth
-        body = request.get_json(silent=True) or {}
-        filename = str(body.get("filename") or "")
-        basename = os.path.basename(filename)
-        reason = _clean_text(body.get("reason"), 2_000)
-        if not basename or filename != basename:
-            return jsonify({"error": "Invalid filename."}), 400
-        if not reason:
-            return jsonify({"error": "A void reason is required."}), 400
-        username = session["username"]
-        index = get_monthly_reports_index(data_dir, username)
-        matches = [row for row in index if row.get("filename") == basename]
-        if not matches:
-            return jsonify({"error": "Report not found."}), 404
-        if not all(str(row.get("status") or "").lower() == "final" for row in matches):
-            return jsonify({"error": "Only Final reports use the void lifecycle action."}), 400
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        for row in index:
-            if row.get("filename") == basename:
-                row["lifecycle_status"] = "void"
-                row["void_reason"] = reason
-                row["voided_by"] = username
-                row["voided_at"] = now
-        _save_monthly_index(data_dir, username, index)
-        if activity_logger:
-            report_type = str(matches[0].get("report_type") or "monthly")
-            activity_logger(username, f"{report_type}_report_voided", f"{basename} reason={reason}")
-        return jsonify({"ok": True, "filename": basename, "lifecycle_status": "void"})
+        return _void_periodic_report_request(
+            data_dir=data_dir,
+            activity_logger=activity_logger,
+        )
