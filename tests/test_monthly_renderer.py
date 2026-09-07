@@ -18,6 +18,16 @@ def _pdf_text(pdf_bytes: bytes) -> str:
     return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
+def _outline_destinations(reader: PdfReader, nodes=None):
+    result = []
+    for node in reader.outline if nodes is None else nodes:
+        if isinstance(node, list):
+            result.extend(_outline_destinations(reader, node))
+        else:
+            result.append((node.title, reader.get_destination_page_number(node)))
+    return result
+
+
 class MonthlyReportRendererTests(unittest.TestCase):
     def test_minimal_report_hides_every_empty_chapter(self):
         result = render_monthly_report({})
@@ -163,6 +173,78 @@ class MonthlyReportRendererTests(unittest.TestCase):
         self.assertIn("Appendix 4.1 - QC Document", text)
         self.assertNotIn("Executive Summary", text)
         self.assertNotIn("Safety Status", text)
+
+    def test_empty_concern_is_hidden_and_findings_receive_the_next_number(self):
+        base = {
+            "report_type": "weekly",
+            "progress": {"rows": [{
+                "description": "Total Overall",
+                "previous": 10,
+                "this_week": 2,
+                "to_date": 12,
+                "plan": 13,
+                "is_total": True,
+            }]},
+            "safety": {"total_manpower": 12},
+            "site": {
+                "schedule_status": "On track",
+                "this_week_activities": ["Alignment"],
+                "next_week_activities": ["Continue alignment"],
+                "constraint_reporting": {
+                    "not_supplied_dates": ["2026-01-01"],
+                },
+                "concerns": [{"concern": "No constraint", "corrective_action": ""}],
+                "key_findings": [{
+                    "date": "2026-01-01",
+                    "area": "Generator 2",
+                    "text": "Waiting for coordination",
+                }],
+            },
+        }
+
+        text = _pdf_text(render_monthly_report(base).getvalue())
+
+        self.assertNotIn("Area of Concern and Suggested Corrective Action", text)
+        self.assertNotIn("Concern and closeout information was not supplied", text)
+        self.assertIn("3.4 Key Remarks / Findings", text)
+
+        with_concern = dict(base)
+        with_concern["site"] = dict(base["site"])
+        with_concern["site"]["concerns"] = [{
+            "concern": "Oil flushing coordination is pending",
+            "corrective_action": "Coordinate flushing schedule",
+        }]
+        text = _pdf_text(render_monthly_report(with_concern).getvalue())
+        self.assertIn("3.4 Area of Concern and Suggested Corrective Action", text)
+        self.assertIn("3.5 Key Remarks / Findings", text)
+
+    def test_outline_destinations_resolve_to_each_heading_page(self):
+        report = {
+            "report_type": "weekly",
+            "progress": {"rows": [{
+                "description": "Total Overall",
+                "previous": 10,
+                "this_week": 2,
+                "to_date": 12,
+                "plan": 13,
+                "is_total": True,
+            }]},
+            "site": {
+                "schedule_status": "On track",
+                "this_week_activities": ["Alignment"],
+                "next_week_activities": ["Continue alignment"],
+                "key_findings": [{"text": "Waiting for coordination"}],
+            },
+        }
+
+        reader = PdfReader(io.BytesIO(render_monthly_report(report).getvalue()))
+        destinations = _outline_destinations(reader)
+
+        self.assertGreater(len(destinations), 4)
+        self.assertGreater(len({page for _, page in destinations}), 1)
+        for title, page_index in destinations:
+            with self.subTest(title=title):
+                self.assertIn(title, reader.pages[page_index].extract_text() or "")
 
     def test_long_runtime_text_and_tables_split_without_layout_error(self):
         long_text = "Wrapped runtime text with XML chars & < > " * 350

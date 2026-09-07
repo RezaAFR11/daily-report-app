@@ -193,6 +193,50 @@ class WeeklyDraftTests(unittest.TestCase):
         self.assertIn("reporting week (03-04 August 2026)", draft["executive_summary"])
         self.assertIn("Unit 2", draft["executive_summary"])
 
+    def test_weekly_lookahead_keeps_same_activity_for_each_source_area(self):
+        draft = _prepare_draft(
+            {
+                "activities": [],
+                "tomorrow_activities": [
+                    {
+                        "source_date": "2026-08-09",
+                        "area": "Turbine 1",
+                        "description": "Continue painting endclosure",
+                    },
+                    {
+                        "source_date": "2026-08-09",
+                        "area": "Turbine 2",
+                        "description": "Continue painting endclosure",
+                    },
+                ],
+                "coverage": {
+                    "expected_dates": ["2026-08-03", "2026-08-09"],
+                    "covered_dates": ["2026-08-03", "2026-08-09"],
+                    "missing_dates": [],
+                    "selected_record_count": 2,
+                    "last_report_date": "2026-08-09",
+                },
+            },
+            project_no=PROJECT_NO,
+            project_title=PROJECT_TITLE,
+            date_from="2026-08-03",
+            date_to="2026-08-09",
+            report_mode="final",
+            source_method="uploaded_excel",
+            source_manifest=[
+                {"report_id": "day-1", "report_date": "2026-08-03"},
+                {"report_id": "day-7", "report_date": "2026-08-09"},
+            ],
+            report_type="weekly",
+        )
+
+        lookahead = draft["site"]["next_week_activities"]
+        self.assertEqual(len(lookahead), 2)
+        self.assertEqual(
+            {row["area"] for row in lookahead},
+            {"Turbine 1", "Turbine 2"},
+        )
+
 
 class WeeklyRouteTests(unittest.TestCase):
     def setUp(self):

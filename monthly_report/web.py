@@ -1786,7 +1786,7 @@ def _enrich_period_activity_groups(
 def _period_activity_summary_row(
     group: Mapping[str, Any],
     *,
-    max_phrases_per_group: int,
+    max_phrases_per_group: int | None,
 ) -> dict[str, Any] | None:
     themes = list(group["themes"])
     if group["family"] == "Mechanical Maintenance" and "turning-gear operation and testing" in themes:
@@ -1795,11 +1795,16 @@ def _period_activity_summary_row(
         themes = [item for item in themes if item != "MSV installation"]
     themes = sorted(themes, key=lambda item: _theme_rank(group["family"], item))
     phrases = list(group["phrases"])
-    if themes:
-        detail = _english_join(themes[:5])
-    else:
-        selected = phrases[:max_phrases_per_group]
-        detail = "; ".join(selected)
+    selected = (
+        phrases
+        if max_phrases_per_group is None
+        else phrases[:max(0, max_phrases_per_group)]
+    )
+    # Client-facing activity sections must remain a complete, auditable digest
+    # of the Daily rows.  Themes stay available as management metadata, but the
+    # visible text uses every distinct source phrase instead of replacing work
+    # items with a small set of generic themes.
+    detail = "; ".join(selected)
     if not detail:
         return None
 
@@ -1826,20 +1831,26 @@ def _period_activity_summary_row(
         "source_areas": list(group.get("source_areas") or []),
         "area_mapping_methods": list(group.get("area_mapping_methods") or []),
         "area_review_required": bool(group.get("area_review_required")),
-        "representative_activities": phrases[:4],
+        "representative_activities": phrases,
         "themes": themes,
         "occurrence_count": int(group.get("occurrence_count") or len(phrases)),
-        "summary_type": "deterministic_period_group_v3",
+        "summary_type": "deterministic_period_group_v4",
     }
 
 
-def _summarise_period_activities(value: Any, *, remarks: Any = None, max_phrases_per_group: int = 3) -> list[dict[str, Any]]:
+def _summarise_period_activities(
+    value: Any,
+    *,
+    remarks: Any = None,
+    max_phrases_per_group: int | None = None,
+) -> list[dict[str, Any]]:
     """Build a deterministic management summary by Area + Workstream.
 
     The full Daily activity rows always remain in ``draft['activities']``.  This
-    function creates a compact client-facing layer with source/date provenance,
-    theme-level de-duplication and equipment tags retained as metadata for audit
-    and optional AI polishing.
+    function creates a client-facing digest with source/date provenance,
+    exact-phrase de-duplication and equipment tags retained as metadata for
+    audit and optional AI polishing.  By default no distinct source activity is
+    dropped; callers may request a cap only for explicitly compact contexts.
     """
 
     rows = value if isinstance(value, list) else []
@@ -2688,6 +2699,64 @@ def _set_draft_warnings(
         if warning and warning not in warnings:
             warnings.append(warning)
     draft["warnings"] = _compact_review_warnings(warnings)
+
+
+def _progress_arithmetic_warnings(value: Any) -> list[dict[str, str]]:
+    """Flag contradictory latest-snapshot progress values without rewriting them."""
+
+    progress = value if isinstance(value, Mapping) else {}
+    rows = progress.get("rows") if isinstance(progress.get("rows"), list) else []
+    snapshot = _clean_text(progress.get("latest_snapshot_date"), 10)
+    warnings: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        description = _clean_text(row.get("description"), 500) or "Unnamed progress row"
+        mismatches: list[str] = []
+        for label, previous_key, period_key, total_key in (
+            (
+                "Plan",
+                "cumulative_previous_plan",
+                "this_period_plan",
+                "cumulative_to_date_plan",
+            ),
+            (
+                "Actual",
+                "cumulative_previous_actual",
+                "this_period_actual",
+                "cumulative_to_date_actual",
+            ),
+        ):
+            previous = _optional_number(row.get(previous_key))
+            period = _optional_number(row.get(period_key))
+            reported = _optional_number(row.get(total_key))
+            if previous is None or period is None or reported is None:
+                continue
+            calculated = previous + period
+            delta = reported - calculated
+            # Two-decimal source tables can legitimately carry a one-cent
+            # rounding difference.  Larger gaps require source review.
+            if abs(delta) <= 0.02:
+                continue
+            mismatches.append(
+                f"{label} To Date {reported:.2f}% differs from Previous "
+                f"{previous:.2f}% + This Period {period:.2f}% = "
+                f"{calculated:.2f}% ({delta:+.2f} percentage points)"
+            )
+        if not mismatches:
+            continue
+        snapshot_text = f" on {snapshot}" if snapshot else ""
+        warnings.append({
+            "code": "progress_arithmetic_mismatch",
+            "severity": "warning",
+            "field": "overall_progress",
+            "message": (
+                f'Progress arithmetic mismatch in the latest Daily snapshot{snapshot_text}, '
+                f'row "{description}": {"; ".join(mismatches)}. '
+                "Source values were preserved; review or correct the Daily source before Final issue."
+            ),
+        })
+    return warnings
 
 
 def _set_draft_progress_and_safety(draft: dict[str, Any], *, kind: str) -> None:
@@ -5444,7 +5513,6 @@ def _build_uploaded_pdf_draft(
     photo_limits = periodic_photo_limits(report_type)
     warnings.extend(_bound_record_photo_candidates(records, limits=photo_limits))
     source_issues = _source_validation_issues(warnings)
-    review_warnings = _compact_review_warnings(warnings)
 
     source_validation = build_source_validation(
         records,
@@ -5474,6 +5542,18 @@ def _build_uploaded_pdf_draft(
             project_title=project_title,
         ),
     )
+    progress_warnings = _progress_arithmetic_warnings(
+        aggregated.get("overall_progress")
+    )
+    if progress_warnings:
+        warnings.extend(progress_warnings)
+        source_validation = build_source_validation(
+            records,
+            selected_project_no=project_no,
+            selected_project_title=project_title,
+            issues=_source_validation_issues(warnings),
+        )
+    review_warnings = _compact_review_warnings(warnings)
     selected_ids = {
         str(item.get("report_id") or "")
         for item in aggregated.get("source_records", [])

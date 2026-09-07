@@ -173,6 +173,53 @@ def _has_section_data(value: Any) -> bool:
     return True
 
 
+_NO_CONCERN_TEXT = {
+    "-",
+    "n/a",
+    "na",
+    "nil",
+    "none",
+    "not applicable",
+    "not supplied",
+    "no issue",
+    "no issues",
+    "no constraint",
+    "no constraints",
+    "no constraint reported",
+    "no constraints reported",
+    "tidak ada",
+}
+
+
+def _has_real_concern_text(value: Any) -> bool:
+    text = " ".join(_plain(value).strip().casefold().split())
+    return bool(text and text not in _NO_CONCERN_TEXT and _has_section_data(value))
+
+
+def _real_concern_rows(value: Any) -> list[Any]:
+    """Return only source-backed concern/action rows suitable for rendering."""
+
+    result: list[Any] = []
+    for raw in _as_list(value):
+        if isinstance(raw, Mapping):
+            concern = _value(raw, "concern", "text", "description")
+            action = _value(raw, "corrective_action", "action", "suggested_action")
+            if _has_real_concern_text(concern) or _has_section_data(action):
+                result.append(raw)
+        elif _has_real_concern_text(raw):
+            result.append(raw)
+    return result
+
+
+def _real_finding_rows(value: Any) -> list[Mapping[str, Any]]:
+    return [
+        raw
+        for raw in _as_list(value)
+        if isinstance(raw, Mapping)
+        and _has_section_data(_value(raw, "text", "remark", "description"))
+    ]
+
+
 def _number(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
         return None
@@ -688,11 +735,46 @@ class _NumberedCanvas(pdf_canvas.Canvas):
         super().__init__(*args, **kwargs)
         self._monthly_status = status
         self._monthly_page_states: list[dict[str, Any]] = []
+        self._monthly_page_bookmarks: dict[int, list[tuple[Any, ...]]] = {}
+        self._monthly_page_outlines: dict[int, list[tuple[Any, ...]]] = {}
+
+    def bookmarkPage(  # noqa: N802 - ReportLab API
+        self,
+        key,
+        fit="Fit",
+        left=None,
+        top=None,
+        bottom=None,
+        right=None,
+        zoom=None,
+    ):
+        """Defer destinations until delayed pages are written with footers."""
+
+        self._monthly_page_bookmarks.setdefault(self._pageNumber, []).append((
+            key, fit, left, top, bottom, right, zoom,
+        ))
+
+    def addOutlineEntry(  # noqa: N802 - ReportLab API
+        self,
+        title,
+        key,
+        level=0,
+        closed=None,
+    ):
+        """Keep outline creation aligned with the deferred bookmark page."""
+
+        self._monthly_page_outlines.setdefault(self._pageNumber, []).append((
+            title, key, level, closed,
+        ))
 
     def showPage(self):  # noqa: N802 - ReportLab API
         state = {
             key: value for key, value in self.__dict__.items()
-            if key != "_monthly_page_states"
+            if key not in {
+                "_monthly_page_states",
+                "_monthly_page_bookmarks",
+                "_monthly_page_outlines",
+            }
         }
         self._monthly_page_states.append(state)
         self._startPage()
@@ -701,6 +783,10 @@ class _NumberedCanvas(pdf_canvas.Canvas):
         total_pages = len(self._monthly_page_states)
         for state in self._monthly_page_states:
             self.__dict__.update(state)
+            for bookmark in self._monthly_page_bookmarks.get(self._pageNumber, []):
+                pdf_canvas.Canvas.bookmarkPage(self, *bookmark)
+            for outline in self._monthly_page_outlines.get(self._pageNumber, []):
+                pdf_canvas.Canvas.addOutlineEntry(self, *outline)
             if self._pageNumber > 1:
                 self._draw_monthly_footer(total_pages)
             pdf_canvas.Canvas.showPage(self)
@@ -1275,24 +1361,6 @@ def _shipment_table(rows: list[Mapping[str, Any]], styles: Mapping[str, Paragrap
         commands.append(("SPAN", (0, 1), (-1, 1)))
     table.setStyle(TableStyle(commands))
     return table
-
-
-def _constraint_reporting_message(report: Mapping[str, Any], site: Mapping[str, Any]) -> str:
-    reporting = site.get("constraint_reporting")
-    if not isinstance(reporting, Mapping):
-        reporting = report.get("constraint_reporting")
-    if not isinstance(reporting, Mapping):
-        return "Concern and closeout information was not supplied."
-    none_dates = _as_list(reporting.get("none_reported_dates"))
-    reported_dates = _as_list(reporting.get("reported_dates"))
-    missing_dates = _as_list(reporting.get("not_supplied_dates"))
-    if none_dates and not reported_dates and not missing_dates:
-        findings = _as_list(site.get("key_findings"))
-        if findings:
-            return "No formal constraints were reported in the available Daily Reports. Key remarks/findings are shown below."
-        return "No formal constraints were reported in the available Daily Reports."
-    return "Concern and closeout information was not supplied."
-
 
 
 def _key_findings_table(rows: list[Any], styles: Mapping[str, ParagraphStyle]) -> LongTable | None:
@@ -2355,13 +2423,10 @@ def _site_parts(report: Mapping[str, Any], report_type: str) -> dict[str, Any]:
     current = _value(site, *current_keys, default=_value(report, *current_keys, default=[]))
     upcoming = _value(site, *next_keys, default=_value(report, *next_keys, default=[]))
     schedule = _value(site, "schedule_status", "project_schedule_status")
-    concerns = _as_list(
+    concerns = _real_concern_rows(
         _value(site, "concerns", "constraints", default=report.get("constraints"))
     )
-    findings = _as_list(site.get("key_findings"))
-    constraint_reporting = site.get("constraint_reporting")
-    if not isinstance(constraint_reporting, Mapping):
-        constraint_reporting = report.get("constraint_reporting")
+    findings = _real_finding_rows(site.get("key_findings"))
     return {
         "site": site,
         "summary": site.get("summary"),
@@ -2373,11 +2438,8 @@ def _site_parts(report: Mapping[str, Any], report_type: str) -> dict[str, Any]:
         "upcoming_visible": _has_section_data(upcoming),
         "concerns": concerns,
         "findings": findings,
-        "concerns_visible": (
-            _has_section_data(concerns)
-            or _has_section_data(findings)
-            or _has_section_data(constraint_reporting)
-        ),
+        "concerns_visible": bool(concerns),
+        "findings_visible": bool(findings),
     }
 
 
@@ -2542,7 +2604,6 @@ def _site_story(
     chapter_number: int,
 ) -> list[Flowable]:
     parts = _site_parts(report, report_type)
-    site = parts["site"]
     (
         current_keys,
         next_keys,
@@ -2589,17 +2650,18 @@ def _site_story(
             1,
         ))
         concerns_table = _concerns_table(parts["concerns"], styles)
-        if concerns_table is None:
-            story.append(
-                _paragraph(_constraint_reporting_message(report, site), styles["placeholder"])
-            )
-        else:
+        if concerns_table is not None:
             story.append(concerns_table)
+        subsection += 1
+    if parts["findings_visible"]:
         findings_table = _key_findings_table(parts["findings"], styles)
         if findings_table is not None:
             story.extend([
-                Spacer(1, 5),
-                _display_heading("Key Remarks / Findings", styles["h2"]),
+                _heading(
+                    f"{chapter_number}.{subsection} Key Remarks / Findings",
+                    styles["h2"],
+                    1,
+                ),
                 findings_table,
             ])
     story.append(PageBreak())

@@ -16,6 +16,8 @@ from monthly_report.web import (
     _append_runtime_preflight_blockers,
     _normalize_progress,
     _prepare_draft,
+    _progress_arithmetic_warnings,
+    _summarise_period_activities,
     register_monthly_routes,
 )
 from monthly_report.report_quality import build_report_preflight
@@ -81,6 +83,61 @@ def _canonical_record(report_date, report_id, *, tomorrow, progress_actual):
 
 
 class MonthlyWebUnitTests(unittest.TestCase):
+    def test_activity_digest_keeps_every_distinct_phrase_and_area(self):
+        descriptions = [
+            "Alignment between generator and turbine",
+            "Manufacturing of alignment tools",
+            "Tightening tubing steam",
+            "Installing bearing cover",
+            "Installation metal tagging number",
+        ]
+        rows = [
+            {"date": "2026-01-01", "area": "Turbine 1", "description": text}
+            for text in descriptions
+        ]
+        rows.extend([
+            {
+                "date": "2026-01-02",
+                "area": "Turbine 1",
+                "description": descriptions[0],
+            },
+            {
+                "date": "2026-01-02",
+                "area": "Turbine 2",
+                "description": descriptions[0],
+            },
+        ])
+
+        grouped = _summarise_period_activities(rows)
+
+        turbine_1 = [row for row in grouped if row["area"] == "Turbine 1"]
+        self.assertGreaterEqual(len(turbine_1), 1)
+        combined = " ".join(row["text"] for row in turbine_1)
+        for description in descriptions:
+            self.assertIn(description, combined)
+        self.assertTrue(any(row["area"] == "Turbine 2" for row in grouped))
+
+    def test_progress_arithmetic_warning_preserves_and_explains_source_values(self):
+        warnings = _progress_arithmetic_warnings({
+            "latest_snapshot_date": "2025-12-13",
+            "rows": [{
+                "description": "Overhaul Generators",
+                "cumulative_previous_plan": 60.10,
+                "this_period_plan": 4.07,
+                "cumulative_to_date_plan": 62.99,
+                "cumulative_previous_actual": 56.80,
+                "this_period_actual": 4.07,
+                "cumulative_to_date_actual": 64.10,
+            }],
+        })
+
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0]["code"], "progress_arithmetic_mismatch")
+        self.assertIn("62.99%", warnings[0]["message"])
+        self.assertIn("64.17%", warnings[0]["message"])
+        self.assertIn("60.87%", warnings[0]["message"])
+        self.assertIn("Source values were preserved", warnings[0]["message"])
+
     def test_required_missing_photo_recomputes_all_preflight_readiness_fields(self):
         report = {
             "project_no": PROJECT_NO,
