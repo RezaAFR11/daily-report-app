@@ -266,6 +266,22 @@ def _photo_mapping_issues(report: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def _photo_caption_review_issues(report: Mapping[str, Any]) -> list[str]:
+    """Require explicit review only for captions that were not matched reliably."""
+
+    pending = sum(
+        1
+        for row in _as_list(report.get("photo_documentation"))
+        if isinstance(row, Mapping) and _bool(row.get("caption_review_required"), False)
+    )
+    if not pending:
+        return []
+    return [
+        f"{pending} photo caption(s) could not be matched with high confidence. "
+        "Confirm or correct them in Photo Documentation before issuing the Final report."
+    ]
+
+
 def _photo_date_coverage_issues(report: Mapping[str, Any]) -> list[str]:
     """Detect source dates with extractable photos that disappeared from the appendix."""
 
@@ -963,6 +979,21 @@ def _append_photo_issues(
 
     for message in _photo_mapping_issues(report):
         warnings.append({"code": "photo_area_mapping_review", "message": message})
+
+    for message in _photo_caption_review_issues(report):
+        if for_final:
+            _add_final_blocker(
+                final_blockers,
+                warnings,
+                for_final=True,
+                code="photo_caption_review_required",
+                message=message,
+            )
+        else:
+            warnings.append({
+                "code": "photo_caption_review_required",
+                "message": message,
+            })
 
     photo_date_issues = _photo_date_coverage_issues(report)
     for message in photo_date_issues:

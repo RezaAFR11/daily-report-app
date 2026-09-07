@@ -733,20 +733,59 @@ def _context_for_photo_box(
 
 
 
+def _photo_card_chrome(value: Any) -> bool:
+    """Return whether a nearby fragment is document chrome, not card content."""
+
+    text = str(value or "").strip()
+    if not text or _PHOTO_HEADING_RE.search(text):
+        return True
+    folded = _normalise_photo_text(text)
+    return folded.startswith((
+        "pt garuda prima aksara",
+        "daily activity report",
+        "reactivation for turbines and generators",
+        "location ",
+        "customer ",
+        "date ",
+        "day ",
+        "page ",
+    ))
+
+
+def _known_photo_area_prefix(
+    fragments: list[dict[str, Any]],
+    area_names: list[str],
+) -> tuple[int, str] | None:
+    """Match a known area even when ReportLab split it across text fragments."""
+
+    if not fragments or not area_names:
+        return None
+    area_by_key = {
+        _normalise_photo_text(name): name
+        for name in area_names
+        if _normalise_photo_text(name)
+    }
+    combined: list[str] = []
+    for count, fragment in enumerate(fragments[:4], start=1):
+        combined.append(str(fragment.get("text") or ""))
+        area = area_by_key.get(_normalise_photo_text(" ".join(combined)))
+        if area:
+            return count, area
+    return None
+
+
 def _area_heading_photo_context(
     page: Any,
     bbox: Any,
     areas: Iterable[Mapping[str, Any]] | None,
 ) -> dict[str, str] | None:
-    """Map a current split-layout photo card from its visible area heading.
+    """Read the visible area and caption from one current-layout photo card.
 
-    New Daily Report PDFs can use a generic photo-documentation title while the
-    construction area is rendered as a heading immediately above each photo row.
-    In that layout there may be no activity caption that matches the parsed
-    ``activities_today`` text.  This geometry fallback therefore uses only text
-    that is visibly present in the same photo card: the nearest known area
-    heading above the image and, when available, the nearest card caption between
-    that heading and the image.  It never invents an activity description.
+    ReportLab may expose wrapped heading and caption lines with coordinates that
+    overlap the image draw box.  Page-wide nearest-text matching is therefore not
+    reliable.  The supported Daily layout writes each card's text consecutively,
+    so this reader first isolates the image column and row, then removes only the
+    leading area heading.  The remaining fragments are the verbatim card caption.
     """
 
     if not isinstance(bbox, (tuple, list)) or len(bbox) != 4:
@@ -761,102 +800,85 @@ def _area_heading_photo_context(
         if not isinstance(area, Mapping):
             continue
         name = str(area.get("id") or area.get("area") or area.get("name") or "").strip()
-        if not name or name.casefold() == "imported pdf":
-            continue
-        if name not in area_names:
+        if name and name.casefold() != "imported pdf" and name not in area_names:
             area_names.append(name)
-    if not area_names:
-        return None
 
-    fragments = _page_text_fragments(page)
-    if not fragments:
-        return None
-
-    area_by_key = {_normalise_photo_text(name): name for name in area_names}
     image_x = min(x0, x1)
     image_top = max(y0, y1)
     image_width = max(1.0, abs(x1 - x0))
+    column_tolerance = max(30.0, image_width * 0.22)
 
-    ranked: list[tuple[float, dict[str, Any], str]] = []
-    area_fragments: list[tuple[float, float, dict[str, Any], str]] = []
-    for fragment in fragments:
-        key = str(fragment.get("key") or "")
-        area_name = area_by_key.get(key)
-        if not area_name:
+    card_fragments: list[dict[str, Any]] = []
+    for fragment in _page_text_fragments(page):
+        text = str(fragment.get("text") or "").strip()
+        if _photo_card_chrome(text):
             continue
-        fx = float(fragment.get("x") or 0.0)
-        fy = float(fragment.get("y") or 0.0)
-        area_fragments.append((fx, fy, fragment, area_name))
-        vertical = fy - image_top
-        horizontal = abs(fx - image_x)
-        # Current GPA photo cards repeat the area heading in every card and keep
-        # it close to the image column. Tight bounds make this a high-confidence
-        # card match and avoid borrowing a section-level area label from a legacy
-        # layout.
-        if vertical < -8.0 or vertical > 70.0:
+        try:
+            fx = float(fragment.get("x") or 0.0)
+            fy = float(fragment.get("y") or 0.0)
+        except (TypeError, ValueError):
             continue
-        if horizontal > max(30.0, image_width * 0.22):
+        relative_y = fy - image_top
+        if abs(fx - image_x) > column_tolerance:
             continue
-        ranked.append((vertical + horizontal * 1.8, fragment, area_name))
+        # The next photo row starts about 195-200 points lower in the supported
+        # layout.  A 135-point lower allowance retains a three-line caption but
+        # cannot borrow the next card's heading.
+        if relative_y < -135.0 or relative_y > 80.0:
+            continue
+        card_fragments.append({
+            "text": text,
+            "relative_y": relative_y,
+        })
 
-    if not ranked:
+    if not card_fragments:
         return None
-    ranked.sort(key=lambda item: item[0])
-    _score, area_fragment, area_name = ranked[0]
-    area_x = float(area_fragment.get("x") or 0.0)
-    area_y = float(area_fragment.get("y") or 0.0)
 
-    # Wrapped captions in ReportLab PDFs can have text coordinates that fall
-    # inside the image draw box even though the visible text is in the caption
-    # band. Bound the caption by the current card heading and the next lower
-    # card heading in the SAME column rather than by image_top alone.
-    lower_area_y: float | None = None
-    for fx, fy, _fragment, _name in area_fragments:
-        if abs(fx - area_x) > max(30.0, image_width * 0.22):
-            continue
-        if fy >= area_y - 0.5:
-            continue
-        if lower_area_y is None or fy > lower_area_y:
-            lower_area_y = fy
+    detected_area = area_names[0] if len(area_names) == 1 else ""
+    remaining = card_fragments
+    detected_area_names = list(area_names)
 
-    caption_fragments: list[tuple[float, str]] = []
-    for fragment in fragments:
-        card_text = str(fragment.get("text") or "").strip()
-        key = str(fragment.get("key") or "")
-        if not card_text or key in area_by_key:
+    # A page-level area label can precede the repeated per-card heading in the
+    # first column.  Iterate so both prefixes are removed without touching the
+    # first real caption line.
+    for _ in range(3):
+        known = _known_photo_area_prefix(remaining, detected_area_names)
+        if known is not None:
+            count, detected_area = known
+            remaining = remaining[count:]
             continue
-        if _PHOTO_HEADING_RE.search(card_text):
-            continue
-        folded = key.casefold()
-        if (
-            folded.startswith("pt garuda prima aksara")
-            or folded.startswith("daily activity report")
-            or folded.startswith("location ")
-            or folded.startswith("customer ")
-            or folded.startswith("date ")
-            or folded.startswith("day ")
-            or folded.startswith("page ")
-        ):
-            continue
-        fx = float(fragment.get("x") or 0.0)
-        fy = float(fragment.get("y") or 0.0)
-        if fy >= area_y - 0.5:
-            continue
-        if lower_area_y is not None and fy <= lower_area_y + 0.5:
-            continue
-        if abs(fx - area_x) > max(30.0, image_width * 0.22):
-            continue
-        caption_fragments.append((fy, card_text))
 
-    caption = ""
-    if caption_fragments:
-        # Highest text line first. Joining all same-card lines preserves the
-        # exact visible Daily Report caption rather than truncating it at line 1.
-        caption_fragments.sort(key=lambda item: item[0], reverse=True)
-        caption = " ".join(text for _y, text in caption_fragments).strip()
+        # When Active Areas is blank, a visibly elevated first line identifies a
+        # photo-card heading.  Wrapped heading continuations remain below the
+        # image top, while the first caption line returns close to the image top.
+        if not remaining or float(remaining[0].get("relative_y") or 0.0) < 24.0:
+            break
+        caption_start = next((
+            index
+            for index, fragment in enumerate(remaining[1:], start=1)
+            if float(fragment.get("relative_y") or 0.0) >= -20.0
+        ), len(remaining))
+        heading = " ".join(
+            str(fragment.get("text") or "").strip()
+            for fragment in remaining[:caption_start]
+            if str(fragment.get("text") or "").strip()
+        ).strip()
+        if not heading:
+            break
+        detected_area = heading
+        if heading not in detected_area_names:
+            detected_area_names.append(heading)
+        remaining = remaining[caption_start:]
+
+    caption = " ".join(
+        str(fragment.get("text") or "").strip()
+        for fragment in remaining
+        if str(fragment.get("text") or "").strip()
+    ).strip()
+    caption = re.sub(r"^\s*[-\u2022]\s*", "", caption).strip()
 
     return {
-        "area": area_name[:255],
+        "area": detected_area[:255],
         "caption": caption[:500],
         "context_type": "photo_card",
     }
@@ -922,6 +944,8 @@ def _attach_photo_contexts(
                 match_method = "text_order_fallback"
                 context = fallback_pairs.get(id(candidate))
             if context is None:
+                candidate["caption_match_confidence"] = "low"
+                candidate["caption_review_required"] = True
                 candidate.pop("_bbox", None)
                 continue
 
@@ -933,6 +957,12 @@ def _attach_photo_contexts(
                 candidate["caption"] = caption[:500]
             candidate["source_type"] = "legacy_pdf_extraction"
             candidate["photo_match_method"] = match_method
+            if match_method == "photo_card_geometry" and caption:
+                candidate["caption_match_confidence"] = "high"
+                candidate["caption_review_required"] = False
+            else:
+                candidate["caption_match_confidence"] = "medium" if caption else "low"
+                candidate["caption_review_required"] = True
             context_type = str(context.get("context_type") or "activity").strip()
             if context_type:
                 candidate["context_type"] = context_type[:40]
@@ -1213,10 +1243,14 @@ def store_photo_candidates(
             ("source_type", 80),
             ("photo_match_method", 80),
             ("context_type", 40),
+            ("caption_match_confidence", 20),
         ):
             value = str(item.get(key) or "").strip()
             if value:
                 reference[key] = value[:maximum_length]
+        reference["caption_review_required"] = bool(
+            item.get("caption_review_required")
+        )
         result.append(reference)
     return result
 

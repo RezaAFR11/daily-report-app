@@ -117,6 +117,76 @@ class MonthlyWebUnitTests(unittest.TestCase):
             self.assertIn(description, combined)
         self.assertTrue(any(row["area"] == "Turbine 2" for row in grouped))
 
+    def test_draft_filters_operational_labels_and_uses_professional_prose(self):
+        draft = _prepare_draft(
+            {
+                "activities": [
+                    {
+                        "date": "2026-08-08",
+                        "area": "Unit 2 - COLD COMMISSIONING",
+                        "description": "Daily Meeting",
+                    },
+                    {
+                        "date": "2026-08-09",
+                        "area": "Unit 2 - COLD COMMISSIONING",
+                        "description": "Vendor Demobilization",
+                    },
+                    {
+                        "date": "2026-08-09",
+                        "area": "Unit 2 - COLD COMMISSIONING",
+                        "description": "Checking MSV Solenoid Opening Command Permissive",
+                    },
+                ],
+                "remarks": [
+                    {"date": "2026-08-08", "area": "General", "text": "COLD COMMISSIONING DAY 10"},
+                    {
+                        "date": "2026-08-09",
+                        "area": "General",
+                        "text": "Cold Commissioning Activities - Day 11 - Turbines & Generators",
+                    },
+                    {"date": "2026-08-09", "area": "Unit 2", "text": "Leak in the Unit 1 pipeline"},
+                ],
+                "constraints": [],
+                "constraint_reporting": {
+                    "reported_dates": [],
+                    "none_reported_dates": ["2026-08-08", "2026-08-09"],
+                    "not_supplied_dates": [],
+                },
+                "coverage": {
+                    "expected_dates": ["2026-08-08", "2026-08-09"],
+                    "covered_dates": ["2026-08-08", "2026-08-09"],
+                    "missing_dates": [],
+                    "selected_record_count": 2,
+                },
+            },
+            project_no=PROJECT_NO,
+            project_title=PROJECT_TITLE,
+            date_from="2026-08-08",
+            date_to="2026-08-09",
+            report_mode="wtd",
+            source_method="uploaded_pdf",
+            source_manifest=[
+                {"report_id": "day-1", "report_date": "2026-08-08"},
+                {"report_id": "day-2", "report_date": "2026-08-09"},
+            ],
+            report_type="weekly",
+        )
+
+        self.assertEqual(
+            [row["text"] for row in draft["site"]["key_findings"]],
+            ["Leak in the Unit 1 pipeline"],
+        )
+        self.assertNotIn(";", draft["executive_summary"])
+        self.assertNotRegex(draft["executive_summary"], r"\s[-–—]\s")
+        self.assertIn("Unit 2 (COLD COMMISSIONING)", draft["executive_summary"])
+        self.assertIn("MSV command and permissive checks", draft["executive_summary"])
+        self.assertNotIn("MSV installation", draft["executive_summary"])
+        activity_text = " ".join(
+            row["text"] for row in draft["site"]["current_period_activities"]
+        )
+        self.assertIn("Daily Meeting. Vendor Demobilization.", activity_text)
+        self.assertNotIn(";", activity_text)
+
     def test_progress_arithmetic_warning_preserves_and_explains_source_values(self):
         warnings = _progress_arithmetic_warnings({
             "latest_snapshot_date": "2025-12-13",

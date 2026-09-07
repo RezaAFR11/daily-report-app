@@ -190,7 +190,7 @@ class WeeklyDraftTests(unittest.TestCase):
         self.assertEqual(lookahead[0]["source_date"], "2026-08-04")
         self.assertEqual(lookahead[0]["source_type"], "period_end_activity_tomorrow")
         self.assertEqual(draft["site"]["next_week_activities"], lookahead)
-        self.assertIn("reporting week (03-04 August 2026)", draft["executive_summary"])
+        self.assertIn("reporting week (03 to 04 August 2026)", draft["executive_summary"])
         self.assertIn("Unit 2", draft["executive_summary"])
 
     def test_weekly_lookahead_keeps_same_activity_for_each_source_area(self):

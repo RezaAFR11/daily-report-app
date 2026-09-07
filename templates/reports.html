@@ -2469,6 +2469,17 @@ function renderPhotoReviewGrid() {
     source.textContent = `${photo.source || 'Daily Report'}${photo.page ? ` - page ${photo.page}` : ''}`;
     card.appendChild(source);
 
+    const captionStatus = document.createElement('div');
+    captionStatus.className = photo.caption_review_required
+      ? 'small text-warning-emphasis mb-2'
+      : 'small text-success mb-2';
+    captionStatus.textContent = photo.caption_review_required
+      ? 'Caption needs confirmation.'
+      : (photo.caption_match_confidence === 'reviewed'
+        ? 'Caption confirmed by reviewer.'
+        : 'Caption matched from the Daily Report photo card.');
+    card.appendChild(captionStatus);
+
     const caption = document.createElement('textarea');
     caption.className = 'form-control form-control-sm mb-2';
     caption.rows = 2;

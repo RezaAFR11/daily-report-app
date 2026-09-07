@@ -453,9 +453,10 @@ Reporting rules:
     complete professional action/status wording over awkward gerund constructions
     such as ``progressing ... installation``. For continuing work, use wording such
     as ``Progress continued on the installation of ...`` when that meaning is
-    source-backed. Do not use em dashes or en dashes as sentence punctuation in
-    client-facing narrative or activity text; use commas, semicolons, parentheses,
-    or separate sentences instead. For example, when the source explicitly supports
+    source-backed. Do not use em dashes, en dashes, or semicolons as sentence
+    punctuation in client-facing narrative or activity text. Use commas,
+    conjunctions, parentheses, or separate sentences instead. For example, when
+    the source explicitly supports
     continuing installation of MSV A and B for both units together with ring joints,
     inlet piping, and insulation, a suitable construction is: ``Progress continued
     on the installation of MSV A and B for both units, including ring joint

@@ -1239,7 +1239,7 @@ def _record_date(record: dict[str, Any]) -> str:
 # Client-facing deterministic fallback summarisation.  AI may refine this after
 # Source Data Validation, but the baseline Weekly/Monthly PDF should already read
 # like a period report rather than seven/thirty Daily Reports concatenated together.
-_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/10"
+_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/11"
 
 _PERIOD_ACTIVITY_TAG_RE = re.compile(
     r"\(\s*\d{1,3}\s*-\s*[A-Za-z]{2,}\s*-\s*[^)]*\)", re.IGNORECASE
@@ -1520,6 +1520,22 @@ def _normalised_executive_area_tokens(value: Any) -> list[str]:
     return [area]
 
 
+def _professional_narrative_label(value: Any) -> str:
+    """Format a source label for prose without changing the stored source value."""
+
+    text = _clean_text(value, 255)
+    if text.casefold() in {"general", "unspecified"}:
+        return "other reported work fronts"
+    parts = [
+        part.strip()
+        for part in re.split(r"\s+[-–—]\s+", text)
+        if part.strip()
+    ]
+    if len(parts) < 2:
+        return text
+    return f"{parts[0]} ({', '.join(parts[1:])})"
+
+
 def _executive_area_phrase(highlights: Any, *, max_items: int = 12) -> str:
     tokens: list[str] = []
     for item in highlights if isinstance(highlights, list) else []:
@@ -1529,9 +1545,10 @@ def _executive_area_phrase(highlights: Any, *, max_items: int = 12) -> str:
             if token and token not in tokens:
                 tokens.append(token)
     tokens.sort(key=_area_sort_key)
+    display_tokens = [_professional_narrative_label(token) for token in tokens]
     if len(tokens) <= max_items:
-        return _english_join(tokens)
-    visible = tokens[:max_items]
+        return _english_join(display_tokens)
+    visible = display_tokens[:max_items]
     return ", ".join(visible) + ", and other reported areas"
 
 
@@ -1586,19 +1603,33 @@ def _period_activity_themes(family: str, value: Any) -> list[str]:
         result.append("DCS loop testing" if "dcs" in text else "loop testing")
     if family == "Mechanical Maintenance" and "turning gear" in text:
         if "test" in text or "testing" in text:
-            result.append("turning-gear operation and testing")
+            result.append("turning gear operation and testing")
         else:
-            result.append("turning-gear operation")
+            result.append("turning gear operation")
     if family == "Mechanical Maintenance" and any(needle in text for needle in (
         "control oil", "auxiliary oil", "oil pipeline", "oil return pipe",
         "lube oil", "oil purifier", "purifier filter",
     )):
-        result.append("oil-system and mechanical works")
+        result.append("oil system and mechanical works")
     if family == "Valve Mechanical" and "msv" in text:
-        if "piping" in text or "pipe" in text:
+        installation = any(
+            marker in text
+            for marker in ("install", "installation", "reassembl", "assembly")
+        )
+        checking = any(
+            marker in text
+            for marker in ("check", "test", "command", "permissive")
+        )
+        if installation and ("piping" in text or "pipe" in text):
             result.append("MSV installation and associated piping")
-        else:
+        elif installation:
             result.append("MSV installation")
+        elif checking:
+            result.append("MSV command and permissive checks")
+        elif "piping" in text or "pipe" in text:
+            result.append("MSV piping work")
+        else:
+            result.append("MSV work")
     for label, needles in _PERIOD_ACTIVITY_THEME_RULES.get(family, ()):
         if label == "DCS loop testing":
             continue
@@ -1656,10 +1687,10 @@ def _short_period_label(start: str, end: str) -> str:
     if start_date.date() == end_date.date():
         return start_date.strftime("%d %B %Y")
     if start_date.year == end_date.year and start_date.month == end_date.month:
-        return f"{start_date.day:02d}-{end_date.day:02d} {end_date.strftime('%B %Y')}"
+        return f"{start_date.day:02d} to {end_date.day:02d} {end_date.strftime('%B %Y')}"
     if start_date.year == end_date.year:
-        return f"{start_date.strftime('%d %B')}-{end_date.strftime('%d %B %Y')}"
-    return f"{start_date.strftime('%d %B %Y')}-{end_date.strftime('%d %B %Y')}"
+        return f"{start_date.strftime('%d %B')} to {end_date.strftime('%d %B %Y')}"
+    return f"{start_date.strftime('%d %B %Y')} to {end_date.strftime('%d %B %Y')}"
 
 
 def _format_number(value: Any) -> str:
@@ -1789,8 +1820,8 @@ def _period_activity_summary_row(
     max_phrases_per_group: int | None,
 ) -> dict[str, Any] | None:
     themes = list(group["themes"])
-    if group["family"] == "Mechanical Maintenance" and "turning-gear operation and testing" in themes:
-        themes = [item for item in themes if item != "turning-gear operation"]
+    if group["family"] == "Mechanical Maintenance" and "turning gear operation and testing" in themes:
+        themes = [item for item in themes if item != "turning gear operation"]
     if group["family"] == "Valve Mechanical" and "MSV installation and associated piping" in themes:
         themes = [item for item in themes if item != "MSV installation"]
     themes = sorted(themes, key=lambda item: _theme_rank(group["family"], item))
@@ -1804,11 +1835,15 @@ def _period_activity_summary_row(
     # of the Daily rows.  Themes stay available as management metadata, but the
     # visible text uses every distinct source phrase instead of replacing work
     # items with a small set of generic themes.
-    detail = "; ".join(selected)
+    detail = " ".join(
+        phrase.rstrip(" .;") + "."
+        for phrase in selected
+        if phrase.strip(" .;")
+    )
     if not detail:
         return None
 
-    text = detail.rstrip(".") + "."
+    text = detail
     tags = group["equipment_tags"]
     # A short equipment list improves traceability for one-off work fronts;
     # broad MA-81 groups keep the tag list in metadata to avoid a wall of IDs.
@@ -1971,8 +2006,24 @@ def _deterministic_schedule_status(draft: Mapping[str, Any]) -> str:
         current_value = None
     if current_value is not None:
         source_label = _clean_text(progress.get("source_period_label"), 100) or "This Period"
-        parts.append(f'The source Daily Report records {current_value:.2f}% actual for "{source_label}"; this value is preserved without recalculation')
+        parts.append(
+            f'The source Daily Report records {current_value:.2f}% actual for "{source_label}". '
+            "This source value is preserved without recalculation"
+        )
     return ". ".join(parts) + "."
+
+
+_OPERATIONAL_REMARK_LABEL_RE = re.compile(
+    r"^cold commissioning(?: activities)? day \d+"
+    r"(?: turbines? generators?(?: units? \d+(?: \d+)?)?)?$",
+    re.IGNORECASE,
+)
+
+
+def _is_operational_remark_label(value: Any) -> bool:
+    """Identify label-only Daily remarks that are not management findings."""
+
+    return bool(_OPERATIONAL_REMARK_LABEL_RE.fullmatch(_activity_match_text(value)))
 
 
 def _key_remark_findings(draft: Mapping[str, Any], *, maximum: int = 24) -> list[dict[str, Any]]:
@@ -1985,7 +2036,11 @@ def _key_remark_findings(draft: Mapping[str, Any], *, maximum: int = 24) -> list
         if not isinstance(raw, Mapping):
             continue
         text = _clean_text(raw.get("text", raw.get("remark", raw.get("remarks"))), 2_000)
-        if not text or text.casefold() in {"-", "—", "none", "not supplied", "no remarks"}:
+        if (
+            not text
+            or text.casefold() in {"-", "—", "none", "not supplied", "no remarks"}
+            or _is_operational_remark_label(text)
+        ):
             continue
         date = _clean_text(raw.get("date", raw.get("source_date")), 10)
         area = _clean_text(raw.get("area"), 255) or "General"
@@ -2026,20 +2081,20 @@ def _executive_remark_theme(value: Any) -> tuple[int, str]:
         return (95, "OHC equipment issue")
     if "leak" in folded or "leakage" in folded or "rembes" in folded:
         if "msv" in folded and "return" in folded:
-            return (100, "MSV return-line leakage")
+            return (100, "MSV return line leakage")
         if any(word in folded for word in ("oil return", "oil pipeline", "lube oil", "oil line", "oil tank")):
-            return (98, "oil-system leakage")
+            return (98, "oil system leakage")
         if "generator cooler" in folded:
-            return (86, "generator-cooler leakage")
+            return (86, "generator cooler leakage")
         return (82, "reported leakage")
     if "vibration" in folded and any(word in folded for word in ("high", "above", "rms")):
-        return (80, "high-vibration finding")
+        return (80, "high vibration finding")
     if "short cable" in folded or ("solenoid" in folded and "short" in folded):
         return (78, "solenoid-valve power/cable issue")
     if any(word in folded for word in ("broken", "damaged", "unable", "cannot be repaired", "must be replaced")):
-        return (72, "source-recorded equipment/repair issue")
+        return (72, "recorded equipment or repair issue")
     if any(word in folded for word in ("alarm", "finding", "must be performed", "required")):
-        return (68, "source-recorded follow-up finding")
+        return (68, "recorded item requiring follow up")
     if any(word in folded for word in ("waiting for", "not yet", "pending")):
         return (55, "pending coordination/work item")
     return (0, "")
@@ -2076,21 +2131,24 @@ def _executive_constraint_and_findings_sentence(draft: Mapping[str, Any]) -> str
     # Multiple Daily remarks can describe the same oil/MSV leakage chain.  Present
     # that recurring issue once in management prose while preserving each dated
     # source remark separately in Section 5.4.
-    if "oil-system leakage" in labels and "MSV return-line leakage" in labels:
-        first = min(labels.index("oil-system leakage"), labels.index("MSV return-line leakage"))
-        labels = [label for label in labels if label not in {"oil-system leakage", "MSV return-line leakage"}]
-        labels.insert(first, "oil/MSV return-line leakage")
+    if "oil system leakage" in labels and "MSV return line leakage" in labels:
+        first = min(labels.index("oil system leakage"), labels.index("MSV return line leakage"))
+        labels = [label for label in labels if label not in {"oil system leakage", "MSV return line leakage"}]
+        labels.insert(first, "oil and MSV return line leakage")
 
     labels = labels[:3]
     if formal_none and labels:
         return (
-            "No formal constraints were reported, although field remarks recorded "
-            f"follow-up items including {_english_join(labels)}."
+            "No formal constraints were reported. Field remarks identified "
+            f"items requiring follow up, including {_english_join(labels)}."
         )
     if formal_none:
         return "No formal constraints were reported in the available Daily Reports."
     if labels:
-        return f"Field remarks recorded follow-up items including {_english_join(labels)}."
+        return (
+            "Field remarks identified items requiring follow up, including "
+            f"{_english_join(labels)}."
+        )
     return ""
 
 
@@ -2118,7 +2176,11 @@ def _progress_summary_sentence(draft: Mapping[str, Any]) -> str:
     except (TypeError, ValueError):
         current_value = None
     if current_value is not None and _clean_text(progress.get("source_period_label"), 100):
-        sentence += f'; the latest Daily source reports {current_value:.2f}% actual for "{_clean_text(progress.get("source_period_label"), 100)}"'
+        sentence += ". "
+        sentence += (
+            f'The latest Daily source reports {current_value:.2f}% actual for '
+            f'"{_clean_text(progress.get("source_period_label"), 100)}"'
+        )
     return sentence + "."
 
 
@@ -2296,7 +2358,10 @@ def _deterministic_site_summary(draft: Mapping[str, Any], grouped_activities: li
 
     sentences: list[str] = []
     if areas:
-        sentences.append(f"Site execution covered {_english_join(areas)} during the reporting period.")
+        display_areas = [_professional_narrative_label(area) for area in areas]
+        sentences.append(
+            f"Site execution covered {_english_join(display_areas)} during the reporting period."
+        )
     if workstreams:
         sentences.append(f"Principal workstreams were {_english_join(workstreams)}.")
 
@@ -2305,28 +2370,34 @@ def _deterministic_site_summary(draft: Mapping[str, Any], grouped_activities: li
     peak = _format_positive_number(totals.get("peak_headcount"))
     man_hours = _format_positive_number(totals.get("total_man_hours"))
     if peak and man_hours:
-        sentences.append(f"Peak daily headcount was {peak} personnel and {man_hours} man-hours were recorded during the period.")
+        sentences.append(
+            f"Peak daily headcount was {peak} personnel and {man_hours} man hours "
+            "were recorded during the period."
+        )
     elif peak:
         sentences.append(f"Peak daily headcount was {peak} personnel.")
     elif man_hours:
-        sentences.append(f"Recorded man-hours for the period totaled {man_hours}.")
+        sentences.append(f"Recorded man hours for the period totaled {man_hours}.")
 
     constraints = _real_constraint_rows(draft.get("constraints"))
     if constraints:
         areas_with_constraints = _constraint_areas(constraints)
+        display_constraint_areas = [
+            _professional_narrative_label(area) for area in areas_with_constraints
+        ]
         tags = _constraint_tags(constraints)
         if tags:
             sentences.append(
                 f"Formal constraints were recorded"
-                + (f" in {_english_join(areas_with_constraints)}" if areas_with_constraints else "")
+                + (f" in {_english_join(display_constraint_areas)}" if display_constraint_areas else "")
                 + f" for {_english_join(tags)}."
             )
         else:
             sentences.append(
                 "Formal constraints were recorded"
-                + (f" in {_english_join(areas_with_constraints)}." if areas_with_constraints else ".")
+                + (f" in {_english_join(display_constraint_areas)}." if display_constraint_areas else ".")
             )
-    return " ".join(sentences)
+    return _professional_generated_text(" ".join(sentences))
 
 
 def _executive_area_highlights(grouped: Any) -> list[dict[str, Any]]:
@@ -2494,7 +2565,7 @@ def _deterministic_activity_summary_sentences(
     report_word = "week" if report_type == "weekly" else "month"
     sentences: list[str] = []
     if not grouped:
-        return [f"No current-period site activities were supplied for this reporting {report_word}."]
+        return [f"No site activities were supplied for this reporting {report_word}."]
 
     period_label = _short_period_label(start, end)
     opening = f"During the reporting {report_word}"
@@ -2522,7 +2593,7 @@ def _deterministic_activity_summary_sentences(
         return sentences
 
     focus = ranked[0]
-    focus_area = _clean_text(focus.get("area"), 255) or "General"
+    focus_area = _professional_narrative_label(focus.get("area")) or "General"
     focus_detail = _area_highlight_detail(focus, max_details=7)
     if focus_detail:
         sentences.append(f"In {focus_area}, recorded work included {focus_detail}.")
@@ -2533,14 +2604,15 @@ def _deterministic_activity_summary_sentences(
     # full supported area set.
     remainder = [item for item in ranked[1:] if item.get("area") != focus.get("area")]
     detailed_limit = 4 if report_type == "weekly" else 5
-    clauses = []
+    additional_sentences = []
     for item in remainder[:detailed_limit]:
-        area = _clean_text(item.get("area"), 255) or "General"
+        area = _professional_narrative_label(item.get("area")) or "General"
         detail = _area_highlight_detail(item, max_details=3)
         if detail:
-            clauses.append(f"{area}: {detail}")
-    if clauses:
-        sentences.append("Other recorded work fronts included " + "; ".join(clauses) + ".")
+            additional_sentences.append(
+                f"Activities in {area} included {detail}."
+            )
+    sentences.extend(additional_sentences)
     return sentences
 
 
@@ -2560,18 +2632,18 @@ def _deterministic_workforce_summary_sentences(draft: Mapping[str, Any]) -> list
     if average and peak and man_hours:
         day_label = "day" if supplied_days == 1 else "days"
         sentences.append(
-            f"Across {supplied_days} manpower-supplied {day_label}, average daily headcount was "
-            f"{average}, peak daily headcount was {peak}, and {man_hours} known man-hours were recorded."
+            f"Across {supplied_days} {day_label} with manpower data, average daily headcount was "
+            f"{average}, peak daily headcount was {peak}, and {man_hours} known man hours were recorded."
         )
     elif peak:
         sentences.append(f"Peak daily headcount was {peak} personnel.")
     elif man_hours:
-        sentences.append(f"Recorded man-hours for the period totaled {man_hours}.")
+        sentences.append(f"Recorded man hours for the period totaled {man_hours}.")
     if not_supplied_days:
         day_label = "date" if not_supplied_days == 1 else "dates"
         sentences.append(
-            f"Manpower data was not supplied for {not_supplied_days} covered Daily Report {day_label}; "
-            "workforce averages therefore use supplied dates only."
+            f"Manpower data was not supplied for {not_supplied_days} covered Daily Report {day_label}. "
+            "Workforce averages therefore use supplied dates only."
         )
     return sentences
 
@@ -2583,12 +2655,15 @@ def _deterministic_constraint_summary_sentence(draft: Mapping[str, Any]) -> str:
 
     tags = _constraint_tags(constraints)
     areas_with_constraints = _constraint_areas(constraints)
+    display_constraint_areas = [
+        _professional_narrative_label(area) for area in areas_with_constraints
+    ]
     detail = "Formal constraints were reported"
-    if areas_with_constraints:
-        detail += f" in {_english_join(areas_with_constraints)}"
+    if display_constraint_areas:
+        detail += f" in {_english_join(display_constraint_areas)}"
     if tags:
         detail += f" for {_english_join(tags)}"
-    return detail + "; details and source-recorded follow-up are shown in Section 5.4."
+    return detail + ". Details are provided in the Area of Concern section."
 
 
 def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: str) -> str:
@@ -2617,8 +2692,10 @@ def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: s
     coverage = draft.get("coverage") if isinstance(draft.get("coverage"), dict) else {}
     missing = [str(item) for item in coverage.get("missing_dates", [])] if isinstance(coverage.get("missing_dates"), list) else []
     if missing:
-        sentences.append("Daily Report coverage is partial; available and missing dates are listed in Source Coverage.")
-    return " ".join(sentences)
+        sentences.append(
+            "Daily Report coverage is partial. Available and missing dates are listed in Source Coverage."
+        )
+    return _professional_generated_text(" ".join(sentences))
 
 def _initialise_periodic_draft(
     aggregated: dict[str, Any],
@@ -4048,10 +4125,14 @@ def _photo_references_for_records(
                 ("source_type", 80),
                 ("photo_match_method", 80),
                 ("context_type", 40),
+                ("caption_match_confidence", 20),
             ):
                 metadata_value = _clean_text(item.get(metadata_key), maximum_length)
                 if metadata_value:
                     reference[metadata_key] = metadata_value
+            reference["caption_review_required"] = bool(
+                item.get("caption_review_required")
+            )
             previous_item = prior_by_key.get(key)
             if previous_item is not None:
                 previous_caption = _clean_text(previous_item.get("caption"), 500)
@@ -4830,6 +4911,19 @@ def _usable_ai_text(value: Any) -> str:
     return "" if text.casefold() == "not supplied" else text
 
 
+def _professional_generated_text(value: Any, maximum: int = 4_000) -> str:
+    """Normalise generated prose to the client-facing report style."""
+
+    text = _clean_text(value, maximum)
+    if not text:
+        return ""
+    text = re.sub(r"\s*;\s*", ". ", text)
+    text = re.sub(r"\s+[-–—]\s+", ", ", text)
+    text = re.sub(r",\s*,+", ", ", text)
+    text = re.sub(r"(?:\.\s*){2,}", ". ", text)
+    return " ".join(text.split()).strip()
+
+
 def _word_count(value: Any) -> int:
     return len(re.findall(r"\b[\w#./&+-]+\b", str(value or ""), flags=re.UNICODE))
 
@@ -4842,7 +4936,7 @@ def _executive_ai_candidate(draft: Mapping[str, Any], value: Any) -> str:
     the Python baseline instead of presenting a shorter but less useful summary.
     """
 
-    candidate = _usable_ai_text(value)
+    candidate = _professional_generated_text(_usable_ai_text(value))
     baseline = _clean_text(draft.get("executive_summary"), 4_000)
     if not candidate:
         return baseline
@@ -4887,7 +4981,7 @@ def _executive_ai_candidate(draft: Mapping[str, Any], value: Any) -> str:
         4_000,
     ).casefold()
     for phrase in (
-        "peak daily headcount", "man-hours", "overall progress percentages",
+        "peak daily headcount", "man hours", "overall progress percentages",
         "safety incident metrics", "no formal constraints", "field remarks",
     ):
         if phrase in deterministic_exec and phrase not in baseline_folded:
@@ -5061,11 +5155,17 @@ def _clean_ai_review(value: Any) -> dict[str, Any]:
         if _clean_text(row, 2_000)
     ]
     current_activities = _clean_activity_rows(value.get("current_activities"))
+    for row in current_activities:
+        if isinstance(row, dict):
+            row["text"] = _professional_generated_text(
+                row.get("text", row.get("description")),
+                2_000,
+            )
     return {
-        "executive_summary": _clean_text(value.get("executive_summary"), 4_000),
-        "engineering_summary": _clean_text(value.get("engineering_summary"), 4_000),
-        "procurement_summary": _clean_text(value.get("procurement_summary"), 4_000),
-        "site_summary": _clean_text(value.get("site_summary"), 4_000),
+        "executive_summary": _professional_generated_text(value.get("executive_summary")),
+        "engineering_summary": _professional_generated_text(value.get("engineering_summary")),
+        "procurement_summary": _professional_generated_text(value.get("procurement_summary")),
+        "site_summary": _professional_generated_text(value.get("site_summary")),
         "current_activities": current_activities,
         "concerns": concerns,
         "lookahead": lookahead,
@@ -7180,7 +7280,7 @@ def _ai_current_activity_suggestions(
     for row in rows[:75]:
         if not isinstance(row, dict):
             continue
-        text = _claim_text(row)
+        text = _professional_generated_text(_claim_text(row), 2_000)
         area = _clean_text(row.get("area"), 200)
         workstream = _clean_text(row.get("workstream"), 200)
         stable_id = _clean_text(row.get("stable_id"), 100)
@@ -7252,11 +7352,17 @@ def _ai_summary_display(raw: Mapping[str, Any], grounded_draft: Mapping[str, Any
         "executive_summary": _executive_ai_candidate(
             grounded_draft, raw.get("executive_summary")
         ),
-        "engineering_summary": _usable_ai_text(raw.get("engineering_summary"))
+        "engineering_summary": _professional_generated_text(
+            _usable_ai_text(raw.get("engineering_summary"))
+        )
         or _clean_text(current_engineering.get("summary"), 4_000),
-        "procurement_summary": _usable_ai_text(raw.get("procurement_summary"))
+        "procurement_summary": _professional_generated_text(
+            _usable_ai_text(raw.get("procurement_summary"))
+        )
         or _clean_text(current_procurement.get("summary"), 4_000),
-        "site_summary": _usable_ai_text(raw.get("site_summary"))
+        "site_summary": _professional_generated_text(
+            _usable_ai_text(raw.get("site_summary"))
+        )
         or _clean_text(current_site.get("summary"), 4_000),
         "current_activities": current_activities,
         "concerns": concerns,
@@ -7599,6 +7705,8 @@ def _update_periodic_draft_photos_request(*, data_dir: str, draft_id: str):
         reference.pop("data", None)
         reference.pop("path", None)
         reference["caption"] = _clean_text(item.get("caption"), 500)
+        reference["caption_match_confidence"] = "reviewed"
+        reference["caption_review_required"] = False
         reference["order"] = index
         cleaned.append(reference)
 

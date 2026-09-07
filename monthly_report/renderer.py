@@ -10,7 +10,6 @@ import io
 import math
 import os
 import re
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from html import escape
@@ -1179,7 +1178,7 @@ def _activity_flowables(
     *,
     empty_message: str,
 ) -> list[Flowable]:
-    """Render period activities as concise ``Area – Workstream`` bullets.
+    """Render period activities as professional area and workstream bullets.
 
     Area/workstream metadata comes from the deterministic compiler.  Claude may
     polish only the narrative body.  Generic placeholders such as ``Site`` are
@@ -1218,9 +1217,9 @@ def _activity_flowables(
             continue
 
         if area and workstream:
-            display = f"{area} – {workstream}: {detail}"
+            display = f"{area}, {workstream}: {detail}"
         elif area:
-            display = f"{area} – {detail}"
+            display = f"{area}: {detail}"
         elif workstream:
             display = f"{workstream}: {detail}" if not detail.casefold().startswith((workstream + ":").casefold()) else detail
         else:
@@ -1740,17 +1739,6 @@ def _photo_page_capacity(items: list[Mapping[str, Any]], start: int) -> int:
     return 12
 
 
-def _photo_caption_counts(
-    items: list[Mapping[str, Any]],
-) -> Counter[tuple[str, str]]:
-    counts: Counter[tuple[str, str]] = Counter()
-    for candidate in items:
-        area = _clean_photo_caption(candidate.get("source_area"))
-        caption = _clean_photo_caption(candidate.get("caption"))
-        counts[(area.casefold(), caption.casefold())] += 1
-    return counts
-
-
 def _render_photo_image(
     path: str,
     *,
@@ -1786,8 +1774,6 @@ def _photo_card(
     image_height: float,
     compact: bool,
     photo_text_style: ParagraphStyle,
-    caption_counts: Counter[tuple[str, str]],
-    seen_caption_groups: set[tuple[str, str]],
     image_module: Any,
     image_ops: Any,
 ) -> Table | None:
@@ -1814,20 +1800,12 @@ def _photo_card(
     )
     fallback = "" if photo_card else (f"{source} - p.{page}" if source and page else source)
     caption = _clean_photo_caption(raw.get("caption"), fallback)
-    caption_group = (area.casefold(), caption.casefold())
-    repeated_caption = bool(caption) and caption_counts.get(caption_group, 0) > 1
-    show_caption = caption
-    if repeated_caption and caption_group in seen_caption_groups:
-        show_caption = ""
-    elif repeated_caption:
-        seen_caption_groups.add(caption_group)
 
     card_rows: list[list[Any]] = []
     if area:
         card_rows.append([Paragraph(f"<b>{_xml(area)}</b>", photo_text_style)])
     if caption:
-        caption_markup = f"<i>{_xml(show_caption)}</i>" if show_caption else "&#160;"
-        card_rows.append([Paragraph(caption_markup, photo_text_style)])
+        card_rows.append([Paragraph(f"<i>{_xml(caption)}</i>", photo_text_style)])
     card_rows.append([rendered_image])
     card = Table(card_rows, colWidths=[cell_width - 4])
     card_padding = 2 if compact else 3
@@ -1879,8 +1857,6 @@ def _photo_grid_table(
     )
     rows: list[list[Any]] = []
     current: list[Any] = []
-    caption_counts = _photo_caption_counts(items)
-    seen_caption_groups: set[tuple[str, str]] = set()
     for raw in items:
         card = _photo_card(
             raw,
@@ -1890,8 +1866,6 @@ def _photo_grid_table(
             image_height=image_height,
             compact=compact,
             photo_text_style=photo_text_style,
-            caption_counts=caption_counts,
-            seen_caption_groups=seen_caption_groups,
             image_module=image_module,
             image_ops=image_ops,
         )

@@ -54,6 +54,73 @@ def _photo_pdf() -> bytes:
     return output.getvalue()
 
 
+def _current_photo_card_pdf(*, include_area=True, unknown_area=False) -> bytes:
+    """Create the coordinate pattern used by current GPA photo cards."""
+
+    output = io.BytesIO()
+    document = canvas.Canvas(output)
+    image_top = 597
+    image_y = 450
+    image_height = image_top - image_y
+    x_values = (50, 216, 383)
+    colours = ("#2563eb", "#f59e0b", "#16a34a")
+    document.drawString(50, 700, "10. PHOTO DOCUMENTATION")
+    captions = (
+        ("PI Checking Unit 2",),
+        ("PI Checking Unit 2",),
+        ("Tightening the temporary blind flange bolts", "on TG#2"),
+    )
+    for x, colour, caption_lines in zip(x_values, colours, captions):
+        if include_area:
+            heading = (
+                "Cold Commissioning Activities - Day 12 -"
+                if unknown_area
+                else "Turbine & Generators Unit 1 & 2 - DAY 10"
+            )
+            continuation = "Turbines & Generators" if unknown_area else "COLD COMMISSIONING"
+            document.drawString(x, image_top + 37, heading)
+            document.drawString(x, image_top - 53, continuation)
+        document.drawString(x, image_top + 9, caption_lines[0])
+        for index, line in enumerate(caption_lines[1:], start=1):
+            document.drawString(x, image_top - 54 - ((index - 1) * 58), line)
+        document.drawImage(
+            ImageReader(io.BytesIO(_jpeg(colour))),
+            x,
+            image_y,
+            155,
+            image_height,
+        )
+    document.save()
+    return output.getvalue()
+
+
+def _caption_only_photo_card_pdf() -> bytes:
+    output = io.BytesIO()
+    document = canvas.Canvas(output)
+    image_top = 681
+    image_y = 534
+    document.drawString(50, 720, "10. PHOTO DOCUMENTATION")
+    document.drawString(53, image_top + 9, "Woodward Training")
+    document.drawImage(
+        ImageReader(io.BytesIO(_jpeg("#7c3aed"))),
+        50,
+        image_y,
+        155,
+        image_top - image_y,
+    )
+    document.drawString(219, image_top + 13, "Seal Repair and Replacement on Hydraulic")
+    document.drawString(219, image_top - 54, "Piston")
+    document.drawImage(
+        ImageReader(io.BytesIO(_jpeg("#dc2626"))),
+        216,
+        image_y,
+        155,
+        image_top - image_y,
+    )
+    document.save()
+    return output.getvalue()
+
+
 class PeriodicPhotoExtractionTests(unittest.TestCase):
     def test_photo_page_is_used_and_repeated_header_logo_is_removed(self):
         photos, warnings = extract_pdf_photo_candidates(
@@ -68,6 +135,60 @@ class PeriodicPhotoExtractionTests(unittest.TestCase):
             photos[0]["asset_id"],
         )
         self.assertTrue(any("header/logo" in warning for warning in warnings))
+
+    def test_current_photo_cards_keep_duplicate_and_wrapped_captions(self):
+        area = "Turbine & Generators Unit 1 & 2 - DAY 10 COLD COMMISSIONING"
+
+        photos, _ = extract_pdf_photo_candidates(
+            _current_photo_card_pdf(),
+            filename="daily.pdf",
+            areas=[{"id": area}],
+        )
+
+        self.assertEqual(len(photos), 3)
+        self.assertEqual(
+            [photo.get("caption") for photo in photos],
+            [
+                "PI Checking Unit 2",
+                "PI Checking Unit 2",
+                "Tightening the temporary blind flange bolts on TG#2",
+            ],
+        )
+        self.assertEqual({photo.get("source_area") for photo in photos}, {area})
+        self.assertTrue(all(
+            photo.get("photo_match_method") == "photo_card_geometry"
+            and photo.get("caption_match_confidence") == "high"
+            and not photo.get("caption_review_required")
+            for photo in photos
+        ))
+
+    def test_photo_card_heading_is_recovered_when_active_area_is_blank(self):
+        photos, _ = extract_pdf_photo_candidates(
+            _current_photo_card_pdf(unknown_area=True),
+            filename="daily.pdf",
+            areas=[{"id": ""}],
+        )
+
+        self.assertEqual(len(photos), 3)
+        self.assertEqual(
+            {photo.get("source_area") for photo in photos},
+            {"Cold Commissioning Activities - Day 12 - Turbines & Generators"},
+        )
+        self.assertEqual(photos[2]["caption"], "Tightening the temporary blind flange bolts on TG#2")
+
+    def test_caption_only_cards_do_not_borrow_one_caption_for_every_photo(self):
+        photos, _ = extract_pdf_photo_candidates(
+            _caption_only_photo_card_pdf(),
+            filename="daily.pdf",
+            areas=[{"id": ""}],
+        )
+
+        self.assertEqual(len(photos), 2)
+        self.assertEqual(
+            [photo.get("caption") for photo in photos],
+            ["Woodward Training", "Seal Repair and Replacement on Hydraulic Piston"],
+        )
+        self.assertTrue(all(photo.get("caption_match_confidence") == "high" for photo in photos))
 
     def test_cross_report_exact_reuse_keeps_each_source_date_reference(self):
         asset_id = "a" * 64
@@ -157,6 +278,38 @@ class PeriodicPhotoRendererTests(unittest.TestCase):
         self.assertIn("1. Appendices", appendix_page)
         self.assertIn("Appendix 1.1 - Photo Documentation", appendix_page)
 
+    def test_repeated_source_caption_is_visible_below_each_distinct_photo(self):
+        first = _jpeg("#2563eb")
+        second = _jpeg("#16a34a")
+        first_id = hashlib.sha256(first).hexdigest()
+        second_id = hashlib.sha256(second).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            Path(temporary, f"{first_id}.jpg").write_bytes(first)
+            Path(temporary, f"{second_id}.jpg").write_bytes(second)
+            result = render_monthly_report(
+                {
+                    "photo_documentation": [
+                        {
+                            "asset_id": first_id,
+                            "caption": "PI Checking Unit 2",
+                            "source_area": "Turbine Unit 2",
+                            "source_date": "2026-08-09",
+                        },
+                        {
+                            "asset_id": second_id,
+                            "caption": "PI Checking Unit 2",
+                            "source_area": "Turbine Unit 2",
+                            "source_date": "2026-08-09",
+                        },
+                    ]
+                },
+                photo_base_dir=temporary,
+            )
+
+        reader = PdfReader(io.BytesIO(result.getvalue()))
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        self.assertEqual(text.count("PI Checking Unit 2"), 2)
+
 
 class PeriodicPhotoRouteTests(unittest.TestCase):
     def setUp(self):
@@ -237,6 +390,8 @@ class PeriodicPhotoRouteTests(unittest.TestCase):
         stored = valid.get_json()["photos"][0]
         self.assertNotIn("data", stored)
         self.assertEqual(stored["caption"], "<script>alert(1)</script>")
+        self.assertEqual(stored["caption_match_confidence"], "reviewed")
+        self.assertFalse(stored["caption_review_required"])
 
 
 if __name__ == "__main__":

@@ -202,6 +202,47 @@ class PeriodicPreflightTests(unittest.TestCase):
         self.assertNotIn("ai_review_pending", {row["code"] for row in final["blockers"]})
         self.assertIn("ai_review_pending", {row["code"] for row in final["warnings"]})
 
+    def test_low_confidence_photo_caption_must_be_reviewed_before_final(self):
+        report = {
+            "project_no": "P-001",
+            "project_title": "Project One",
+            "source_validation": {
+                "selected_project_no": "P-001",
+                "selected_project_title": "Project One",
+                "applied": True,
+                "confirmed": True,
+                "project_groups": [],
+                "duplicate_groups": [],
+                "issues": [],
+            },
+            "coverage": {"missing_dates": []},
+            "photo_documentation": [{
+                "caption": "Possible caption",
+                "caption_match_confidence": "medium",
+                "caption_review_required": True,
+            }],
+        }
+
+        preview = build_report_preflight(report, for_final=False)
+        final = build_report_preflight(report, for_final=True)
+
+        self.assertIn(
+            "photo_caption_review_required",
+            {row["code"] for row in preview["warnings"]},
+        )
+        self.assertIn(
+            "photo_caption_review_required",
+            {row["code"] for row in final["blockers"]},
+        )
+
+        report["photo_documentation"][0]["caption_match_confidence"] = "reviewed"
+        report["photo_documentation"][0]["caption_review_required"] = False
+        reviewed = build_report_preflight(report, for_final=True)
+        self.assertNotIn(
+            "photo_caption_review_required",
+            {row["code"] for row in reviewed["blockers"]},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
