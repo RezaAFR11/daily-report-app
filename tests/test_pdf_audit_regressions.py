@@ -7,6 +7,26 @@ from monthly_report.photos import _area_heading_photo_context, _attach_photo_con
 
 
 class PDFAuditRegressionTests(unittest.TestCase):
+    def test_wrapped_bold_heading_is_complete_for_all_four_cards(self):
+        fragments = []
+        boxes = []
+        captions = ["Woodward Training", "Function test", "Draining oil", "Auto Test Hydraulic Turning Gear"]
+        for index, caption in enumerate(captions):
+            x = [53, 219, 385, 53][index]
+            top = 665 if index < 3 else 455
+            boxes.append((x, top - 147, x + 155, top))
+            for text, y, font in [
+                ("Cold Commissioning Activities - Day 12 -", top + 41, "/Helvetica-Bold"),
+                ("Turbines & Generators", top - 49, "/Helvetica-Bold"),
+                (caption, top + 9, "/Helvetica-Oblique"),
+            ]:
+                fragments.append({"text": text, "x": x, "y": y, "font": font})
+        with patch("monthly_report.photos._page_text_fragments", return_value=fragments):
+            contexts = [_area_heading_photo_context(None, box, [{"id": "Turbines & Generators"}]) for box in boxes]
+        self.assertEqual([c["caption"] for c in contexts], captions)
+        self.assertEqual({c["area"] for c in contexts}, {"Cold Commissioning Activities - Day 12 - Turbines & Generators"})
+        self.assertFalse(any(c["review_required"] for c in contexts))
+
     def test_wrapped_caption_stays_with_its_card_despite_bad_line_coordinates(self):
         fragments = [
             {"text": text, "x": 385, "y": y}

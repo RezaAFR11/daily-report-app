@@ -383,6 +383,7 @@ class PeriodicPhotoRouteTests(unittest.TestCase):
             json={"photos": [{
                 "asset_id": self.asset_id,
                 "caption": "<script>alert(1)</script>",
+                "source_area": "Cold Commissioning - Turbines & Generators",
                 "data": "data:image/jpeg;base64,not-accepted",
             }]},
         )
@@ -390,8 +391,17 @@ class PeriodicPhotoRouteTests(unittest.TestCase):
         stored = valid.get_json()["photos"][0]
         self.assertNotIn("data", stored)
         self.assertEqual(stored["caption"], "<script>alert(1)</script>")
+        self.assertEqual(stored["source_area"], "Cold Commissioning - Turbines & Generators")
         self.assertEqual(stored["caption_match_confidence"], "reviewed")
         self.assertFalse(stored["caption_review_required"])
+
+        # Older clients editing only captions must retain the reviewed area.
+        repeated = self.client.patch(
+            f"/monthly/photos/{self.draft_id}",
+            json={"photos": [{"asset_id": self.asset_id, "caption": "Updated caption"}]},
+        )
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(repeated.get_json()["photos"][0]["source_area"], stored["source_area"])
 
 
 if __name__ == "__main__":

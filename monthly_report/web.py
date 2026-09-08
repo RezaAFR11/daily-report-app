@@ -7756,6 +7756,8 @@ def _update_periodic_draft_photos_request(*, data_dir: str, draft_id: str):
         reference.pop("data", None)
         reference.pop("path", None)
         reference["caption"] = _clean_text(item.get("caption"), 500)
+        if "source_area" in item:
+            reference["source_area"] = _clean_text(item.get("source_area"), 255)
         reference["caption_match_confidence"] = "reviewed"
         reference["caption_review_required"] = False
         reference["order"] = index

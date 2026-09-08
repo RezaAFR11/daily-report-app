@@ -619,7 +619,10 @@ def _page_text_fragments(page: Any) -> list[dict[str, Any]]:
             y = float(cm[5]) + float(tm[5])
         except (TypeError, ValueError, IndexError):
             return
-        fragments.append({"text": clean, "key": normalised, "x": x, "y": y})
+        fragments.append({
+            "text": clean, "key": normalised, "x": x, "y": y,
+            "font": str((_font or {}).get("/BaseFont", "")),
+        })
 
     try:
         page.extract_text(visitor_text=visitor)
@@ -787,6 +790,56 @@ def _known_photo_area_prefix(
     return None
 
 
+def _styled_photo_card_context(
+    column: list[dict[str, Any]], image_top: float,
+) -> dict[str, Any] | None:
+    """Read the template's bold area / italic caption blocks in draw order.
+
+    Font transitions delimit wrapped text independently of pypdf's unreliable
+    continuation-line coordinates. Only a heading near this image can anchor a
+    card, and the caption ends at the next non-italic block in the same column.
+    Unknown font conventions use the conservative fallback reader.
+    """
+    def style(fragment: dict[str, Any]) -> str:
+        font = str(fragment.get("font") or "").casefold()
+        if "oblique" in font or "italic" in font:
+            return "caption"
+        return "heading" if "bold" in font else "other"
+
+    matches = []
+    index = 0
+    while index < len(column):
+        if style(column[index]) != "heading":
+            index += 1
+            continue
+        start = index
+        while index < len(column) and style(column[index]) == "heading":
+            index += 1
+        caption_start = index
+        while index < len(column) and style(column[index]) == "caption":
+            index += 1
+        if index == caption_start:
+            continue
+        # Skip any page-level heading above the actual card heading.
+        anchors = [i for i in range(start, caption_start)
+                   if -20 <= float(column[i]["y"]) - image_top <= 80]
+        if not anchors:
+            continue
+        start = anchors[0]
+        area = " ".join(item["text"] for item in column[start:caption_start]).strip()
+        caption = " ".join(item["text"] for item in column[caption_start:index]).strip()
+        matches.append((abs(float(column[start]["y"]) - image_top), area, caption))
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0])
+    _, area, caption = matches[0]
+    return {
+        "area": area[:255], "caption": caption[:500],
+        "context_type": "photo_card",
+        "review_required": len(matches) > 1 or len(area) > 255 or len(caption) > 500,
+    }
+
+
 def _area_heading_photo_context(
     page: Any,
     bbox: Any,
@@ -830,6 +883,9 @@ def _area_heading_photo_context(
         if not _photo_card_chrome(fragment.get("text"))
         and abs(float(fragment.get("x") or 0.0) - image_x) <= column_tolerance
     ]
+    styled = _styled_photo_card_context(column, image_top)
+    if styled is not None:
+        return styled
     headings = []
     index = 0
     while index < len(column):
