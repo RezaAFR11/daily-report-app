@@ -2005,11 +2005,72 @@ function asList(value) {
 }
 
 function cleanReviewWarning(value) {
+  if (value && typeof value === 'object') {
+    const source = [value.filename, value.field, value.page ? `page ${value.page}` : ''].filter(Boolean).join(' / ');
+    value = [source, value.message || value.text || value.code].filter(Boolean).join(': ');
+  }
   return String(value ?? '')
     .replace(/(?:&#x0*20;|&#0*32;|&nbsp;|&#x0*a0;|&#0*160;)/gi, ' ')
     .replace(/[\u00a0\u200b]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function groupReviewWarnings(warnings) {
+  const groups = [
+    {key:'check', title:'Check source data', items:[]},
+    {key:'review', title:'Review / confirm', items:[]},
+    {key:'info', title:'Information', items:[]},
+  ];
+  const seen = new Set();
+  for (const warning of warnings || []) {
+    const text = cleanReviewWarning(warning);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    const severity = String(warning?.severity || '').toLowerCase();
+    const code = String(warning?.code || '').toLowerCase();
+    let group = 1;
+    if (['error', 'critical', 'blocker'].includes(severity)
+        || /\b(?:error|critical|blocker):/i.test(text)
+        || /progress.*(?:arithmetic|mismatch)|invalid.*(?:date|year|number)|arithmetic.*mismatch/i.test(`${code} ${text}`)) {
+      group = 0;
+    } else if (severity === 'info' || /\bINFO:/i.test(text)
+        || /repeated header\/footer.*removed|non-report image occurrence.*ignored/i.test(text)) {
+      group = 2;
+    }
+    groups[group].items.push(text);
+  }
+  return groups.filter(group => group.items.length);
+}
+
+function renderGroupedWarnings(element, warnings) {
+  element.replaceChildren();
+  const groups = groupReviewWarnings(warnings);
+  element.classList.toggle('d-none', !groups.length);
+  if (!groups.length) return;
+  const note = document.createElement('div');
+  note.className = 'small text-muted mb-2';
+  note.textContent = 'Grouped for reading only. Existing validation and approval rules still apply.';
+  element.appendChild(note);
+  for (const group of groups) {
+    const section = document.createElement('details');
+    section.className = 'border rounded p-2 mb-2 bg-white';
+    section.open = group.key !== 'info';
+    const heading = document.createElement('summary');
+    heading.className = 'fw-semibold';
+    heading.textContent = `${group.title} (${group.items.length})`;
+    section.appendChild(heading);
+    const list = document.createElement('ul');
+    list.className = 'mt-2 mb-0 ps-3';
+    for (const text of group.items) {
+      const row = document.createElement('li');
+      row.className = 'mb-2 text-break';
+      row.textContent = text;
+      list.appendChild(row);
+    }
+    section.appendChild(list);
+    element.appendChild(section);
+  }
 }
 
 function populateMonthlyReview(draft) {
@@ -2024,13 +2085,10 @@ function populateMonthlyReview(draft) {
     stored_json:'Stored JSON',
   }[draft.source_method] || 'Imported source';
 
-  const details = [];
-  if ((coverage.missing_dates || []).length) details.push(`Missing: ${coverage.missing_dates.join(', ')}`);
-  const warningTexts = (draft.warnings || []).map(cleanReviewWarning).filter(Boolean);
-  if (warningTexts.length) details.push(`Warnings: ${warningTexts.join(' | ')}`);
+  const details = [...(draft.warnings || [])];
+  if ((coverage.missing_dates || []).length) details.unshift(`Missing dates: ${coverage.missing_dates.join(', ')}`);
   const detail = document.getElementById('coverage-detail');
-  detail.textContent = details.join('\n');
-  detail.classList.toggle('d-none', !details.length);
+  renderGroupedWarnings(detail, details);
   populateSourceManifest(draft.source_manifest || []);
   populateSourceValidation(draft);
   populateWorkforceReview(draft);
@@ -2754,13 +2812,9 @@ function renderSourceValidationIssues(validation, draft) {
   const issues = [
     ...(Array.isArray(validation.issues) ? validation.issues : []),
     ...(Array.isArray(draft.warnings) ? draft.warnings : []),
-  ].map(validationIssueText).filter(Boolean);
-  const uniqueIssues = Array.from(new Set(issues));
+  ];
   const issueBox = document.getElementById('source-validation-issues');
-  issueBox.textContent = uniqueIssues.length
-    ? `Please review:\n- ${uniqueIssues.join('\n- ')}`
-    : '';
-  issueBox.classList.toggle('d-none', uniqueIssues.length === 0);
+  renderGroupedWarnings(issueBox, issues);
 }
 
 function populateSourceValidation(draft) {

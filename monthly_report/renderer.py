@@ -1807,19 +1807,9 @@ def _photo_card(
         height=image_height,
         image_module=image_module,
         image_ops=image_ops,
-        contain=(
-            _plain(raw.get("source_type")).casefold() == "legacy_excel_extraction"
-            and max(
-                _number(raw.get("width")) or 1,
-                _number(raw.get("height")) or 1,
-            ) / max(
-                min(
-                    _number(raw.get("width")) or 1,
-                    _number(raw.get("height")) or 1,
-                ),
-                1,
-            ) > 2.2
-        ),
+        # Evidence photographs must keep every edge, regardless of source or
+        # aspect ratio. Letterbox within the existing card instead of cropping.
+        contain=True,
     )
     if rendered_image is None:
         return None

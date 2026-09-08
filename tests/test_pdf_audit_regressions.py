@@ -7,6 +7,20 @@ from monthly_report.photos import _area_heading_photo_context, _attach_photo_con
 
 
 class PDFAuditRegressionTests(unittest.TestCase):
+    def test_section_area_is_not_repeated_in_first_photo_heading(self):
+        fragments = [
+            {"text": text, "x": 53, "y": y, "font": font}
+            for text, y, font in [
+                ("MA-77", 655, "/Helvetica-Bold"),
+                ("MA-77", 635, "/Helvetica-Bold"),
+                ("Pipe Welding for Leakage Fix", 609, "/Helvetica-Oblique"),
+            ]
+        ]
+        with patch("monthly_report.photos._page_text_fragments", return_value=fragments):
+            result = _area_heading_photo_context(None, (53, 450, 208, 600), [{"id": "MA-77"}])
+        self.assertEqual(result["area"], "MA-77")
+        self.assertEqual(result["caption"], "Pipe Welding for Leakage Fix")
+
     def test_wrapped_bold_heading_is_complete_for_all_four_cards(self):
         fragments = []
         boxes = []

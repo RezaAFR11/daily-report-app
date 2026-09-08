@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from flask import Flask
-from PIL import Image
+from PIL import Image, ImageOps
 from pypdf import PdfReader
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
@@ -14,7 +14,7 @@ from monthly_report.photos import (
     extract_pdf_photo_candidates,
     store_photo_candidates,
 )
-from monthly_report.renderer import render_monthly_report
+from monthly_report.renderer import render_monthly_report, _photo_card, _styles
 from monthly_report.web import (
     _bound_record_photo_candidates,
     _draft_photo_dir,
@@ -252,6 +252,30 @@ class PeriodicPhotoExtractionTests(unittest.TestCase):
 
 
 class PeriodicPhotoRendererTests(unittest.TestCase):
+    def test_portrait_photo_keeps_top_and_bottom_edges(self):
+        picture = Image.new("RGB", (100, 200), "gray")
+        picture.paste("red", (0, 0, 100, 30))
+        picture.paste("blue", (0, 170, 100, 200))
+        asset_id = "f" * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            picture.save(Path(temporary, f"{asset_id}.jpg"), format="JPEG")
+            card = _photo_card(
+                {"asset_id": asset_id, "source_type": "legacy_pdf_extraction"},
+                root=temporary, cell_width=210, image_width=200, image_height=100,
+                compact=False, photo_text_style=_styles()["small"],
+                image_module=Image, image_ops=ImageOps,
+            )
+            self.assertIsNotNone(card)
+            rendered = card._cellvalues[-1][0]._img
+            pixels = Image.frombytes("RGB", rendered.getSize(), rendered.getRGBData())
+            width, height = pixels.size
+            top = pixels.getpixel((width // 2, height // 20))
+            bottom = pixels.getpixel((width // 2, height * 19 // 20))
+            self.assertGreater(top[0], 200)
+            self.assertLess(top[2], 50)
+            self.assertGreater(bottom[2], 200)
+            self.assertLess(bottom[0], 50)
+
     def test_reviewed_photo_is_rendered_in_dynamic_appendix(self):
         photo = _jpeg("#2563eb")
         asset_id = hashlib.sha256(photo).hexdigest()

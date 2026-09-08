@@ -825,7 +825,17 @@ def _styled_photo_card_context(
                    if -20 <= float(column[i]["y"]) - image_top <= 80]
         if not anchors:
             continue
+        # The section label may precede the same per-card heading. Match its
+        # complete fragment sequence (including wrapped headings), and retain
+        # only the card copy; never deduplicate words inside an area name.
         start = anchors[0]
+        heading_keys = [_normalise_photo_text(item["text"])
+                        for item in column[start:caption_start]]
+        for split in range(1, len(heading_keys)):
+            if (start + split in anchors
+                    and heading_keys[:split] == heading_keys[split:]):
+                start += split
+                break
         area = " ".join(item["text"] for item in column[start:caption_start]).strip()
         caption = " ".join(item["text"] for item in column[caption_start:index]).strip()
         matches.append((abs(float(column[start]["y"]) - image_top), area, caption))
