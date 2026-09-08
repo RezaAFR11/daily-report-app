@@ -791,8 +791,8 @@ def _area_heading_photo_context(
     page: Any,
     bbox: Any,
     areas: Iterable[Mapping[str, Any]] | None,
-) -> dict[str, str] | None:
-    """Read the visible area and caption from one current-layout photo card.
+) -> dict[str, Any] | None:
+    """Read the visible area and caption from one supported photo card.
 
     ReportLab may expose wrapped heading and caption lines with coordinates that
     overlap the image draw box.  Page-wide nearest-text matching is therefore not
@@ -820,6 +820,44 @@ def _area_heading_photo_context(
     image_top = max(y0, y1)
     image_width = max(1.0, abs(x1 - x0))
     column_tolerance = max(30.0, image_width * 0.22)
+
+    # Wrapped ReportLab text can have incorrect continuation coordinates in
+    # pypdf (e.g. a 10-point line advance becomes 100 points). Preserve stream
+    # order within each column and delimit cards by their known area headings.
+    # Only the heading position is used to select the card for this image.
+    column = [
+        fragment for fragment in _page_text_fragments(page)
+        if not _photo_card_chrome(fragment.get("text"))
+        and abs(float(fragment.get("x") or 0.0) - image_x) <= column_tolerance
+    ]
+    headings = []
+    index = 0
+    while index < len(column):
+        known = _known_photo_area_prefix(column[index:], area_names)
+        if known:
+            count, area = known
+            headings.append((index, count, area))
+            index += count
+        else:
+            index += 1
+    matches = []
+    for position, (start, count, area) in enumerate(headings):
+        relative_y = float(column[start].get("y") or 0.0) - image_top
+        if not -20.0 <= relative_y <= 80.0:
+            continue
+        end = headings[position + 1][0] if position + 1 < len(headings) else len(column)
+        caption = " ".join(str(item["text"]) for item in column[start + count:end]).strip()
+        if caption:
+            matches.append((abs(relative_y), area, caption))
+    if matches:
+        matches.sort(key=lambda item: item[0])
+        _, area, caption = matches[0]
+        return {
+            "area": area[:255],
+            "caption": re.sub(r"^\s*[-\u2022]\s*", "", caption)[:500],
+            "context_type": "photo_card",
+            "review_required": len(matches) > 1 or len(caption) > 500,
+        }
 
     card_fragments: list[dict[str, Any]] = []
     for fragment in _page_text_fragments(page):
@@ -850,6 +888,7 @@ def _area_heading_photo_context(
     detected_area = area_names[0] if len(area_names) == 1 else ""
     remaining = card_fragments
     detected_area_names = list(area_names)
+    guessed_heading = False
 
     # A page-level area label can precede the repeated per-card heading in the
     # first column.  Iterate so both prefixes are removed without touching the
@@ -860,6 +899,11 @@ def _area_heading_photo_context(
             count, detected_area = known
             remaining = remaining[count:]
             continue
+
+        # Never reinterpret a caption as a guessed area after removing a known
+        # heading, or when the source supplies an explicit area vocabulary.
+        if area_names:
+            break
 
         # When Active Areas is blank, a visibly elevated first line identifies a
         # photo-card heading.  Wrapped heading continuations remain below the
@@ -879,6 +923,7 @@ def _area_heading_photo_context(
         if not heading:
             break
         detected_area = heading
+        guessed_heading = True
         if heading not in detected_area_names:
             detected_area_names.append(heading)
         remaining = remaining[caption_start:]
@@ -894,6 +939,7 @@ def _area_heading_photo_context(
         "area": detected_area[:255],
         "caption": caption[:500],
         "context_type": "photo_card",
+        "review_required": bool(area_names) or guessed_heading or len(caption) > 500,
     }
 
 
@@ -970,7 +1016,7 @@ def _attach_photo_contexts(
                 candidate["caption"] = caption[:500]
             candidate["source_type"] = "legacy_pdf_extraction"
             candidate["photo_match_method"] = match_method
-            if match_method == "photo_card_geometry" and caption:
+            if match_method == "photo_card_geometry" and caption and not context.get("review_required"):
                 candidate["caption_match_confidence"] = "high"
                 candidate["caption_review_required"] = False
             else:

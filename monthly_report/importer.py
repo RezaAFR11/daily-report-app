@@ -28,7 +28,7 @@ from .identity import project_title_match
 
 
 SCHEMA_VERSION = "daily-report-import/1"
-PARSER_VERSION = "monthly-pdf-importer/1.7"
+PARSER_VERSION = "monthly-pdf-importer/1.8"
 
 # Supported Daily Report layout families.  These are parser profiles only; they
 # do not change the canonical output shape consumed by weekly/monthly reports.
@@ -2090,6 +2090,17 @@ def _extract_report_identity(
         extracted[field] = value or ""
         if field_provenance:
             provenance[field] = field_provenance
+
+    # Retain the raw value for audit; a stacked PDF correction must never be
+    # silently repaired by guessing which year digit the author intended.
+    number = extracted["project_no"]
+    if re.search(r"/\s*\d{5,}\s*$", number):
+        warnings.append(_warning(
+            "invalid_document_number_year",
+            f"Document number has an invalid year ({number}); check overlapping text in the source PDF.",
+            severity="error",
+            field="project_no",
+        ))
 
     project_id, project_match, project_warnings = _match_project(
         extracted["project_no"],
