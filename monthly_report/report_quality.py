@@ -238,6 +238,7 @@ def _photo_completeness_issues(report: Mapping[str, Any]) -> list[str]:
         re.compile(r"some photos were excluded by the report draft asset limit", re.I),
         re.compile(r"draft photo count or byte limit was reached", re.I),
         re.compile(r"photo exceeded the overall .* photo count or byte limit", re.I),
+        re.compile(r"image\(s\) were excluded by photo safety limits", re.I),
     )
     for raw in _as_list(report.get("warnings")):
         text = str(raw or "").strip()

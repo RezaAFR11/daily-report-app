@@ -10,6 +10,7 @@ sheet extraction, and embedded photographs.
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import posixpath
 import re
@@ -47,7 +48,7 @@ class LegacyExcelLimits:
 
 
 DEFAULT_LIMITS = LegacyExcelLimits()
-PARSER_VERSION = "legacy-daily-xlsx/1.0"
+PARSER_VERSION = "legacy-daily-xlsx/1.1"
 
 
 class LegacyExcelError(ValueError):
@@ -809,25 +810,79 @@ def _drawing_items(
     return result
 
 
+_PHOTO_AREA_RE = re.compile(
+    r"^(?:(?:TURBINE|GENERATOR)(?:\s+(?:UNIT\s*)?\d+)?|"
+    r"INSULATION|ELECTRICAL|MECHANICAL)$",
+    re.IGNORECASE,
+)
+
+
+def _is_explicit_photo_area(value: Any, known_areas: Sequence[str]) -> bool:
+    """Recognise photo headings without mistaking work captions for areas."""
+
+    text = _clean(value, 255)
+    if not text:
+        return False
+    normalised = _normalise_area(text)
+    if normalised.casefold() in {
+        _normalise_area(area).casefold() for area in known_areas if _clean(area)
+    }:
+        return True
+    folded = re.sub(r"[^A-Z0-9]+", " ", text.upper()).strip()
+    folded = re.sub(r"\bTURBIN\b", "TURBINE", folded)
+    folded = re.sub(r"\bGENERR?ATOR\b", "GENERATOR", folded)
+    return bool(_PHOTO_AREA_RE.fullmatch(folded))
+
+
 def _photo_context(
     image: Mapping[str, Any],
     shapes: Sequence[Mapping[str, Any]],
-) -> tuple[str, str]:
+    images: Sequence[Mapping[str, Any]],
+    known_areas: Sequence[str],
+) -> tuple[str, list[Mapping[str, Any]]]:
+    """Return the nearest explicit area and caption shapes for one image row."""
+
     image_row = int(image.get("row") or 0)
-    image_column = int(image.get("column") or 0)
+    ordered_shapes = sorted(
+        shapes,
+        key=lambda shape: (
+            int(shape.get("row") or 0),
+            int(shape.get("column") or 0),
+        ),
+    )
+    area_shapes = [
+        shape
+        for shape in ordered_shapes
+        if _is_explicit_photo_area(shape.get("text"), known_areas)
+    ]
     prior_areas = [
         shape
-        for shape in shapes
+        for shape in area_shapes
         if int(shape.get("row") or 0) <= image_row
-        and _looks_like_area(shape.get("text"))
     ]
-    source_area = _normalise_area(prior_areas[-1]["text"]) if prior_areas else "General"
+    source_area = (
+        _normalise_area(prior_areas[-1].get("text"))
+        if prior_areas else "General"
+    )
+
+    following_rows = [
+        int(item.get("row") or 0)
+        for item in images
+        if int(item.get("row") or 0) > image_row
+    ]
+    following_rows.extend(
+        int(shape.get("row") or 0)
+        for shape in area_shapes
+        if int(shape.get("row") or 0) > image_row
+    )
+    boundary = min(following_rows) if following_rows else image_row + 31
+    boundary = min(boundary, image_row + 31)
     captions = [
         shape
-        for shape in shapes
+        for shape in ordered_shapes
         if int(shape.get("row") or 0) >= image_row
-        and int(shape.get("row") or 0) - image_row <= 100
-        and not _looks_like_area(shape.get("text"))
+        and int(shape.get("row") or 0) < boundary
+        and not _is_explicit_photo_area(shape.get("text"), known_areas)
         and _clean(shape.get("text"))
         and not re.search(
             r"\b(?:prepared|checked|approved)\s+by\b",
@@ -835,13 +890,190 @@ def _photo_context(
             re.I,
         )
     ]
-    if not captions:
-        return source_area, ""
-    captions.sort(key=lambda shape: (
-        int(shape.get("row") or 0) - image_row,
-        abs(int(shape.get("column") or 0) - image_column),
-    ))
-    return source_area, _clean(captions[0].get("text"), 500)
+    return source_area, captions
+
+
+def _true_runs(flags: Sequence[bool]) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, flag in enumerate([*flags, False]):
+        if flag and start is None:
+            start = index
+        elif not flag and start is not None:
+            runs.append((start, index))
+            start = None
+    return runs
+
+
+def _excel_photo_panel_bounds(image: Any) -> list[tuple[int, int]]:
+    """Find horizontal photo panels separated by near-white worksheet gutters."""
+
+    width, height = image.size
+    if width / max(height, 1) < 2.2:
+        return [(0, width)]
+
+    sample = image.convert("RGB")
+    sample.thumbnail((2_000, 160))
+    white_columns: list[bool] = []
+    for column in range(sample.width):
+        near_white = sum(
+            1
+            for row in range(sample.height)
+            if min(sample.getpixel((column, row))) >= 242
+        )
+        white_columns.append(near_white / max(sample.height, 1) >= 0.90)
+    gutters = [
+        (start, end)
+        for start, end in _true_runs(white_columns)
+        if end - start >= 2 and start > 3 and end < sample.width - 3
+    ]
+    if not gutters:
+        return [(0, width)]
+
+    scale = width / max(sample.width, 1)
+    scaled_gutters = [
+        (max(0, round(start * scale)), min(width, round(end * scale)))
+        for start, end in gutters
+    ]
+    bounds: list[tuple[int, int]] = []
+    left = 0
+    minimum_width = max(60, round(height * 0.35))
+    for gutter_start, gutter_end in scaled_gutters:
+        if gutter_start - left >= minimum_width:
+            bounds.append((left, gutter_start))
+        left = max(left, gutter_end)
+    if width - left >= minimum_width:
+        bounds.append((left, width))
+    if len(bounds) < 2:
+        return [(0, width)]
+
+    # Some collages contain two touching photos without a white gutter. Split
+    # only an obvious width outlier relative to the other detected panels.
+    widths = sorted(right - left for left, right in bounds)
+    middle = len(widths) // 2
+    median_width = (
+        widths[middle]
+        if len(widths) % 2
+        else (widths[middle - 1] + widths[middle]) / 2
+    )
+    refined: list[tuple[int, int]] = []
+    for left, right in bounds:
+        panel_width = right - left
+        if median_width and panel_width > median_width * 1.65:
+            pieces = max(2, min(4, round(panel_width / median_width)))
+            for index in range(pieces):
+                piece_left = left + round(panel_width * index / pieces)
+                piece_right = left + round(panel_width * (index + 1) / pieces)
+                if piece_right - piece_left >= minimum_width:
+                    refined.append((piece_left, piece_right))
+        else:
+            refined.append((left, right))
+    return refined if len(refined) >= 2 else [(0, width)]
+
+
+def _normalise_excel_photo_panels(
+    raw: bytes,
+    photo_limits: PhotoLimits,
+) -> list[tuple[bytes, int, int]]:
+    """Validate one worksheet image and split genuine horizontal collages."""
+
+    # Objects have already been restricted to the worksheet photo section, so
+    # legitimate compact evidence photos can use the stricter collage floor
+    # instead of the generic PDF logo/signature threshold.
+    whole = _normalise_image(
+        raw,
+        photo_limits,
+        allow_wide=True,
+        allow_small=True,
+    )
+    if whole is None:
+        return []
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return [whole]
+
+    try:
+        with Image.open(io.BytesIO(raw)) as opened:
+            image = ImageOps.exif_transpose(opened)
+            image.load()
+            if image.mode in {"RGBA", "LA"} or "transparency" in image.info:
+                rgba = image.convert("RGBA")
+                background = Image.new("RGB", rgba.size, "white")
+                background.paste(rgba, mask=rgba.getchannel("A"))
+                image = background
+            elif image.mode != "RGB":
+                image = image.convert("RGB")
+            bounds = _excel_photo_panel_bounds(image)
+            if len(bounds) == 1:
+                return [whole]
+
+            panels: list[tuple[bytes, int, int]] = []
+            for left, right in bounds:
+                crop = image.crop((left, 0, right, image.height))
+                encoded = io.BytesIO()
+                crop.save(encoded, format="JPEG", quality=90, optimize=True)
+                normalised = _normalise_image(
+                    encoded.getvalue(),
+                    photo_limits,
+                    allow_small=True,
+                )
+                if normalised is not None:
+                    panels.append(normalised)
+            return panels if len(panels) >= 2 else [whole]
+    except Exception:
+        return [whole]
+
+
+def _photo_caption_assignments(
+    image: Mapping[str, Any],
+    images: Sequence[Mapping[str, Any]],
+    captions: Sequence[Mapping[str, Any]],
+    panel_count: int,
+) -> list[tuple[str, str, bool]]:
+    """Pair source captions with photo panels without inventing descriptions."""
+
+    ordered_captions = sorted(
+        captions,
+        key=lambda shape: (
+            int(shape.get("column") or 0),
+            int(shape.get("row") or 0),
+        ),
+    )
+    texts = [_clean(shape.get("text"), 500) for shape in ordered_captions]
+    texts = [text for text in texts if text]
+    if not texts:
+        return [("", "low", True) for _ in range(panel_count)]
+    if panel_count > 1:
+        if len(texts) == panel_count:
+            return [(text, "high", False) for text in texts]
+        if len(texts) == 1:
+            return [(texts[0], "medium", False) for _ in range(panel_count)]
+        return [
+            (texts[index] if index < len(texts) else "", "low", True)
+            for index in range(panel_count)
+        ]
+
+    image_row = int(image.get("row") or 0)
+    image_column = int(image.get("column") or 0)
+    row_images = sorted(
+        [item for item in images if int(item.get("row") or 0) == image_row],
+        key=lambda item: int(item.get("column") or 0),
+    )
+    if len(texts) == len(row_images) and len(row_images) > 1:
+        image_index = next(
+            (index for index, item in enumerate(row_images) if item is image),
+            0,
+        )
+        return [(texts[image_index], "high", False)]
+    closest = min(
+        ordered_captions,
+        key=lambda shape: (
+            abs(int(shape.get("column") or 0) - image_column),
+            int(shape.get("row") or 0),
+        ),
+    )
+    return [(_clean(closest.get("text"), 500), "high", False)]
 
 
 def _photos(
@@ -853,6 +1085,7 @@ def _photos(
     report_date: str,
     report_id: str,
     source_name: str,
+    known_areas: Sequence[str],
     destination: str | os.PathLike[str],
     photo_limits: PhotoLimits,
     limits: LegacyExcelLimits,
@@ -866,6 +1099,10 @@ def _photos(
         item for item in drawing_items
         if item.get("media_path") and int(item.get("row") or 0) > photo_start_row
     ]
+    images.sort(key=lambda item: (
+        int(item.get("row") or 0),
+        int(item.get("column") or 0),
+    ))
     candidates: list[dict[str, Any]] = []
     skipped = 0
     for image in images:
@@ -878,24 +1115,46 @@ def _photos(
         if info.file_size > photo_limits.max_embedded_image_bytes:
             skipped += 1
             continue
-        normalised = _normalise_image(archive.read(info), photo_limits)
-        if normalised is None:
+        panels = _normalise_excel_photo_panels(archive.read(info), photo_limits)
+        if not panels:
             skipped += 1
             continue
-        content, width, height = normalised
-        source_area, caption = _photo_context(image, shapes)
-        candidates.append({
-            "asset_id": hashlib.sha256(content).hexdigest(),
-            "content": content,
-            "source": source_name,
-            "width": width,
-            "height": height,
-            "caption": caption,
-            "source_date": report_date,
-            "source_area": source_area,
-            "source_type": "legacy_excel_extraction",
-            "photo_match_method": "worksheet_drawing_anchor",
-        })
+        source_area, captions = _photo_context(
+            image,
+            shapes,
+            images,
+            known_areas,
+        )
+        assignments = _photo_caption_assignments(
+            image,
+            images,
+            captions,
+            len(panels),
+        )
+        for panel_index, ((content, width, height), assignment) in enumerate(
+            zip(panels, assignments),
+            start=1,
+        ):
+            caption, confidence, review_required = assignment
+            candidates.append({
+                "asset_id": hashlib.sha256(content).hexdigest(),
+                "content": content,
+                "source": source_name,
+                "width": width,
+                "height": height,
+                "caption": caption,
+                "source_date": report_date,
+                "source_area": source_area,
+                "source_type": "legacy_excel_extraction",
+                "context_type": "photo_card",
+                "caption_match_confidence": confidence,
+                "caption_review_required": review_required,
+                "photo_match_method": (
+                    "worksheet_drawing_panel"
+                    if len(panels) > 1 else "worksheet_drawing_anchor"
+                ),
+                "panel_index": panel_index,
+            })
     references = store_photo_candidates(
         candidates,
         destination,
@@ -908,7 +1167,7 @@ def _photos(
     if excluded:
         warnings.append(_warning(
             "excel_photos_excluded",
-            f"{source_name}: {excluded} image(s) were excluded by photo safety limits.",
+            f"{excluded} image(s) were excluded by photo safety limits.",
             field="photo_documentation",
             sheet_name=source_name,
         ))
@@ -1043,6 +1302,7 @@ def _record(
             report_date=report_date,
             report_id=report_id,
             source_name=f"{workbook_filename}#{sheet_name}",
+            known_areas=tuple(areas),
             destination=asset_directory,
             photo_limits=photo_limits,
             limits=limits,

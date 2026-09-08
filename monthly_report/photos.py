@@ -158,8 +158,19 @@ def _page_text(page: Any) -> str:
         return ""
 
 
-def _normalise_image(raw: bytes, limits: PhotoLimits) -> tuple[bytes, int, int] | None:
-    """Decode one embedded image and return a bounded orientation-safe JPEG."""
+def _normalise_image(
+    raw: bytes,
+    limits: PhotoLimits,
+    *,
+    allow_wide: bool = False,
+    allow_small: bool = False,
+) -> tuple[bytes, int, int] | None:
+    """Decode one embedded image and return a bounded orientation-safe JPEG.
+
+    ``allow_wide`` and ``allow_small`` are reserved for worksheet photo collages.
+    PDF extraction keeps the default guards so document logos and signatures are
+    still rejected exactly as before.
+    """
 
     if not raw or len(raw) > limits.max_embedded_image_bytes:
         return None
@@ -176,16 +187,18 @@ def _normalise_image(raw: bytes, limits: PhotoLimits) -> tuple[bytes, int, int] 
                 if image_format not in _ALLOWED_IMAGE_FORMATS:
                     return None
                 width, height = opened.size
+                minimum_dimension = 60 if allow_small else limits.min_dimension
+                minimum_pixels = 10_000 if allow_small else limits.min_pixels
                 if (
-                    width < limits.min_dimension
-                    or height < limits.min_dimension
-                    or width * height < limits.min_pixels
+                    width < minimum_dimension
+                    or height < minimum_dimension
+                    or width * height < minimum_pixels
                     or width * height > limits.max_pixels
                 ):
                     return None
                 # Header logos and signatures tend to be very wide and short.
                 ratio = max(width / max(height, 1), height / max(width, 1))
-                if ratio > 3.75:
+                if ratio > 3.75 and not allow_wide:
                     return None
 
                 image = ImageOps.exif_transpose(opened)

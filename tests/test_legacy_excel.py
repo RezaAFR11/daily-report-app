@@ -12,6 +12,9 @@ from monthly_report.aggregate import aggregate_monthly_records
 from monthly_report.legacy_excel import (
     PARSER_VERSION,
     LegacyExcelError,
+    _normalise_excel_photo_panels,
+    _photo_caption_assignments,
+    _photo_context,
     analyze_legacy_daily_workbook,
     extract_legacy_daily_records,
 )
@@ -204,6 +207,86 @@ def _workbook(path, sheets, *, with_photo=False):
 
 
 class LegacyExcelCharacterizationTests(unittest.TestCase):
+    def test_excel_photo_collage_is_split_and_captioned_in_column_order(self):
+        collage = Image.new("RGB", (860, 160), "white")
+        for index, colour in enumerate(("#1f5f3f", "#71421f", "#243b78", "#6b255f")):
+            left = index * 220
+            collage.paste(Image.new("RGB", (200, 160), colour), (left, 0))
+        encoded = io.BytesIO()
+        collage.save(encoded, format="PNG")
+
+        panels = _normalise_excel_photo_panels(
+            encoded.getvalue(),
+            DEFAULT_PHOTO_LIMITS,
+        )
+
+        self.assertEqual(len(panels), 4)
+        self.assertTrue(all(width >= 190 and height == 160 for _, width, height in panels))
+
+        compact = io.BytesIO()
+        Image.new("RGB", (194, 144), "#34495e").save(compact, format="PNG")
+        self.assertEqual(
+            len(_normalise_excel_photo_panels(compact.getvalue(), DEFAULT_PHOTO_LIMITS)),
+            1,
+        )
+
+        image = {"row": 70, "column": 2}
+        images = [image]
+        shapes = [
+            {"row": 65, "column": 1, "text": "GENERATOR 1"},
+            {"row": 84, "column": 1, "text": "CT preparation"},
+            {"row": 84, "column": 4, "text": "BUSBAR INSPECTION"},
+            {"row": 84, "column": 7, "text": "Connecting cables"},
+            {"row": 84, "column": 10, "text": "Setting CT holder"},
+        ]
+        area, captions = _photo_context(
+            image,
+            shapes,
+            images,
+            ["Generator 1"],
+        )
+        assignments = _photo_caption_assignments(
+            image,
+            images,
+            captions,
+            len(panels),
+        )
+
+        self.assertEqual(area, "Generator 1")
+        self.assertEqual(
+            [caption for caption, _confidence, _review in assignments],
+            [
+                "CT preparation",
+                "BUSBAR INSPECTION",
+                "Connecting cables",
+                "Setting CT holder",
+            ],
+        )
+        self.assertTrue(all(confidence == "high" for _, confidence, _ in assignments))
+        self.assertFalse(any(review for _, _, review in assignments))
+
+    def test_uppercase_work_caption_is_not_misclassified_as_photo_area(self):
+        image = {"row": 70, "column": 2}
+        area, captions = _photo_context(
+            image,
+            [
+                {"row": 65, "column": 1, "text": "GENERATOR 1"},
+                {
+                    "row": 84,
+                    "column": 2,
+                    "text": "COATING USING UTIFIL, INSULATION AND RESIN WORK",
+                },
+            ],
+            [image],
+            ["Generator 1"],
+        )
+
+        self.assertEqual(area, "Generator 1")
+        self.assertEqual(
+            [row["text"] for row in captions],
+            ["COATING USING UTIFIL, INSULATION AND RESIN WORK"],
+        )
+
     def test_analysis_preserves_dates_duplicates_mismatch_and_project_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "daily.xlsx"

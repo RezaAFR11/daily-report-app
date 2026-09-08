@@ -14,6 +14,7 @@ from pypdf import PdfReader
 from monthly_report.importer import DEFAULT_LIMITS, PDFImportError
 from monthly_report.web import (
     _append_runtime_preflight_blockers,
+    _compact_review_warnings,
     _normalize_progress,
     _prepare_draft,
     _progress_arithmetic_warnings,
@@ -83,6 +84,23 @@ def _canonical_record(report_date, report_id, *, tomorrow, progress_actual):
 
 
 class MonthlyWebUnitTests(unittest.TestCase):
+    def test_warning_cleanup_removes_encoded_whitespace_artifacts(self):
+        warnings = _compact_review_warnings([
+            "daily.pdf: 1 small, oversized, or unsupported image occurrence(s) "
+            "were ignored. &#x20;",
+            "Source review required.&nbsp;",
+        ])
+
+        self.assertEqual(
+            warnings,
+            [
+                "Source review required.",
+                "Photo processing: 1 small/oversized/unsupported non-report "
+                "image occurrence(s) were ignored.",
+            ],
+        )
+        self.assertNotIn("&#x20;", " ".join(warnings))
+
     def test_activity_digest_keeps_every_distinct_phrase_and_area(self):
         descriptions = [
             "Alignment between generator and turbine",
@@ -186,6 +204,58 @@ class MonthlyWebUnitTests(unittest.TestCase):
         )
         self.assertIn("Daily Meeting. Vendor Demobilization.", activity_text)
         self.assertNotIn(";", activity_text)
+
+    def test_excel_draft_consolidates_recurring_remarks_and_hides_unspecified_roles(self):
+        draft = _prepare_draft(
+            {
+                "remarks": [
+                    {
+                        "date": "2026-01-01",
+                        "area": "Generator 1",
+                        "text": "Waiting for coordination with owner",
+                        "source_report_id": "day-1",
+                    },
+                    {
+                        "date": "2026-01-02",
+                        "area": "Generator 1",
+                        "text": "Waiting for coordination with owner",
+                        "source_report_id": "day-2",
+                    },
+                ],
+                "manpower": {
+                    "daily": [],
+                    "totals": {"total_person_days": 2, "total_man_hours": 20},
+                    "roles": [{
+                        "role": "Unspecified",
+                        "person_days": 2,
+                        "man_hours": 20,
+                    }],
+                },
+                "coverage": {
+                    "expected_dates": ["2026-01-01", "2026-01-02"],
+                    "covered_dates": ["2026-01-01", "2026-01-02"],
+                    "missing_dates": [],
+                },
+            },
+            project_no=PROJECT_NO,
+            project_title=PROJECT_TITLE,
+            date_from="2026-01-01",
+            date_to="2026-01-02",
+            report_mode="mtd",
+            source_method="uploaded_excel",
+            source_manifest=[
+                {"report_id": "day-1", "report_date": "2026-01-01"},
+                {"report_id": "day-2", "report_date": "2026-01-02"},
+            ],
+        )
+
+        self.assertEqual(draft["manpower"]["roles"], [])
+        self.assertEqual(draft["manpower"]["role_data_status"], "not_supplied")
+        self.assertEqual(len(draft["site"]["key_findings"]), 1)
+        finding = draft["site"]["key_findings"][0]
+        self.assertEqual(finding["date"], "2026-01-01 to 2026-01-02")
+        self.assertEqual(finding["occurrence_count"], 2)
+        self.assertEqual(finding["source_report_ids"], ["day-1", "day-2"])
 
     def test_progress_arithmetic_warning_preserves_and_explains_source_values(self):
         warnings = _progress_arithmetic_warnings({

@@ -198,6 +198,7 @@ class MonthlyReportRendererTests(unittest.TestCase):
                     "date": "2026-01-01",
                     "area": "Generator 2",
                     "text": "Waiting for coordination",
+                    "occurrence_count": 31,
                 }],
             },
         }
@@ -207,6 +208,7 @@ class MonthlyReportRendererTests(unittest.TestCase):
         self.assertNotIn("Area of Concern and Suggested Corrective Action", text)
         self.assertNotIn("Concern and closeout information was not supplied", text)
         self.assertIn("3.4 Key Remarks / Findings", text)
+        self.assertIn("31 occurrences", text)
 
         with_concern = dict(base)
         with_concern["site"] = dict(base["site"])

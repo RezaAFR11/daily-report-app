@@ -1143,14 +1143,31 @@ def _record_photo_areas(record: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in areas if isinstance(item, dict)] if isinstance(areas, list) else []
 
 
+_WARNING_HTML_WHITESPACE_RE = re.compile(
+    r"(?:&#x0*20;|&#0*32;|&nbsp;|&#x0*a0;|&#0*160;)",
+    re.IGNORECASE,
+)
+
+
+def _clean_warning_message(value: Any, maximum: int = 1_000) -> str:
+    """Remove encoded whitespace artifacts without decoding arbitrary HTML."""
+
+    text = _clean_text(value, maximum * 2)
+    text = _WARNING_HTML_WHITESPACE_RE.sub(" ", text)
+    text = text.replace("\u00a0", " ").replace("\u200b", "")
+    return " ".join(text.split())[:maximum].strip()
+
+
 def _warning_text(value: Any) -> str:
     if isinstance(value, Mapping):
-        message = value.get("message") or value.get("code") or "PDF parsing warning"
+        message = _clean_warning_message(
+            value.get("message") or value.get("code") or "PDF parsing warning"
+        )
         severity = str(value.get("severity") or "warning").upper()
         filename = _clean_text(value.get("filename"), 255)
         prefix = f"{filename}: " if filename else ""
-        return f"{prefix}{severity}: {message}"
-    return _clean_text(value, 1_000)
+        return _clean_warning_message(f"{prefix}{severity}: {message}")
+    return _clean_warning_message(value)
 
 
 def _latest_report_context(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2031,7 +2048,10 @@ def _key_remark_findings(draft: Mapping[str, Any], *, maximum: int = 24) -> list
 
     rows = draft.get("remarks") if isinstance(draft.get("remarks"), list) else []
     findings: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
+    consolidate_dates = (
+        _clean_text(draft.get("source_method"), 80).casefold() == "uploaded_excel"
+    )
+    grouped: dict[tuple[str, ...], dict[str, Any]] = {}
     for raw in rows:
         if not isinstance(raw, Mapping):
             continue
@@ -2044,20 +2064,38 @@ def _key_remark_findings(draft: Mapping[str, Any], *, maximum: int = 24) -> list
             continue
         date = _clean_text(raw.get("date", raw.get("source_date")), 10)
         area = _clean_text(raw.get("area"), 255) or "General"
-        key = (date, area.casefold(), _activity_match_text(text))
-        if key in seen:
+        identity = (area.casefold(), _activity_match_text(text))
+        key = identity if consolidate_dates else (date, *identity)
+        existing = grouped.get(key)
+        if existing is not None:
+            existing["occurrence_count"] += 1
+            if date and date not in existing["reported_dates"]:
+                existing["reported_dates"].append(date)
+            source_report_id = _clean_text(raw.get("source_report_id"), 200)
+            if source_report_id and source_report_id not in existing["source_report_ids"]:
+                existing["source_report_ids"].append(source_report_id)
             continue
-        seen.add(key)
-        findings.append({
+        source_report_id = _clean_text(raw.get("source_report_id"), 200)
+        finding = {
             "date": date,
             "area": area,
             "text": text,
             "source_type": "Daily Report remark/finding",
-            "source_report_id": _clean_text(raw.get("source_report_id"), 200),
-        })
-        if len(findings) >= maximum:
-            break
-    return findings
+            "source_report_id": source_report_id,
+            "source_report_ids": [source_report_id] if source_report_id else [],
+            "reported_dates": [date] if date else [],
+            "occurrence_count": 1,
+        }
+        grouped[key] = finding
+        findings.append(finding)
+
+    for finding in findings:
+        dates = sorted(finding["reported_dates"])
+        if consolidate_dates and len(dates) > 1:
+            finding["date"] = f"{dates[0]} to {dates[-1]}"
+        finding["first_reported_date"] = dates[0] if dates else ""
+        finding["last_reported_date"] = dates[-1] if dates else ""
+    return findings[:maximum]
 
 
 def _executive_remark_theme(value: Any) -> tuple[int, str]:
@@ -2725,6 +2763,19 @@ def _initialise_periodic_draft(
     draft["status"] = draft["report_mode"]
     draft["source_method"] = source_method
     draft["source_manifest"] = source_manifest
+    if source_method == "uploaded_excel" and isinstance(draft.get("manpower"), dict):
+        roles = draft["manpower"].get("roles")
+        if isinstance(roles, list) and roles and all(
+            _clean_text(row.get("role"), 100).casefold()
+            in {"", "unspecified", "not supplied"}
+            for row in roles
+            if isinstance(row, Mapping)
+        ):
+            # The legacy worksheet has names, quantity and working hours, but
+            # no role/position column. Preserve totals and daily manpower while
+            # suppressing a misleading one-row "Unspecified" breakdown.
+            draft["manpower"]["roles"] = []
+            draft["manpower"]["role_data_status"] = "not_supplied"
     context = report_context if isinstance(report_context, dict) else {}
     draft["project_name"] = project_title
     draft["vendor_project_no"] = project_no

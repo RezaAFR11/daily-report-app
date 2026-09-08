@@ -1956,6 +1956,14 @@ function asList(value) {
   return String(value).split('\n').map(v => v.trim()).filter(Boolean);
 }
 
+function cleanReviewWarning(value) {
+  return String(value ?? '')
+    .replace(/(?:&#x0*20;|&#0*32;|&nbsp;|&#x0*a0;|&#0*160;)/gi, ' ')
+    .replace(/[\u00a0\u200b]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function populateMonthlyReview(draft) {
   const coverage = draft.coverage || {};
   document.getElementById('coverage-included').textContent = coverage.included_count ?? (draft.source_manifest || []).length;
@@ -1970,7 +1978,8 @@ function populateMonthlyReview(draft) {
 
   const details = [];
   if ((coverage.missing_dates || []).length) details.push(`Missing: ${coverage.missing_dates.join(', ')}`);
-  if ((draft.warnings || []).length) details.push(`Warnings: ${draft.warnings.join(' | ')}`);
+  const warningTexts = (draft.warnings || []).map(cleanReviewWarning).filter(Boolean);
+  if (warningTexts.length) details.push(`Warnings: ${warningTexts.join(' | ')}`);
   const detail = document.getElementById('coverage-detail');
   detail.textContent = details.join('\n');
   detail.classList.toggle('d-none', !details.length);

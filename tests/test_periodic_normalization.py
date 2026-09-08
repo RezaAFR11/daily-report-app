@@ -243,6 +243,32 @@ class PeriodicPreflightTests(unittest.TestCase):
             {row["code"] for row in reviewed["blockers"]},
         )
 
+    def test_excel_photo_exclusion_warning_blocks_final_issue(self):
+        report = {
+            "project_no": "P-001",
+            "project_title": "Project One",
+            "source_validation": {
+                "selected_project_no": "P-001",
+                "selected_project_title": "Project One",
+                "applied": True,
+                "confirmed": True,
+                "project_groups": [],
+                "duplicate_groups": [],
+                "issues": [],
+            },
+            "coverage": {"missing_dates": []},
+            "warnings": [
+                "daily.xlsx#19.01.26: WARNING: 1 image(s) were excluded by photo safety limits."
+            ],
+        }
+
+        final = build_report_preflight(report, for_final=True)
+
+        self.assertIn(
+            "photo_documentation_incomplete",
+            {row["code"] for row in final["blockers"]},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

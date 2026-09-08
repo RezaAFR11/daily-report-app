@@ -1376,6 +1376,9 @@ def _key_findings_table(rows: list[Any], styles: Mapping[str, ParagraphStyle]) -
         date = _plain(_value(raw, "date", "source_date"))
         area = _plain(raw.get("area"))
         label = " / ".join(value for value in (date, area) if value) or "Source remark"
+        occurrence_count = int(_number(raw.get("occurrence_count")) or 0)
+        if occurrence_count > 1:
+            label += f" ({occurrence_count} occurrences)"
         data.append([
             _paragraph(label, styles["table"]),
             _paragraph(text, styles["table"]),
@@ -1746,17 +1749,34 @@ def _render_photo_image(
     height: float,
     image_module: Any,
     image_ops: Any,
+    contain: bool = False,
 ) -> RLImage | None:
     try:
         with image_module.open(path) as opened:
             if str(opened.format or "").upper() != "JPEG":
                 return None
             image = image_ops.exif_transpose(opened).convert("RGB")
-            fitted = image_ops.fit(
-                image,
-                (max(1, int(width * 2)), max(1, int(height * 2))),
-                method=image_module.Resampling.LANCZOS,
-            )
+            target_size = (max(1, int(width * 2)), max(1, int(height * 2)))
+            if contain:
+                visible = image_ops.contain(
+                    image,
+                    target_size,
+                    method=image_module.Resampling.LANCZOS,
+                )
+                fitted = image_module.new("RGB", target_size, "white")
+                fitted.paste(
+                    visible,
+                    (
+                        (target_size[0] - visible.width) // 2,
+                        (target_size[1] - visible.height) // 2,
+                    ),
+                )
+            else:
+                fitted = image_ops.fit(
+                    image,
+                    target_size,
+                    method=image_module.Resampling.LANCZOS,
+                )
             image_buffer = io.BytesIO()
             fitted.save(image_buffer, format="JPEG", quality=82, optimize=True)
             image_buffer.seek(0)
@@ -1787,6 +1807,19 @@ def _photo_card(
         height=image_height,
         image_module=image_module,
         image_ops=image_ops,
+        contain=(
+            _plain(raw.get("source_type")).casefold() == "legacy_excel_extraction"
+            and max(
+                _number(raw.get("width")) or 1,
+                _number(raw.get("height")) or 1,
+            ) / max(
+                min(
+                    _number(raw.get("width")) or 1,
+                    _number(raw.get("height")) or 1,
+                ),
+                1,
+            ) > 2.2
+        ),
     )
     if rendered_image is None:
         return None
