@@ -1785,6 +1785,18 @@ def _render_photo_image(
         return None
 
 
+def _photo_card_text(raw: Mapping[str, Any]) -> tuple[str, str]:
+    source = _plain(raw.get("source"))
+    page = _plain(raw.get("page"))
+    area = _clean_photo_caption(raw.get("source_area"))
+    photo_card = (
+        _plain(raw.get("context_type")).casefold() == "photo_card"
+        or _plain(raw.get("photo_match_method")).casefold() == "photo_card_geometry"
+    )
+    fallback = "" if photo_card else (f"{source} - p.{page}" if source and page else source)
+    return area, _clean_photo_caption(raw.get("caption"), fallback)
+
+
 def _photo_card(
     raw: Mapping[str, Any],
     *,
@@ -1796,6 +1808,7 @@ def _photo_card(
     photo_text_style: ParagraphStyle,
     image_module: Any,
     image_ops: Any,
+    text_heights: tuple[float, float] | None = None,
 ) -> Table | None:
     asset_id = _plain(raw.get("asset_id"))
     path = os.path.realpath(os.path.join(root, asset_filename(asset_id)))
@@ -1807,30 +1820,22 @@ def _photo_card(
         height=image_height,
         image_module=image_module,
         image_ops=image_ops,
-        # Evidence photographs must keep every edge, regardless of source or
-        # aspect ratio. Letterbox within the existing card instead of cropping.
-        contain=True,
+        # Fill the fixed frame proportionally, cropping excess from the centre.
+        contain=False,
     )
     if rendered_image is None:
         return None
 
-    source = _plain(raw.get("source"))
-    page = _plain(raw.get("page"))
-    area = _clean_photo_caption(raw.get("source_area"))
-    photo_card = (
-        _plain(raw.get("context_type")).casefold() == "photo_card"
-        or _plain(raw.get("photo_match_method")).casefold() == "photo_card_geometry"
-    )
-    fallback = "" if photo_card else (f"{source} - p.{page}" if source and page else source)
-    caption = _clean_photo_caption(raw.get("caption"), fallback)
+    area, caption = _photo_card_text(raw)
 
     card_rows: list[list[Any]] = []
-    if area:
+    if area or (text_heights and text_heights[0]):
         card_rows.append([Paragraph(f"<b>{_xml(area)}</b>", photo_text_style)])
-    if caption:
+    if caption or (text_heights and text_heights[1]):
         card_rows.append([Paragraph(f"<i>{_xml(caption)}</i>", photo_text_style)])
     card_rows.append([rendered_image])
-    card = Table(card_rows, colWidths=[cell_width - 4])
+    row_heights = [h for h in text_heights if h] + [None] if text_heights else None
+    card = Table(card_rows, colWidths=[cell_width - 4], rowHeights=row_heights)
     card_padding = 2 if compact else 3
     card_style = [
         ("BOX", (0, 0), (-1, -1), 0.55, CYAN),
@@ -1839,15 +1844,19 @@ def _photo_card(
         ("RIGHTPADDING", (0, 0), (-1, -1), card_padding),
         ("TOPPADDING", (0, 0), (-1, -1), card_padding),
         ("BOTTOMPADDING", (0, 0), (-1, -1), card_padding),
+        ("LEFTPADDING", (0, -1), (-1, -1), 0),
+        ("RIGHTPADDING", (0, -1), (-1, -1), 0),
+        ("TOPPADDING", (0, -1), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, -1), (-1, -1), 0),
     ]
-    if area:
+    if area or (text_heights and text_heights[0]):
         card_style.extend([
             ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#DDEBF7")),
             ("LINEBELOW", (0, 0), (0, 0), 0.35, CYAN),
         ])
-        if caption:
+        if caption or (text_heights and text_heights[1]):
             card_style.append(("BACKGROUND", (0, 1), (0, 1), LIGHT_GREY))
-    elif caption:
+    elif caption or (text_heights and text_heights[1]):
         card_style.append(("BACKGROUND", (0, 0), (0, 0), LIGHT_GREY))
     card.setStyle(TableStyle(card_style))
     return card
@@ -1864,7 +1873,9 @@ def _photo_grid_table(
 ) -> Table | None:
     columns = 3
     cell_width = BODY_WIDTH / columns
-    image_width = cell_width - (6 if compact else 8)
+    card_padding = 2 if compact else 3
+    image_width = cell_width - 4
+    text_width = image_width - 2 * card_padding
     image_height = 88.0 if compact else 122.0
     photo_text_style = (
         ParagraphStyle(
@@ -1880,7 +1891,20 @@ def _photo_grid_table(
     )
     rows: list[list[Any]] = []
     current: list[Any] = []
-    for raw in items:
+    text_heights = (0.0, 0.0)
+    for index, raw in enumerate(items):
+        if index % columns == 0:
+            if current:
+                current.extend([""] * (columns - len(current)))
+                rows.append(current)
+                current = []
+            heights = [0.0, 0.0]
+            for item in items[index:index + columns]:
+                for slot, (text, tag) in enumerate(zip(_photo_card_text(item), ("b", "i"))):
+                    if text:
+                        paragraph = Paragraph(f"<{tag}>{_xml(text)}</{tag}>", photo_text_style)
+                        heights[slot] = max(heights[slot], paragraph.wrap(text_width, 10000)[1] + 2 * card_padding)
+            text_heights = tuple(heights)
         card = _photo_card(
             raw,
             root=root,
@@ -1891,6 +1915,7 @@ def _photo_grid_table(
             photo_text_style=photo_text_style,
             image_module=image_module,
             image_ops=image_ops,
+            text_heights=text_heights,
         )
         if card is None:
             continue
