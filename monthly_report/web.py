@@ -1256,7 +1256,7 @@ def _record_date(record: dict[str, Any]) -> str:
 # Client-facing deterministic fallback summarisation.  AI may refine this after
 # Source Data Validation, but the baseline Weekly/Monthly PDF should already read
 # like a period report rather than seven/thirty Daily Reports concatenated together.
-_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/11"
+_DETERMINISTIC_SUMMARY_VERSION = "periodic-deterministic-summary/12"
 
 _PERIOD_ACTIVITY_TAG_RE = re.compile(
     r"\(\s*\d{1,3}\s*-\s*[A-Za-z]{2,}\s*-\s*[^)]*\)", re.IGNORECASE
@@ -2731,7 +2731,7 @@ def _deterministic_executive_summary(draft: Mapping[str, Any], *, report_type: s
     missing = [str(item) for item in coverage.get("missing_dates", [])] if isinstance(coverage.get("missing_dates"), list) else []
     if missing:
         sentences.append(
-            "Daily Report coverage is partial. Available and missing dates are listed in Source Coverage."
+            "Daily Report coverage is partial for the selected reporting period."
         )
     return _professional_generated_text(" ".join(sentences))
 

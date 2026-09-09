@@ -28,7 +28,7 @@ from .identity import project_title_match
 
 
 SCHEMA_VERSION = "daily-report-import/1"
-PARSER_VERSION = "monthly-pdf-importer/1.8"
+PARSER_VERSION = "monthly-pdf-importer/1.9"
 
 # Supported Daily Report layout families.  These are parser profiles only; they
 # do not change the canonical output shape consumed by weekly/monthly reports.
@@ -1271,6 +1271,8 @@ def _merge_area_note(area: dict[str, Any], key: str, value: Any) -> None:
     if not text:
         return
     current = _note_text(area.get(key))
+    if current.casefold() == text.casefold():
+        return
     if not current:
         area[key] = text
         return
@@ -1381,6 +1383,46 @@ def _section_area_notes(
 
     if not section.strip():
         return []
+    # Layout extraction preserves the gap between table columns, including
+    # area names wrapped in the middle of a word. Reassemble cells before
+    # normalising whitespace; otherwise area fragments become global issues.
+    if kind == "constraints" and re.search(r"Area\s+Constraint\s*/\s*Issue", section, re.I):
+        key = lambda value: re.sub(r"[^\w]", "", value.casefold())
+        known_by_key = {key(value): value for value in area_ids if value}
+        table_rows: list[tuple[str, str]] = []
+        left: list[str] = []
+        right: list[str] = []
+        valid = True
+
+        def flush_row() -> None:
+            nonlocal valid
+            if not left and not right:
+                return
+            area = known_by_key.get(key("".join(left)))
+            if not area or not right:
+                valid = False
+                return
+            table_rows.append((area, _note_text(" ".join(right))))
+
+        for raw in section.splitlines():
+            if not raw.strip() or _is_document_boilerplate_note(raw):
+                continue
+            if re.search(r"Area\s+Constraint\s*/\s*Issue", raw, re.I):
+                continue
+            parts = re.split(r"\s{2,}", raw.strip(), maxsplit=1)
+            if len(parts) == 2:
+                if key("".join(left)) in known_by_key and right:
+                    flush_row()
+                    left, right = [], []
+                left.append(parts[0])
+                right.append(parts[1])
+            elif key("".join(left)) in known_by_key:
+                right.append(raw.strip())
+            else:
+                left.append(raw.strip())
+        flush_row()
+        if valid and table_rows:
+            return list(dict.fromkeys(table_rows))
     result: list[tuple[str, str]] = []
     known = sorted((_note_text(value) for value in area_ids if _note_text(value)), key=len, reverse=True)
     for raw in section.splitlines():

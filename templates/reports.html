@@ -465,6 +465,7 @@
           <div class="col-6 col-md-3"><div class="coverage-card"><div class="value" id="coverage-duplicates">0</div><div class="label">Duplicates resolved</div></div></div>
           <div class="col-6 col-md-3"><div class="coverage-card"><div class="value" id="coverage-warnings">0</div><div class="label">Warnings</div></div></div>
         </div>
+        <div class="coverage-card mb-3 small" id="source-coverage-summary" role="status"></div>
         <div class="alert alert-warning py-2 small d-none" id="coverage-detail"></div>
 
         <div class="workflow-review-stage stage-source mb-4" id="source-validation-panel">
@@ -2078,6 +2079,12 @@ function populateMonthlyReview(draft) {
   document.getElementById('coverage-missing').textContent = (coverage.missing_dates || []).length;
   document.getElementById('coverage-duplicates').textContent = coverage.duplicate_count || 0;
   document.getElementById('coverage-warnings').textContent = (draft.warnings || []).length;
+  const missingDates = coverage.missing_dates || [];
+  document.getElementById('source-coverage-summary').textContent =
+    `Source Coverage (${draft.period?.start || ''} to ${draft.period?.end || ''}). ` +
+    (missingDates.length
+      ? `Tanggal belum tercakup: ${missingDates.join(', ')}. Tanggal tanpa laporan atau dengan PDF yang di-ignore tidak menghalangi generate laporan.`
+      : 'Semua tanggal pada periode yang dipilih sudah tercakup.');
   document.getElementById('review-source-badge').textContent = {
     uploaded_pdf:'Uploaded PDF',
     uploaded_excel:'Uploaded Excel',
@@ -2616,6 +2623,10 @@ function renderPhotoReviewGrid() {
     caption.setAttribute('aria-label', 'Photo caption');
     caption.addEventListener('input', () => { photo.caption = caption.value; });
     card.appendChild(caption);
+    const captionHelp = document.createElement('div');
+    captionHelp.className = 'small text-muted mb-2';
+    captionHelp.textContent = 'Jika caption terpotong pada PDF sumber, lengkapi di sini berdasarkan informasi yang sudah dikonfirmasi. Teks yang hilang tidak diisi otomatis.';
+    card.appendChild(captionHelp);
 
     const actions = document.createElement('div');
     actions.className = 'd-flex gap-1';
