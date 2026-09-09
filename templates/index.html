@@ -26,7 +26,7 @@
     .app-navbar-account .btn { flex:0 0 auto; white-space:nowrap; }
     .app-navbar-actions { display:flex; align-items:center; gap:4px; width:100%; min-width:0;
                           flex-wrap:wrap; padding-bottom:2px; }
-    .app-navbar-actions .btn { white-space:nowrap; }
+    .app-navbar-actions .btn { white-space:nowrap; flex:1 0 auto; }
     .section-hdr { background: var(--primary); color: white; font-weight: 600; font-size: 0.85rem; padding: 8px 14px; }
     /* PDF section order is arranged in a dedicated pre-preview dialog. */
     #pdfSectionOrderList { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:7px; }
@@ -143,7 +143,7 @@
     #previewModal .modal-dialog { max-width: 860px; }
     #previewFrame { width: 100%; height: 72vh; border: none; }
     /* Navbar btn group */
-    .nav-group { display:flex; gap:4px; align-items:center; flex:0 1 auto; min-width:0; max-width:100%; flex-wrap:wrap; }
+    .nav-group { display:flex; gap:4px; align-items:center; flex:1 1 auto; min-width:0; max-width:100%; flex-wrap:wrap; }
     .nav-divider { width:1px; height:24px; background:rgba(255,255,255,.3); margin:0 4px; flex:0 0 1px; }
     @media (max-width: 768px) {
       .app-navbar .btn { font-size: .72rem; padding: 3px 7px; }
