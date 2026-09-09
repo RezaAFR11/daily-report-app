@@ -17,14 +17,15 @@
     body { background: #f0f4f8; font-size: 0.9rem; }
     .app-navbar { background: var(--navbar-bg) !important; padding: 8px 16px; position: sticky; top:0; z-index:900;
                   box-shadow: 0 2px 8px rgba(0,0,0,.25); display:flex; flex-direction:column;
-                  align-items:stretch; gap:6px; overflow:hidden; }
-    .app-navbar-title { flex:0 0 auto; }
+                  align-items:stretch; gap:6px; }
+    .app-navbar-header { display:flex; align-items:center; justify-content:space-between; gap:12px; min-width:0; }
+    .app-navbar-title { flex:1 1 auto; min-width:0; font-size:.92rem; }
+    .app-navbar-account { display:flex; align-items:center; justify-content:flex-end; gap:8px;
+                          flex:0 1 auto; min-width:0; max-width:50%; }
+    .app-navbar-username { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.78rem; }
+    .app-navbar-account .btn { flex:0 0 auto; white-space:nowrap; }
     .app-navbar-actions { display:flex; align-items:center; gap:4px; width:100%; min-width:0;
-                          flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden; padding-bottom:2px;
-                          scrollbar-width:thin; scrollbar-color:rgba(255,255,255,.45) transparent; }
-    .app-navbar-actions::-webkit-scrollbar { height:5px; }
-    .app-navbar-actions::-webkit-scrollbar-thumb { background:rgba(255,255,255,.45); border-radius:10px; }
-    .app-navbar-actions::-webkit-scrollbar-track { background:transparent; }
+                          flex-wrap:wrap; padding-bottom:2px; }
     .app-navbar-actions .btn { white-space:nowrap; }
     .section-hdr { background: var(--primary); color: white; font-weight: 600; font-size: 0.85rem; padding: 8px 14px; }
     /* PDF section order is arranged in a dedicated pre-preview dialog. */
@@ -142,7 +143,7 @@
     #previewModal .modal-dialog { max-width: 860px; }
     #previewFrame { width: 100%; height: 72vh; border: none; }
     /* Navbar btn group */
-    .nav-group { display:flex; gap:4px; align-items:center; flex:0 0 auto; white-space:nowrap; }
+    .nav-group { display:flex; gap:4px; align-items:center; flex:0 1 auto; min-width:0; max-width:100%; flex-wrap:wrap; }
     .nav-divider { width:1px; height:24px; background:rgba(255,255,255,.3); margin:0 4px; flex:0 0 1px; }
     @media (max-width: 768px) {
       .app-navbar .btn { font-size: .72rem; padding: 3px 7px; }
@@ -190,8 +191,14 @@
 
 <!-- ═══ NAVBAR ═══ -->
 <nav class="app-navbar">
-  <span class="app-navbar-title text-white fw-bold" style="font-size:.92rem;white-space:nowrap;">📋 Daily Report — PT. GPA</span>
-  <div class="app-navbar-actions" tabindex="0" aria-label="Daily Report menu; scroll horizontally when needed">
+  <div class="app-navbar-header">
+    <span class="app-navbar-title text-white fw-bold">📋 Daily Report — PT. GPA</span>
+    <div class="app-navbar-account">
+      <span class="app-navbar-username text-white opacity-75" title="{{ username }}">{{ username }}</span>
+      <a href="/logout" class="btn btn-sm btn-outline-danger">Logout</a>
+    </div>
+  </div>
+  <div class="app-navbar-actions" aria-label="Daily Report menu">
     <!-- Draft controls -->
     <div class="nav-group">
       <button class="btn btn-sm btn-outline-light" onclick="saveDraft()" title="Auto-saves every 60s">💾 Save</button>
@@ -227,8 +234,6 @@
       </button>
       <a href="/admin" class="btn btn-sm btn-outline-light">🛡 Admin</a>
       {% endif %}
-      <span class="text-white opacity-75" style="font-size:.78rem;padding:0 .25rem;">{{ username }}</span>
-      <a href="/logout" class="btn btn-sm btn-outline-danger">Logout</a>
     </div>
   </div>
 </nav>
