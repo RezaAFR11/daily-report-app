@@ -2042,35 +2042,8 @@ def _manpower_metric_flowables(
     totals: Mapping[str, Any],
     styles: Mapping[str, ParagraphStyle],
 ) -> list[Flowable]:
-    supplied_days = _number(totals.get("manpower_supplied_day_count"))
-    covered_days = _number(totals.get("covered_daily_report_count"))
-    expected_days = _number(totals.get("expected_day_count"))
-    average_headcount = _number(totals.get("average_daily_headcount"))
-    peak_headcount = _number(totals.get("peak_headcount"))
     not_supplied_days = _number(totals.get("manpower_not_supplied_day_count"))
-    metric_parts: list[str] = []
-    if covered_days is not None and expected_days is not None:
-        metric_parts.append(
-            f"Daily Report coverage: {_manpower_metric_text(covered_days)}/"
-            f"{_manpower_metric_text(expected_days)} days"
-        )
-    if supplied_days is not None:
-        metric_parts.append(
-            f"manpower supplied: {_manpower_metric_text(supplied_days)} days"
-        )
-    if average_headcount is not None:
-        metric_parts.append(
-            f"average daily headcount: {_manpower_metric_text(average_headcount)}"
-        )
-    if peak_headcount is not None:
-        metric_parts.append(f"peak daily headcount: {_manpower_metric_text(peak_headcount)}")
-
     result: list[Flowable] = []
-    if metric_parts:
-        result.extend([
-            _paragraph("; ".join(metric_parts) + ".", styles["placeholder"]),
-            Spacer(1, 6),
-        ])
     if not_supplied_days is not None and not_supplied_days > 0:
         result.extend([
             _paragraph(
@@ -2235,7 +2208,6 @@ def _manpower_appendix_flowables(
             _heading("Role Summary", styles["h2"], 1),
             _role_manpower_table(roles, styles),
         ])
-    result.extend(_manpower_source_flowables(value, totals, styles))
     return result
 
 
@@ -2461,7 +2433,6 @@ def _summary_safety_story(
                 _paragraph(_executive_summary(report, progress), styles["body"]),
                 Spacer(1, 6),
             ])
-        story.extend(_coverage_flowables(report, styles))
         if progress:
             story.extend([
                 _progress_table(
