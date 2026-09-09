@@ -202,7 +202,7 @@ class PeriodicPreflightTests(unittest.TestCase):
         self.assertNotIn("ai_review_pending", {row["code"] for row in final["blockers"]})
         self.assertIn("ai_review_pending", {row["code"] for row in final["warnings"]})
 
-    def test_low_confidence_photo_caption_must_be_reviewed_before_final(self):
+    def test_low_confidence_photo_caption_is_optional_before_final(self):
         report = {
             "project_no": "P-001",
             "project_title": "Project One",
@@ -230,10 +230,15 @@ class PeriodicPreflightTests(unittest.TestCase):
             "photo_caption_review_required",
             {row["code"] for row in preview["warnings"]},
         )
-        self.assertIn(
+        self.assertNotIn(
             "photo_caption_review_required",
             {row["code"] for row in final["blockers"]},
         )
+        self.assertIn(
+            "photo_caption_review_required",
+            {row["code"] for row in final["warnings"]},
+        )
+        self.assertTrue(report["photo_documentation"][0]["caption_review_required"])
 
         report["photo_documentation"][0]["caption_match_confidence"] = "reviewed"
         report["photo_documentation"][0]["caption_review_required"] = False

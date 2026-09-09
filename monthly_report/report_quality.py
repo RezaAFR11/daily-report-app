@@ -268,7 +268,7 @@ def _photo_mapping_issues(report: Mapping[str, Any]) -> list[str]:
 
 
 def _photo_caption_review_issues(report: Mapping[str, Any]) -> list[str]:
-    """Require explicit review only for captions that were not matched reliably."""
+    """Offer optional editing for captions that were not matched reliably."""
 
     pending = sum(
         1
@@ -279,7 +279,7 @@ def _photo_caption_review_issues(report: Mapping[str, Any]) -> list[str]:
         return []
     return [
         f"{pending} photo caption(s) could not be matched with high confidence. "
-        "Confirm or correct them in Photo Documentation before issuing the Final report."
+        "You can edit them in Photo Documentation if needed; confirmation is optional."
     ]
 
 
@@ -982,19 +982,10 @@ def _append_photo_issues(
         warnings.append({"code": "photo_area_mapping_review", "message": message})
 
     for message in _photo_caption_review_issues(report):
-        if for_final:
-            _add_final_blocker(
-                final_blockers,
-                warnings,
-                for_final=True,
-                code="photo_caption_review_required",
-                message=message,
-            )
-        else:
-            warnings.append({
-                "code": "photo_caption_review_required",
-                "message": message,
-            })
+        warnings.append({
+            "code": "photo_caption_review_required",
+            "message": message,
+        })
 
     photo_date_issues = _photo_date_coverage_issues(report)
     for message in photo_date_issues:

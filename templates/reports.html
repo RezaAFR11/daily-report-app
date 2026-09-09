@@ -707,10 +707,9 @@
               <span class="review-stage-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m5 17 4.5-4 3 2.5 2.5-2 4 3.5"/></svg></span>
               <div>
                 <span class="workflow-kicker">Stage 7</span>
-                <div class="review-stage-title mb-1">Photo Review</div>
+                <div class="review-stage-title mb-1">Photos (Optional)</div>
                 <div class="muted-note">
-                  Review extracted Daily Report photos and captions before they are added to Appendix 6.6.
-                  Repeated logos and exact duplicates are filtered automatically.
+                  Photos are included automatically. Edit areas, captions, or photo order only if needed.
                 </div>
               </div>
             </div>
@@ -718,7 +717,7 @@
               <span class="badge text-bg-secondary" id="photo-count-badge">0 photos</span>
               <button type="button" class="btn btn-sm btn-photo compact-icon-btn" onclick="openPhotoReview()">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m5 17 4.5-4 3 2.5 2.5-2 4 3.5"/></svg>
-                Review Photos &amp; Captions
+                Edit Photos &amp; Captions
               </button>
             </div>
           </div>
@@ -2589,7 +2588,7 @@ function renderPhotoReviewGrid() {
       ? 'small text-warning-emphasis mb-2'
       : 'small text-success mb-2';
     captionStatus.textContent = photo.caption_review_required
-      ? 'Area and caption need confirmation.'
+      ? 'Area or caption may need adjustment. Editing is optional.'
       : (photo.caption_match_confidence === 'reviewed'
         ? 'Area and caption confirmed by reviewer.'
         : 'Area and caption matched from the Daily Report photo card.');
@@ -3149,6 +3148,7 @@ async function postMonthlyPdf(endpoint, save) {
       showMonthlyAlert(`${typeName} Report generated and saved successfully.`, 'success', {
         actionLabel:'Download PDF', actionUrl:data.download_url, download:true,
       });
+      reloadAfterSavedReport(data);
     } else {
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
@@ -3169,6 +3169,33 @@ async function postMonthlyPdf(endpoint, save) {
 
 function previewMonthly() { return postMonthlyPdf('/monthly/preview', false); }
 function generateMonthly() { return postMonthlyPdf('/monthly/generate', true); }
+
+function reloadAfterSavedReport(data) {
+  // Keep only the success notice across refresh; the next form starts clean.
+  try {
+    sessionStorage.setItem('periodic-report-saved', JSON.stringify({
+      reportType,
+      filename:data.filename || data.report?.filename || '',
+    }));
+  } catch (_) { /* Refresh still works if browser storage is unavailable. */ }
+  history.replaceState(null, '', '#monthly');
+  window.location.reload();
+}
+
+function restoreSavedReportNotice() {
+  let saved;
+  try {
+    const raw = sessionStorage.getItem('periodic-report-saved');
+    sessionStorage.removeItem('periodic-report-saved');
+    saved = raw ? JSON.parse(raw) : null;
+  } catch (_) { return; }
+  if (!saved || !['weekly', 'monthly'].includes(saved.reportType)) return;
+  setReportType(saved.reportType);
+  const options = typeof saved.filename === 'string' && saved.filename
+    ? {actionLabel:'Download PDF', actionUrl:`/monthly/download/${encodeURIComponent(saved.filename)}`, download:true}
+    : {};
+  showMonthlyAlert('PDF saved successfully. You can create a new report.', 'success', options);
+}
 
 async function uploadDailyReportToDrive(
   filename,
@@ -3304,6 +3331,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('monthly-all-users')?.addEventListener('change', () => invalidateCompiledDraft());
   toggleFinalConfirmation();
   if (location.hash === '#monthly') new bootstrap.Tab(document.getElementById('monthly-tab')).show();
+  restoreSavedReportNotice();
 });
 </script>
 </body>
