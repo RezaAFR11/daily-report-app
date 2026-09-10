@@ -2829,7 +2829,9 @@ def _set_draft_warnings(
     draft["warnings"] = _compact_review_warnings(warnings)
 
 
-def _progress_arithmetic_warnings(value: Any) -> list[dict[str, str]]:
+def _progress_arithmetic_warnings(
+    value: Any, *, source_manifest: list[dict[str, Any]] | None = None,
+) -> list[dict[str, str]]:
     """Flag contradictory latest-snapshot progress values without rewriting them."""
 
     progress = value if isinstance(value, Mapping) else {}
@@ -2873,11 +2875,16 @@ def _progress_arithmetic_warnings(value: Any) -> list[dict[str, str]]:
             )
         if not mismatches:
             continue
-        snapshot_text = f" on {snapshot}" if snapshot else ""
+        row_date = _clean_text(row.get("last_source_date"), 10) or snapshot
+        sources = [item for item in (source_manifest or []) if item.get("report_date") == row_date]
+        filename = _clean_text(sources[0].get("filename"), 255) if len(sources) == 1 else ""
+        snapshot_text = f" on {row_date}" if row_date else ""
         warnings.append({
             "code": "progress_arithmetic_mismatch",
             "severity": "warning",
             "field": "overall_progress",
+            "filename": filename,
+            "report_date": row_date,
             "message": (
                 f'Progress arithmetic mismatch in the latest Daily snapshot{snapshot_text}, '
                 f'row "{description}": {"; ".join(mismatches)}. '
@@ -5693,8 +5700,18 @@ def _build_uploaded_pdf_draft(
             project_title=project_title,
         ),
     )
+    selected_source_ids = {
+        str(item.get("report_id") or "")
+        for item in aggregated.get("source_records", [])
+        if isinstance(item, dict)
+    }
     progress_warnings = _progress_arithmetic_warnings(
-        aggregated.get("overall_progress")
+        aggregated.get("overall_progress"),
+        source_manifest=_source_manifest(
+            [record for record in provisional_records
+             if str(record.get("report_id") or "") in selected_source_ids],
+            source_method,
+        ),
     )
     if progress_warnings:
         warnings.extend(progress_warnings)

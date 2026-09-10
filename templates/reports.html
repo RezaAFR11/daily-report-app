@@ -2043,7 +2043,20 @@ function groupReviewWarnings(warnings) {
   return groups.filter(group => group.items.length);
 }
 
-function renderGroupedWarnings(element, warnings) {
+function warningDailyReferences(text, manifest) {
+  const matches = (manifest || []).filter(source => source.filename && text.includes(source.filename));
+  if (matches.length) {
+    return [...new Set(matches.map(source =>
+      [source.filename, source.report_date].filter(Boolean).join(' — ')))];
+  }
+  // Parser warnings can reference rejected sources absent from the manifest.
+  const filename = text.match(/^(.+?\.(?:pdf|xlsx?))\s*:/i);
+  if (filename) return [filename[1]];
+  const snapshot = text.match(/latest Daily snapshot on (\d{4}-\d{2}-\d{2})/i);
+  return snapshot ? [`Daily Report tanggal ${snapshot[1]}`] : [];
+}
+
+function renderGroupedWarnings(element, warnings, manifest = []) {
   element.replaceChildren();
   const groups = groupReviewWarnings(warnings);
   element.classList.toggle('d-none', !groups.length);
@@ -2065,7 +2078,14 @@ function renderGroupedWarnings(element, warnings) {
     for (const text of group.items) {
       const row = document.createElement('li');
       row.className = 'mb-2 text-break';
-      row.textContent = text;
+      const references = group.key === 'info' ? [] : warningDailyReferences(text, manifest);
+      if (references.length) {
+        const source = document.createElement('strong');
+        source.className = 'd-block';
+        source.textContent = `Cek ulang Daily Report: ${references.join('; ')}`;
+        row.appendChild(source);
+      }
+      row.appendChild(document.createTextNode(text));
       list.appendChild(row);
     }
     section.appendChild(list);
@@ -2094,7 +2114,7 @@ function populateMonthlyReview(draft) {
   const details = [...(draft.warnings || [])];
   if ((coverage.missing_dates || []).length) details.unshift(`Missing dates: ${coverage.missing_dates.join(', ')}`);
   const detail = document.getElementById('coverage-detail');
-  renderGroupedWarnings(detail, details);
+  renderGroupedWarnings(detail, details, draft.source_manifest || []);
   populateSourceManifest(draft.source_manifest || []);
   populateSourceValidation(draft);
   populateWorkforceReview(draft);
@@ -2824,7 +2844,7 @@ function renderSourceValidationIssues(validation, draft) {
     ...(Array.isArray(draft.warnings) ? draft.warnings : []),
   ];
   const issueBox = document.getElementById('source-validation-issues');
-  renderGroupedWarnings(issueBox, issues);
+  renderGroupedWarnings(issueBox, issues, draft.source_manifest || []);
 }
 
 function populateSourceValidation(draft) {
