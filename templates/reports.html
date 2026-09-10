@@ -840,6 +840,27 @@
   </div>
 </div>
 
+<div class="modal fade" id="delete-periodic-modal" tabindex="-1" aria-labelledby="delete-periodic-title" aria-describedby="delete-periodic-description delete-periodic-filename" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content border-0 shadow rounded-4">
+      <div class="modal-header border-0 pb-0">
+        <h5 class="modal-title fw-bold" id="delete-periodic-title">Hapus laporan?</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Tutup" id="delete-periodic-close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="text-danger fs-1 mb-2" aria-hidden="true">🗑</div>
+        <p id="delete-periodic-description">Laporan berikut akan dihapus. Tindakan ini tidak dapat dibatalkan.</p>
+        <div class="bg-light border rounded p-3 small fw-semibold text-break" id="delete-periodic-filename"></div>
+        <div class="alert alert-danger mt-3 mb-0 d-none" id="delete-periodic-error" role="alert"></div>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" id="delete-periodic-cancel">Batal</button>
+        <button type="button" class="btn btn-danger" id="delete-periodic-confirm" onclick="confirmDeleteMonthlyReport()">Hapus</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="modal fade" id="photo-review-modal" tabindex="-1" aria-labelledby="photo-review-title" aria-hidden="true">
   <div class="modal-dialog modal-xl modal-dialog-scrollable">
     <div class="modal-content">
@@ -3297,11 +3318,50 @@ function deleteReport(filename, archiveId, reportId, btn) {
     .catch(err => alert('Delete failed: ' + err.message));
 }
 
+let pendingPeriodicDelete = null;
+let periodicDeleteBusy = false;
+
 function deleteMonthlyReport(filename, btn) {
-  if (!confirm(`Delete "${filename}"? This cannot be undone.`)) return;
-  fetch('/monthly/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({filename})})
-    .then(r => r.json()).then(d => { if (d.ok) { btn.closest('.report-card').remove(); updateMonthlyCount(); } })
-    .catch(err => alert('Delete failed: ' + err.message));
+  if (periodicDeleteBusy || pendingPeriodicDelete) return;
+  pendingPeriodicDelete = {filename, button:btn};
+  document.getElementById('delete-periodic-filename').textContent = filename;
+  document.getElementById('delete-periodic-error').classList.add('d-none');
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('delete-periodic-modal')).show();
+}
+
+async function confirmDeleteMonthlyReport() {
+  if (!pendingPeriodicDelete || periodicDeleteBusy) return;
+  const target = pendingPeriodicDelete;
+  periodicDeleteBusy = true;
+  const modal = document.getElementById('delete-periodic-modal');
+  const confirmButton = document.getElementById('delete-periodic-confirm');
+  const controls = ['delete-periodic-confirm', 'delete-periodic-cancel', 'delete-periodic-close'];
+  controls.forEach(id => { document.getElementById(id).disabled = true; });
+  confirmButton.textContent = 'Menghapus…';
+  modal.setAttribute('aria-busy', 'true');
+  document.getElementById('delete-periodic-error').classList.add('d-none');
+  let deleted = false;
+  try {
+    const response = await fetch('/monthly/delete', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({filename:target.filename}),
+    });
+    const result = await responsePayload(response, 'Laporan gagal dihapus. Silakan coba lagi.');
+    if (!result.ok) throw new Error(result.error || 'Laporan gagal dihapus. Silakan coba lagi.');
+    target.button.closest('.report-card').remove();
+    updateMonthlyCount();
+    deleted = true;
+  } catch (error) {
+    const message = document.getElementById('delete-periodic-error');
+    message.textContent = error.message || 'Laporan gagal dihapus. Silakan coba lagi.';
+    message.classList.remove('d-none');
+  } finally {
+    periodicDeleteBusy = false;
+    controls.forEach(id => { document.getElementById(id).disabled = false; });
+    confirmButton.textContent = 'Hapus';
+    modal.removeAttribute('aria-busy');
+  }
+  if (deleted) bootstrap.Modal.getInstance(modal).hide();
 }
 
 function filterReports() {
@@ -3322,6 +3382,19 @@ function updateMonthlyCount() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  const deleteModal = document.getElementById('delete-periodic-modal');
+  deleteModal.addEventListener('shown.bs.modal', () => {
+    document.getElementById('delete-periodic-cancel').focus();
+  });
+  deleteModal.addEventListener('hide.bs.modal', event => {
+    if (periodicDeleteBusy) event.preventDefault();
+  });
+  deleteModal.addEventListener('hidden.bs.modal', () => {
+    const trigger = pendingPeriodicDelete?.button;
+    pendingPeriodicDelete = null;
+    if (trigger?.isConnected) trigger.focus();
+    else document.getElementById('monthly-tab').focus();
+  });
   document.querySelectorAll('[data-bs-toggle="tab"]').forEach(tab => {
     tab.addEventListener('shown.bs.tab', event => {
       const activeHash = event.target.id === 'monthly-tab' ? '#monthly' : '#daily';
