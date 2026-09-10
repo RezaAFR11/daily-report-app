@@ -861,7 +861,7 @@
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" id="delete-periodic-cancel">Cancel</button>
-        <button type="button" class="btn btn-danger" id="delete-periodic-confirm" onclick="confirmDeleteMonthlyReport()">Delete</button>
+        <button type="button" class="btn btn-danger" id="delete-periodic-confirm" onclick="confirmDeleteReport()">Delete</button>
       </div>
     </div>
   </div>
@@ -3314,28 +3314,30 @@ async function uploadDailyReportToDrive(
 }
 
 function deleteReport(filename, archiveId, reportId, btn) {
-  if (!confirm(`Delete "${filename}"? This cannot be undone.`)) return;
-  fetch('/reports/delete', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename, archive_id:archiveId || '', report_id:reportId || ''}),
-  })
-    .then(r => r.json()).then(d => { if (d.ok) { btn.closest('.report-card').remove(); updateCount(); } })
-    .catch(err => alert('Delete failed: ' + err.message));
+  openReportDelete({
+    filename, button:btn, kind:'daily', endpoint:'/reports/delete',
+    payload:{filename, archive_id:archiveId || '', report_id:reportId || ''},
+  });
 }
 
 let pendingPeriodicDelete = null;
 let periodicDeleteBusy = false;
 
 function deleteMonthlyReport(filename, btn) {
+  openReportDelete({
+    filename, button:btn, kind:'periodic', endpoint:'/monthly/delete', payload:{filename},
+  });
+}
+
+function openReportDelete(target) {
   if (periodicDeleteBusy || pendingPeriodicDelete) return;
-  pendingPeriodicDelete = {filename, button:btn};
-  document.getElementById('delete-periodic-filename').textContent = filename;
+  pendingPeriodicDelete = target;
+  document.getElementById('delete-periodic-filename').textContent = target.filename;
   document.getElementById('delete-periodic-error').classList.add('d-none');
   bootstrap.Modal.getOrCreateInstance(document.getElementById('delete-periodic-modal')).show();
 }
 
-async function confirmDeleteMonthlyReport() {
+async function confirmDeleteReport() {
   if (!pendingPeriodicDelete || periodicDeleteBusy) return;
   const target = pendingPeriodicDelete;
   periodicDeleteBusy = true;
@@ -3348,14 +3350,15 @@ async function confirmDeleteMonthlyReport() {
   document.getElementById('delete-periodic-error').classList.add('d-none');
   let deleted = false;
   try {
-    const response = await fetch('/monthly/delete', {
+    const response = await fetch(target.endpoint, {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:target.filename}),
+      body:JSON.stringify(target.payload),
     });
     const result = await responsePayload(response, 'Unable to delete the report. Please try again.');
     if (!result.ok) throw new Error(result.error || 'Unable to delete the report. Please try again.');
     target.button.closest('.report-card').remove();
-    updateMonthlyCount();
+    if (target.kind === 'daily') updateCount();
+    else updateMonthlyCount();
     deleted = true;
   } catch (error) {
     const message = document.getElementById('delete-periodic-error');
@@ -3397,9 +3400,10 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   deleteModal.addEventListener('hidden.bs.modal', () => {
     const trigger = pendingPeriodicDelete?.button;
+    const tabId = pendingPeriodicDelete?.kind === 'daily' ? 'daily-tab' : 'monthly-tab';
     pendingPeriodicDelete = null;
     if (trigger?.isConnected) trigger.focus();
-    else document.getElementById('monthly-tab').focus();
+    else document.getElementById(tabId).focus();
   });
   document.querySelectorAll('[data-bs-toggle="tab"]').forEach(tab => {
     tab.addEventListener('shown.bs.tab', event => {
