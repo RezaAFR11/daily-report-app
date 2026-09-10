@@ -16,6 +16,14 @@
   .topbar h6 { margin:0; font-size:1rem; white-space:nowrap; }
   .top-actions { display:flex; gap:.45rem; flex-wrap:wrap; }
   .page-shell { max-width:1180px; }
+  #delete-periodic-modal .modal-dialog { max-width:480px; }
+  #delete-periodic-modal .modal-content { border:0; border-radius:20px; overflow:hidden; color:#183049; }
+  #delete-periodic-modal .modal-header { padding:24px 28px; }
+  #delete-periodic-modal .modal-body { padding:26px 28px; color:#485b73; }
+  #delete-periodic-modal .modal-footer { padding:20px 28px; background:#f8f9f9; }
+  #delete-periodic-modal .btn { border-radius:10px; padding:10px 20px; font-weight:600; }
+  #delete-periodic-modal .btn-danger { background:#e52227; border-color:#e52227; }
+  #delete-periodic-modal .btn-danger:hover { background:#c91b20; border-color:#c91b20; }
   .report-card {
     background:#fff; border:1px solid #e3e8ef; border-radius:9px;
     box-shadow:0 1px 6px rgba(0,0,0,.06); padding:1rem 1.1rem;
@@ -840,22 +848,20 @@
   </div>
 </div>
 
-<div class="modal fade" id="delete-periodic-modal" tabindex="-1" aria-labelledby="delete-periodic-title" aria-describedby="delete-periodic-description delete-periodic-filename" aria-hidden="true">
+<div class="modal fade" id="delete-periodic-modal" tabindex="-1" aria-labelledby="delete-periodic-title" aria-describedby="delete-periodic-description" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content border-0 shadow rounded-4">
-      <div class="modal-header border-0 pb-0">
-        <h5 class="modal-title fw-bold" id="delete-periodic-title">Hapus laporan?</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Tutup" id="delete-periodic-close"></button>
+    <div class="modal-content shadow">
+      <div class="modal-header">
+        <h5 class="modal-title fw-semibold" id="delete-periodic-title">Delete Record</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close" id="delete-periodic-close"></button>
       </div>
       <div class="modal-body">
-        <div class="text-danger fs-1 mb-2" aria-hidden="true">🗑</div>
-        <p id="delete-periodic-description">Laporan berikut akan dihapus. Tindakan ini tidak dapat dibatalkan.</p>
-        <div class="bg-light border rounded p-3 small fw-semibold text-break" id="delete-periodic-filename"></div>
+        <p class="mb-0 text-break" id="delete-periodic-description">Delete <span id="delete-periodic-filename"></span>? This cannot be undone.</p>
         <div class="alert alert-danger mt-3 mb-0 d-none" id="delete-periodic-error" role="alert"></div>
       </div>
-      <div class="modal-footer border-0 pt-0">
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" id="delete-periodic-cancel">Batal</button>
-        <button type="button" class="btn btn-danger" id="delete-periodic-confirm" onclick="confirmDeleteMonthlyReport()">Hapus</button>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" id="delete-periodic-cancel">Cancel</button>
+        <button type="button" class="btn btn-danger" id="delete-periodic-confirm" onclick="confirmDeleteMonthlyReport()">Delete</button>
       </div>
     </div>
   </div>
@@ -2074,7 +2080,7 @@ function warningDailyReferences(text, manifest) {
   const filename = text.match(/^(.+?\.(?:pdf|xlsx?))\s*:/i);
   if (filename) return [filename[1]];
   const snapshot = text.match(/latest Daily snapshot on (\d{4}-\d{2}-\d{2})/i);
-  return snapshot ? [`Daily Report tanggal ${snapshot[1]}`] : [];
+  return snapshot ? [`Daily Report dated ${snapshot[1]}`] : [];
 }
 
 function renderGroupedWarnings(element, warnings, manifest = []) {
@@ -2103,7 +2109,7 @@ function renderGroupedWarnings(element, warnings, manifest = []) {
       if (references.length) {
         const source = document.createElement('strong');
         source.className = 'd-block';
-        source.textContent = `Cek ulang Daily Report: ${references.join('; ')}`;
+        source.textContent = `Review Daily Report: ${references.join('; ')}`;
         row.appendChild(source);
       }
       row.appendChild(document.createTextNode(text));
@@ -3337,7 +3343,7 @@ async function confirmDeleteMonthlyReport() {
   const confirmButton = document.getElementById('delete-periodic-confirm');
   const controls = ['delete-periodic-confirm', 'delete-periodic-cancel', 'delete-periodic-close'];
   controls.forEach(id => { document.getElementById(id).disabled = true; });
-  confirmButton.textContent = 'Menghapus…';
+  confirmButton.textContent = 'Deleting…';
   modal.setAttribute('aria-busy', 'true');
   document.getElementById('delete-periodic-error').classList.add('d-none');
   let deleted = false;
@@ -3346,19 +3352,19 @@ async function confirmDeleteMonthlyReport() {
       method:'POST', headers:{'Content-Type':'application/json'},
       body:JSON.stringify({filename:target.filename}),
     });
-    const result = await responsePayload(response, 'Laporan gagal dihapus. Silakan coba lagi.');
-    if (!result.ok) throw new Error(result.error || 'Laporan gagal dihapus. Silakan coba lagi.');
+    const result = await responsePayload(response, 'Unable to delete the report. Please try again.');
+    if (!result.ok) throw new Error(result.error || 'Unable to delete the report. Please try again.');
     target.button.closest('.report-card').remove();
     updateMonthlyCount();
     deleted = true;
   } catch (error) {
     const message = document.getElementById('delete-periodic-error');
-    message.textContent = error.message || 'Laporan gagal dihapus. Silakan coba lagi.';
+    message.textContent = error.message || 'Unable to delete the report. Please try again.';
     message.classList.remove('d-none');
   } finally {
     periodicDeleteBusy = false;
     controls.forEach(id => { document.getElementById(id).disabled = false; });
-    confirmButton.textContent = 'Hapus';
+    confirmButton.textContent = 'Delete';
     modal.removeAttribute('aria-busy');
   }
   if (deleted) bootstrap.Modal.getInstance(modal).hide();
