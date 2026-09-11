@@ -714,6 +714,13 @@ def _daily_manpower(
             row.get("severity") == "warning" for row in identity_review
         ),
         "identity_review": identity_review,
+        "people": [
+            {"name": person["name"], "employee_id": person.get("employee_id", ""),
+             "role": person["role"], "section": section,
+             "hours": person["hours"], "hours_state": person["hours_state"]}
+            for section, people in (("direct", direct), ("indirect", indirect))
+            for person in (people.values() if supplied else [])
+        ],
     }
 
     role_rows = []

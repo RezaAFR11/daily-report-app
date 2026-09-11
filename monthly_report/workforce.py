@@ -12,6 +12,8 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Mapping
 
+from .workforce_matching import match_employee, reconcile_timesheet
+
 
 WORKFORCE_VERSION = "workforce-validation/1"
 
@@ -96,6 +98,7 @@ def standardise_timesheet_preview(preview: Mapping[str, Any]) -> dict[str, Any]:
         direct = int(_number(by_section.get("direct")))
         indirect = int(_number(by_section.get("indirect")))
         total = int(_number(row.get("present_count", direct + indirect)))
+        hours_by_section = row.get("hours_by_section") or {}
         status_counts = (
             copy.deepcopy(row.get("status_counts"))
             if isinstance(row.get("status_counts"), Mapping)
@@ -107,14 +110,14 @@ def standardise_timesheet_preview(preview: Mapping[str, Any]) -> dict[str, Any]:
         all_missing = observed > 0 and missing == observed
         report_date = str(row.get("date") or "")
         supplied = not all_missing
-        complete = supplied and missing == 0 and conflicts == 0
+        complete = supplied and missing == 0 and conflicts == 0 and row.get("hours_complete", True)
         item = {
             "date": report_date,
             "direct_headcount": direct,
             "indirect_headcount": indirect,
             "total_headcount": total,
-            "direct_man_hours": direct * 10 if supplied else None,
-            "indirect_man_hours": indirect * 10 if supplied else None,
+            "direct_man_hours": hours_by_section.get("direct", direct * 10) if supplied else None,
+            "indirect_man_hours": hours_by_section.get("indirect", indirect * 10) if supplied else None,
             "total_man_hours": (
                 _compact_number(_number(row.get("physical_manhours", total * 10)))
                 if supplied
@@ -197,7 +200,7 @@ def set_timesheet_preview(
 ) -> dict[str, Any]:
     state = ensure_workforce_state(draft)
     _restore_baseline(draft, state)
-    prepared = standardise_timesheet_preview(preview)
+    prepared = standardise_timesheet_preview(reconcile_timesheet(preview, state["baseline"].get("manpower", {})))
     state["timesheet"] = {
         "status": "preview",
         "preview": prepared,
@@ -235,7 +238,7 @@ def decide_timesheet(
 
     manpower = preview.get("manpower") if isinstance(preview.get("manpower"), Mapping) else {}
     totals = manpower.get("totals") if isinstance(manpower.get("totals"), Mapping) else {}
-    if not manpower.get("daily") or _number(totals.get("total_person_days")) <= 0:
+    if not manpower.get("daily"):
         raise ValueError("The selected period has no confirmed attendance to apply.")
     if preview.get("requires_confirmation") and not confirm_exceptions:
         raise ValueError(
@@ -309,6 +312,17 @@ def prepare_overtime_review(
             continue
         key = str(employee.get("employee_key") or "")
         match = employee_index.get(key)
+        method = "exact" if match else "unmatched"
+        if match is None:
+            match, method = match_employee(employee.get("employee", ""), list(employee_index.values()))
+        if match:
+            for record in records_by_person.get(key, []):
+                record["matched_employee_key"] = match.get("employee_key", key)
+                record["match_method"] = method
+        if method in {"name_variant", "spelling_variant", "ambiguous"}:
+            relevant_warnings.append({"code": "overtime_name_" + method, "severity": "warning",
+                "message": (f"Overtime name {employee.get('employee', key)} matched to {match['name']}."
+                            if match else f"Overtime name {employee.get('employee', key)} has multiple possible matches; review its identity.")})
         category = str(match.get("section") or "") if match else ""
         statuses = {
             str(row.get("date") or ""): str(row.get("status") or "")
@@ -324,16 +338,37 @@ def prepare_overtime_review(
             bool(record.get("requires_review")) for record in records_by_person.get(key, [])
         )
         requires_confirmation = not match or bool(mismatch_dates) or source_requires_review
+        if mismatch_dates:
+            relevant_warnings.append({"code": "overtime_attendance_difference", "severity": "warning",
+                "message": f"{employee.get('employee', key)} has overtime without confirmed attendance on {', '.join(mismatch_dates)}. Review the timesheet and overtime source."})
         people.append({
             "key": key,
             "name": employee.get("employee", key),
             "match_name": match.get("name", "") if match else "",
+            "match_method": method,
             "category": category if category in {"direct", "indirect"} else "",
             "dates": copy.deepcopy(employee.get("dates", [])),
             "ot_hours": employee.get("confirmed_elapsed_hours", 0),
             "attendance_mismatch_dates": mismatch_dates,
             "requires_confirmation": requires_confirmation,
         })
+    matched_intervals = {}
+    for record in result.get("records", []):
+        if not record.get("included_in_total") or not record.get("start") or not record.get("end"):
+            continue
+        canonical = record.get("matched_employee_key") or record.get("employee_key")
+        identity = (canonical, record.get("date"), record.get("start"), record.get("end"))
+        if identity in matched_intervals:
+            record["included_in_total"] = False
+            record["duplicate"] = True
+            record["duplicate_of_record_id"] = matched_intervals[identity]
+            relevant_warnings.append({"code": "matched_overtime_duplicate", "severity": "warning",
+                "message": f"{record.get('date')}: duplicate overtime interval for matched worker {record.get('employee')} counted once."})
+        else:
+            matched_intervals[identity] = record.get("record_id")
+    for person in people:
+        person["ot_hours"] = _compact_number(sum(_number(r.get("duration_hours"))
+            for r in records_by_person.get(person["key"], []) if r.get("included_in_total")))
     result["review_people"] = people
     coverage = result.get("coverage") if isinstance(result.get("coverage"), dict) else {}
     expected = len(coverage.get("not_supplied_dates", [])) + len(coverage.get("selected_populated_dates", []))
@@ -349,6 +384,10 @@ def prepare_overtime_review(
     daily_rows = [row for row in result.get("daily", []) if isinstance(row, dict)]
     for row in daily_rows:
         if isinstance(row, dict):
+            records = [r for r in result.get("records", []) if r.get("date") == row.get("date")]
+            if records:
+                row["confirmed_elapsed_hours"] = _compact_number(sum(_number(r.get("duration_hours")) for r in records if r.get("included_in_total")))
+                row["employee_count"] = len({r.get("matched_employee_key") or r.get("employee_key") for r in records})
             row["participant_count"] = row.get("employee_count", 0)
             row["actual_ot_man_hours"] = row.get("confirmed_elapsed_hours", 0)
             row["supplied"] = True
@@ -368,6 +407,10 @@ def prepare_overtime_review(
         })
     result["daily"] = sorted(daily_rows, key=lambda row: str(row.get("date") or ""))
     totals = result.get("totals") if isinstance(result.get("totals"), dict) else {}
+    records = result.get("records", [])
+    if records:
+        totals["selected_confirmed_elapsed_hours"] = _compact_number(sum(_number(r.get("duration_hours")) for r in records if r.get("included_in_total")))
+        totals["selected_employee_count"] = len({r.get("matched_employee_key") or r.get("employee_key") for r in records})
     totals["participant_count"] = totals.get("selected_employee_count", 0)
     totals["actual_ot_man_hours"] = totals.get("selected_confirmed_elapsed_hours", 0)
     result["totals"] = totals
@@ -489,6 +532,8 @@ def _accepted_overtime_records(
         daily_ot[report_date]
 
     accepted_records: list[dict[str, Any]] = []
+    accepted_intervals: dict[tuple[str, str], list[tuple[int, int]]] = defaultdict(list)
+    seen_intervals: set[tuple[str, str, str, str]] = set()
     for record in preview.get("records", []):
         if not isinstance(record, Mapping):
             continue
@@ -519,8 +564,24 @@ def _accepted_overtime_records(
                 "Enter an overtime duration greater than 0 and no more than 24 hours "
                 f"for record {record_id or '(unknown)'}."
             )
-        daily_ot[str(record.get("date") or "")][category] += hours
+        canonical_key = str(record.get("matched_employee_key") or record.get("employee_key") or "")
+        date = str(record.get("date") or "")
+        start, end = str(record.get("start") or ""), str(record.get("end") or "")
+        if start and end:
+            identity = (canonical_key, date, start, end)
+            if identity in seen_intervals:
+                continue
+            seen_intervals.add(identity)
+            start_minutes = sum(int(v) * factor for v, factor in zip(start.split(':'), (60, 1)))
+            end_minutes = sum(int(v) * factor for v, factor in zip(end.split(':'), (60, 1)))
+            if end_minutes <= start_minutes:
+                end_minutes += 1440
+            if any(start_minutes < b and a < end_minutes for a, b in accepted_intervals[(canonical_key, date)]):
+                raise ValueError(f"Overlapping overtime for {record.get('employee', canonical_key)} on {date}. Exclude the overlapping record before applying OT.")
+            accepted_intervals[(canonical_key, date)].append((start_minutes, end_minutes))
+        daily_ot[date][category] += hours
         accepted = copy.deepcopy(dict(record))
+        accepted["employee_key"] = canonical_key
         accepted["category"] = category
         accepted["duration_hours"] = _compact_number(hours)
         accepted["review_decision"] = (

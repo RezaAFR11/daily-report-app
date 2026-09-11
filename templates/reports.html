@@ -2213,6 +2213,8 @@ function populateWorkforceReview(draft) {
     : 'Daily Report baseline';
   document.getElementById('workforce-effective-summary').textContent = [
     `Effective source: ${source === 'timesheet' ? 'reviewed KN timesheet' : 'Daily Report JSON/PDF'}`,
+    source === 'timesheet' && monthlyWorkforce.timesheet?.preview?.daily_fallback_count
+      ? 'Daily Report used for workers not listed in the timesheet' : '',
     effective.peak_headcount !== undefined ? `Peak HC ${effective.peak_headcount}` : '',
     effective.regular_man_hours !== undefined ? `Regular ${effective.regular_man_hours} MH` : '',
     effective.overtime_man_hours !== undefined ? `OT ${effective.overtime_man_hours} MH` : '',
@@ -2246,6 +2248,7 @@ function renderTimesheetPreview(result, status='') {
         totals.total_person_days !== undefined ? `${totals.total_person_days} person-days` : '',
         totals.peak_headcount !== undefined ? `peak ${totals.peak_headcount}` : '',
         totals.total_man_hours !== undefined ? `${totals.total_man_hours} regular MH` : '',
+        result.daily_fallback_count ? `${result.daily_fallback_count} workers use Daily Report attendance/hours` : '',
       ].filter(Boolean).join(' · ')
     : 'No attendance workbook reviewed.';
   renderWarningBox('timesheet-warnings', result ? workbookWarnings(result) : []);

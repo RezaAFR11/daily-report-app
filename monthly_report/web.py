@@ -5405,6 +5405,13 @@ def _issued_report_copy(report: dict[str, Any]) -> dict[str, Any]:
     value = copy.deepcopy(report)
     value.pop("_source_records", None)
     value.pop("ai_request_control", None)
+    # Per-person Daily rows are retained only in editable drafts for attendance
+    # reconciliation, following the same boundary as raw timesheet identities.
+    manpower = value.get("manpower")
+    if isinstance(manpower, dict):
+        for day in manpower.get("daily", []):
+            if isinstance(day, dict):
+                day.pop("people", None)
     workforce = _workforce_issue_audit(value.get("workforce_validation"))
     if workforce is None:
         value.pop("workforce_validation", None)
