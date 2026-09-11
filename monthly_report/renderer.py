@@ -1941,13 +1941,70 @@ def _photo_grid_table(
     return grid
 
 
+class _PhotoDocumentationPages(Flowable):
+    """Pack whole dated photo rows into the actual remaining page space."""
+
+    def __init__(self, rows: list[tuple[str, Table, bool]], heading_style: ParagraphStyle):
+        super().__init__()
+        self.rows = rows
+        self.heading_style = heading_style
+
+    def _page_table(self, rows: list[tuple[str, Table, bool]]) -> Table:
+        cells: list[list[Any]] = []
+        previous_date = None
+        for source_date, grid, continued in rows:
+            if source_date != previous_date:
+                if cells:
+                    cells.append([Spacer(1, 8)])
+                suffix = " (continued)" if continued else ""
+                cells.extend([
+                    [_display_heading(f"Photo Documentation: {source_date}{suffix}", self.heading_style)],
+                    [Spacer(1, 6)],
+                ])
+            cells.append([grid])
+            previous_date = source_date
+        table = Table(cells, colWidths=[BODY_WIDTH], splitByRow=0, hAlign="LEFT")
+        table.setStyle(TableStyle([
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        return table
+
+    def wrap(self, availWidth: float, availHeight: float) -> tuple[float, float]:
+        self.page_table = self._page_table(self.rows[:4])
+        self.width, self.height = self.page_table.wrap(availWidth, availHeight)
+        if len(self.rows) > 4:
+            # Ask ReportLab to split here even when the first four rows fit.
+            return self.width, max(self.height, availHeight + 1)
+        return self.width, self.height
+
+    def split(self, availWidth: float, availHeight: float) -> list[Flowable]:
+        fitted = 0
+        page = None
+        for count in range(1, min(4, len(self.rows)) + 1):
+            candidate = self._page_table(self.rows[:count])
+            if candidate.wrap(availWidth, availHeight)[1] > availHeight:
+                break
+            fitted, page = count, candidate
+        if not fitted:
+            return []
+        if fitted == len(self.rows):
+            return [page]
+        return [page, PageBreak(), _PhotoDocumentationPages(self.rows[fitted:], self.heading_style)]
+
+    def draw(self) -> None:
+        self.page_table.drawOn(self.canv, 0, 0)
+
+
 def _photo_grid_flowables(
     photos: list[Any],
     styles: Mapping[str, ParagraphStyle],
     *,
     photo_base_dir: str | os.PathLike[str] | None,
 ) -> list[Flowable]:
-    """Render reviewed photos grouped by source date in an adaptive grid."""
+    """Share pages across dates without mixing dates within a photo row."""
 
     if photo_base_dir is None:
         return [Paragraph("Photo assets are unavailable.", styles["placeholder"])]
@@ -1958,22 +2015,13 @@ def _photo_grid_flowables(
 
     root = os.path.realpath(os.fspath(photo_base_dir))
     grouped, group_order = _group_photo_references(photos)
-    result: list[Flowable] = []
+    rows: list[tuple[str, Table, bool]] = []
     for source_date in group_order:
         items = grouped[source_date]
-        chunk_index = 0
-        while chunk_index < len(items):
+        for chunk_index in range(0, len(items), 3):
             capacity = _photo_page_capacity(items, chunk_index)
-            chunk = items[chunk_index:chunk_index + capacity]
-            if result:
-                result.append(PageBreak())
-            continuation = " (continued)" if chunk_index else ""
-            result.append(_display_heading(
-                f"Photo Documentation: {source_date}{continuation}",
-                styles["h2"],
-            ))
             grid = _photo_grid_table(
-                chunk,
+                items[chunk_index:chunk_index + 3],
                 styles,
                 root=root,
                 compact=(capacity == 12),
@@ -1981,12 +2029,11 @@ def _photo_grid_flowables(
                 image_ops=ImageOps,
             )
             if grid is not None:
-                result.append(grid)
-            chunk_index += capacity
+                rows.append((source_date, grid, chunk_index > 0))
 
-    if not result:
+    if not rows:
         return [Paragraph("No selected photo assets are available.", styles["placeholder"])]
-    return result
+    return [_PhotoDocumentationPages(rows, styles["h2"])]
 
 def _person_days_text(value: Any) -> Any:
     number = _number(value)
