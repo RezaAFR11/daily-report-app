@@ -77,7 +77,7 @@ def match_employee(name, employees, employee_id=''):
     return None, 'ambiguous' if candidates else 'unmatched'
 
 
-def reconcile_timesheet(preview, baseline):
+def reconcile_timesheet(preview, baseline, *, include_daily_fallback=True):
     """Use timesheet statuses where a name exists; otherwise retain Daily rows."""
     result = copy.deepcopy(dict(preview))
     days = baseline.get('daily', [])
@@ -105,7 +105,13 @@ def reconcile_timesheet(preview, baseline):
             if method == 'ambiguous':
                 result.setdefault('unresolved', []).append({'name': person['name'], 'date': date, 'reason': 'ambiguous_daily_name'})
                 warnings.append({'code': 'ambiguous_daily_name', 'severity': 'warning', 'date': date,
-                    'message': f"{date}: {person['name']} matches multiple timesheet workers. Daily entry retained separately pending identity review; headcount and hours may be counted twice. Verify the full name or employee ID before Final issue."})
+                    'message': f"{date}: {person['name']} matches multiple timesheet workers. " + (
+                        'Daily entry retained separately pending identity review; headcount and hours may be counted twice. Verify the full name or employee ID before Final issue.'
+                        if include_daily_fallback else 'Daily entry was not added. Verify the full name or employee ID.')})
+            if not include_daily_fallback:
+                warnings.append({'code': 'daily_person_not_in_timesheet', 'severity': 'warning', 'date': date,
+                    'message': f"{date}: {person['name']} has no confirmed timesheet match. Daily hours were not added (Timesheet only)."})
+                continue
             key = 'daily:' + (person.get('employee_id') or ' '.join(name_tokens(person.get('name', ''))))
             if key not in fallback:
                 fallback[key] = {'employee_key': key, 'name': person.get('name', ''), 'employee_id': person.get('employee_id', ''),
@@ -122,6 +128,11 @@ def reconcile_timesheet(preview, baseline):
             if hours is None:
                 result.setdefault('unresolved', []).append({'name': person['name'], 'date': date, 'reason': 'daily_hours_missing'})
     employees.extend(fallback.values())
+    fallback_hours = sum(s.get('physical_manhours', 0) for e in fallback.values() for s in e['statuses'])
+    result['hours_breakdown'] = {
+        'timesheet_regular_mh': result.get('totals', {}).get('physical_manhours', 0),
+        'daily_fallback_regular_mh': fallback_hours,
+    }
     result['identity_matches'] = audit
     result['daily_fallback_count'] = len(fallback)
     if fallback:
@@ -132,7 +143,9 @@ def reconcile_timesheet(preview, baseline):
         warnings.append({'code': 'matched_name_variants', 'severity': 'warning',
             'message': 'Unique name variants matched: ' + '; '.join(sorted({a['daily_name'] + ' = ' + a['timesheet_name'] for a in variants}))})
 
-    dates = {row['date'] for row in result.get('daily_totals', [])} | {day['date'] for day in days}
+    dates = {row['date'] for row in result.get('daily_totals', [])}
+    if include_daily_fallback:
+        dates |= {day['date'] for day in days}
     daily = {date: {'date': date, 'present_count': 0, 'physical_manhours': 0,
                     'hours_complete': True, 'status_counts': Counter(), 'present_by_section': Counter(), 'hours_by_section': Counter()} for date in sorted(dates)}
     roles = {}

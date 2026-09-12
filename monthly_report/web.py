@@ -3351,6 +3351,36 @@ def _store_refreshed_deterministic_summary(
     }
 
 
+def _sync_workforce_narrative(text: str, draft: Mapping[str, Any]) -> str:
+    """Refresh explicitly labelled workforce facts without rewriting activity prose."""
+    totals = (draft.get("manpower") or {}).get("totals") or {}
+    number = r"\d+(?:,\d{3})*(?:\.\d+)?"
+    for label, key in (
+        (r"average daily headcount", "average_daily_headcount"),
+        (r"peak daily headcount", "peak_headcount"),
+    ):
+        value = totals.get(key)
+        if value is not None:
+            text = re.sub(rf"({label}\s*(?:was|is|:|=)\s*){number}",
+                          lambda m: m[1] + f"{float(value):,.2f}".rstrip('0').rstrip('.'), text, flags=re.I)
+    hours = totals.get("total_man_hours")
+    if hours is not None:
+        formatted = f"{float(hours):,.2f}".rstrip('0').rstrip('.')
+        text = re.sub(rf"{number}(\s+(?:known\s+)?man[ -]hours\s+(?:were|was)\s+recorded)",
+                      lambda m: formatted + m[1], text, flags=re.I)
+        text = re.sub(rf"((?:total\s+man[ -]hours|recorded man hours for the period)\s*(?:totaled|was|is|:|=)\s*){number}",
+                      lambda m: m[1] + formatted, text, flags=re.I)
+    days = totals.get("manpower_supplied_day_count")
+    if days is not None:
+        text = re.sub(r"Across \d+ days? with manpower data", f"Across {days} {'day' if days == 1 else 'days'} with manpower data", text)
+    return text
+
+
+def _preserve_workforce_review_text(draft: dict[str, Any], body: Mapping[str, Any]) -> None:
+    if isinstance(body.get("executive_summary"), str):
+        draft["executive_summary"] = _clean_text(body["executive_summary"], 4_000)
+
+
 def _refresh_deterministic_summary(draft: dict[str, Any]) -> dict[str, Any]:
     """Refresh deterministic narrative after reviewed data changes.
 
@@ -3389,6 +3419,9 @@ def _refresh_deterministic_summary(draft: dict[str, Any]) -> dict[str, Any]:
         procurement_summary=procurement_summary,
     )
 
+    if draft.get("workforce_validation"):
+        draft["executive_summary"] = _sync_workforce_narrative(draft.get("executive_summary", ""), draft)
+        site["summary"] = _sync_workforce_narrative(site.get("summary", ""), draft)
     draft["site"] = site
     _store_refreshed_deterministic_summary(
         draft,
@@ -5253,7 +5286,7 @@ def _workforce_review_audit(value: Mapping[str, Any]) -> dict[str, Any]:
         key: copy.deepcopy(value.get(key))
         for key in (
             "status", "reviewed_by", "reviewed_at", "decided_by", "decided_at",
-            "confirmed_exceptions",
+            "confirmed_exceptions", "source_mode",
         )
         if value.get(key) not in (None, "")
     }
@@ -7233,8 +7266,10 @@ def _decide_periodic_timesheet_request(*, data_dir: str, draft_id: str):
             draft,
             str(body.get("decision") or ""),
             confirm_exceptions=bool(body.get("confirm_exceptions")),
+            source_mode=body.get("source_mode"),
             actor=username,
         )
+        _preserve_workforce_review_text(draft, body)
         _refresh_deterministic_summary(draft)
         draft.pop("ai_summary", None)
         _update_draft(data_dir, username, draft)
@@ -7293,6 +7328,7 @@ def _decide_periodic_overtime_request(*, data_dir: str, draft_id: str):
             confirm_exceptions=bool(body.get("confirm_exceptions")),
             actor=username,
         )
+        _preserve_workforce_review_text(draft, body)
         _refresh_deterministic_summary(draft)
         draft.pop("ai_summary", None)
         _update_draft(data_dir, username, draft)
@@ -7307,6 +7343,8 @@ def _reset_periodic_workforce_request(*, data_dir: str, draft_id: str):
     if draft is None:
         return jsonify({"error": "Report draft not found."}), 404
     reset_workforce(draft)
+    body = request.get_json(silent=True)
+    _preserve_workforce_review_text(draft, body if isinstance(body, dict) else {})
     _refresh_deterministic_summary(draft)
     draft.pop("ai_summary", None)
     _update_draft(data_dir, username, draft)

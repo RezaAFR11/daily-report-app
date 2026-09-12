@@ -597,9 +597,17 @@
                   </div>
                 </div>
                 <div class="small text-muted mb-2" id="timesheet-summary">No attendance workbook reviewed.</div>
+                <div id="timesheet-source-panel" class="d-none mb-3">
+                  <label for="timesheet-source-mode" class="form-label small">Manpower and regular man-hours source</label>
+                  <select id="timesheet-source-mode" class="form-select form-select-sm" onchange="changeWorkforceSource()">
+                    <option value="timesheet_only">Timesheet only</option>
+                    <option value="combined">Timesheet + Daily fallback</option>
+                    <option value="daily_only">Daily PDF only</option>
+                  </select>
+                  <div id="timesheet-source-help" class="form-text"></div>
+                </div>
                 <div class="alert alert-warning py-2 d-none" id="timesheet-pending-notice" tabindex="-1" role="status">
-                  <strong>Analyzed, not applied.</strong> The report still uses Daily Report totals.
-                  Review the results, then choose Apply Timesheet Totals or Keep Daily Report Data.
+                  <strong>Source selection not applied.</strong> Review the results, then click Apply Source.
                 </div>
                 <div class="form-check d-none mb-2" id="timesheet-confirm-panel">
                   <input class="form-check-input" type="checkbox" id="timesheet-confirm-exceptions">
@@ -608,8 +616,7 @@
                   </label>
                 </div>
                 <div class="d-flex gap-2 flex-wrap d-none mb-3" id="timesheet-actions">
-                  <button type="button" class="btn btn-sm btn-primary" onclick="decideTimesheet('apply')">Apply Timesheet Totals</button>
-                  <button type="button" class="btn btn-sm btn-outline-secondary" onclick="decideTimesheet('keep')">Keep Daily Report Data</button>
+                  <button type="button" id="apply-workforce-source-btn" class="btn btn-sm btn-primary" onclick="applyWorkforceSource()">Apply Source</button>
                 </div>
                 <div class="alert alert-warning py-2 small d-none" id="timesheet-warnings"></div>
                 <div class="table-responsive d-none mb-2" id="timesheet-daily-panel">
@@ -1750,6 +1757,9 @@ function restoreNonWorkforceReview(snapshot) {
 
 function applyWorkforceDraftPreservingReview(data) {
   const snapshot = snapshotNonWorkforceReview();
+  // The decision endpoint preserves submitted wording and synchronizes facts.
+  // Restoring the old textarea here would overwrite the updated summary.
+  delete snapshot.fields['review-executive-summary'];
   applyCompiledMonthlyDraft(data, {scrollToReview:false});
   restoreNonWorkforceReview(snapshot);
 }
@@ -2224,11 +2234,10 @@ function populateWorkforceReview(draft) {
   const badge = document.getElementById('workforce-status-badge');
   const source = effective.source || 'daily_report';
   badge.className = `badge ${source === 'timesheet' ? 'text-bg-success' : 'text-bg-secondary'}`;
-  badge.textContent = source === 'timesheet'
-    ? (effective.overtime_applied ? 'Timesheet + OT applied' : 'Timesheet applied')
-    : 'Daily Report baseline';
+  const sourceLabel = workforceSourceLabel(effective.source_mode || (source === 'timesheet' ? 'combined' : 'daily_only'));
+  badge.textContent = sourceLabel + (effective.overtime_applied ? ' + OT applied' : ' active');
   document.getElementById('workforce-effective-summary').textContent = [
-    `Effective source: ${source === 'timesheet' ? 'reviewed KN timesheet' : 'Daily Report JSON/PDF'}`,
+    `Effective source: ${sourceLabel}`,
     source === 'timesheet' && monthlyWorkforce.timesheet?.preview?.daily_fallback_count
       ? 'Daily Report used for workers not listed in the timesheet' : '',
     effective.peak_headcount !== undefined ? `Peak HC ${effective.peak_headcount}` : '',
@@ -2242,7 +2251,11 @@ function populateWorkforceReview(draft) {
     input.classList.toggle('bg-light', source === 'timesheet');
     input.title = source === 'timesheet' ? 'Locked to the reviewed timesheet/overtime calculation.' : '';
   });
-  renderTimesheetPreview(monthlyWorkforce.timesheet?.preview || null, monthlyWorkforce.timesheet?.status || '');
+  const sourceSelect = document.getElementById('timesheet-source-mode');
+  const hasSourceOptions = Boolean(monthlyWorkforce.timesheet?.preview_options);
+  sourceSelect.querySelector('[value="timesheet_only"]').disabled = !hasSourceOptions;
+  sourceSelect.value = monthlyWorkforce.timesheet?.source_mode || (hasSourceOptions ? 'timesheet_only' : 'combined');
+  renderSelectedWorkforceSource();
   renderOvertimePreview(monthlyWorkforce.overtime?.preview || null, monthlyWorkforce.overtime?.status || '');
 }
 
@@ -2253,11 +2266,49 @@ function renderWarningBox(id, warnings) {
   box.classList.toggle('d-none', unique.length === 0);
 }
 
+function workforceSourceLabel(mode) {
+  const labels = {daily_only:'Daily PDF only', combined:'Timesheet + Daily fallback', timesheet_only:'Timesheet only'};
+  return labels[mode] || 'Daily PDF only';
+}
+
+function renderSelectedWorkforceSource() {
+  const state = monthlyWorkforce.timesheet || {};
+  const mode = document.getElementById('timesheet-source-mode').value;
+  const hasPreview = Boolean(state.preview);
+  document.getElementById('timesheet-source-panel').classList.toggle('d-none', !hasPreview);
+  let result = state.preview_options?.[mode] || state.preview || null;
+  if (mode === 'daily_only' && hasPreview) {
+    const manpower = monthlyWorkforce.baseline?.manpower || {};
+    result = {manpower, daily:manpower.daily || [], warnings:[]};
+  }
+  const appliedMode = state.source_mode || (state.status === 'kept' ? 'daily_only' : 'combined');
+  const pending = hasPreview && (state.status === 'preview' || mode !== appliedMode);
+  renderTimesheetPreview(result, pending ? 'preview' : state.status || '');
+  document.getElementById('apply-workforce-source-btn').disabled = !pending;
+  const descriptions = {
+    daily_only:'Use Daily Report headcount and hours. Timesheet attendance is not applied.',
+    combined:'Use timesheet attendance first; add workers without a confirmed match from Daily. Ambiguous identities require review.',
+    timesheet_only:'Use timesheet attendance only. Daily workers without a confirmed timesheet match are shown for review; no Daily hours are added.',
+  };
+  document.getElementById('timesheet-source-help').textContent = descriptions[mode];
+}
+
+function changeWorkforceSource() {
+  document.getElementById('timesheet-confirm-exceptions').checked = false;
+  renderSelectedWorkforceSource();
+}
+
+function applyWorkforceSource() {
+  const mode = document.getElementById('timesheet-source-mode').value;
+  return decideTimesheet(mode === 'daily_only' ? 'keep' : 'apply');
+}
+
 function renderTimesheetPreview(result, status='') {
   const statusLabels = {preview:'Analyzed, not applied', applied:'Applied to report', kept:'Daily Report data kept'};
   document.getElementById('timesheet-pending-notice').classList.toggle('d-none', !result || status !== 'preview');
   const rows = workforceDailyRows(result);
   const totals = result?.manpower?.totals || result?.totals || {};
+  const breakdown = result?.hours_breakdown;
   const summary = document.getElementById('timesheet-summary');
   summary.textContent = result
     ? [
@@ -2266,6 +2317,7 @@ function renderTimesheetPreview(result, status='') {
         totals.total_person_days !== undefined ? `${totals.total_person_days} person-days` : '',
         totals.peak_headcount !== undefined ? `peak ${totals.peak_headcount}` : '',
         totals.total_man_hours !== undefined ? `${totals.total_man_hours} regular MH` : '',
+        breakdown ? `Timesheet ${breakdown.timesheet_regular_mh} MH + Daily fallback ${breakdown.daily_fallback_regular_mh} MH` : '',
         result.daily_fallback_count ? `${result.daily_fallback_count} workers use Daily Report attendance/hours` : '',
       ].filter(Boolean).join(' · ')
     : 'No attendance workbook reviewed.';
@@ -2286,7 +2338,7 @@ function renderTimesheetPreview(result, status='') {
     document.getElementById('timesheet-confirm-exceptions').checked = false;
   }
   document.getElementById('timesheet-actions').classList.toggle(
-    'd-none', !result || ['applied', 'kept'].includes(status)
+    'd-none', !result
   );
 }
 
@@ -2409,7 +2461,7 @@ async function analyzeTimesheet() {
     const data = await postWorkbookPreview('timesheet', 'timesheet-files', 'timesheet-cutoff');
     populateWorkforcePreservingReview(data.draft);
     document.getElementById('timesheet-confirm-exceptions').checked = false;
-    showMonthlyAlert('Timesheet analyzed, not applied. Review the results and choose Apply Timesheet Totals or Keep Daily Report Data.', 'warning');
+    showMonthlyAlert('Timesheet analyzed. Choose the manpower source, review the results, then click Apply Source.', 'warning');
   } catch (error) { showMonthlyAlert(error.message, 'warning'); }
   finally { setLoading('analyze-timesheet-btn', false); }
 }
@@ -2444,8 +2496,9 @@ function overtimeRecordResolutionPayload() {
 
 async function workforceDecision(kind, decision) {
   if (!monthlyDraftId) return;
-  const body = {decision};
+  const body = {decision, executive_summary:document.getElementById('review-executive-summary').value};
   if (kind === 'timesheet') {
+    body.source_mode = document.getElementById('timesheet-source-mode').value;
     body.confirm_exceptions = document.getElementById('timesheet-confirm-exceptions').checked;
   }
   if (kind === 'overtime') {
@@ -2463,7 +2516,7 @@ async function workforceDecision(kind, decision) {
 async function decideTimesheet(decision) {
   try {
     await workforceDecision('timesheet', decision);
-    showMonthlyAlert(decision === 'apply' ? 'Timesheet totals applied.' : 'Daily Report manpower kept.', 'success');
+    showMonthlyAlert(`${workforceSourceLabel(monthlyWorkforce.timesheet?.source_mode)} applied.`, 'success');
   } catch (error) { showMonthlyAlert(error.message, 'warning'); }
 }
 
@@ -2477,7 +2530,10 @@ async function decideOvertime(decision) {
 async function resetWorkforceValidation() {
   if (!monthlyDraftId || !confirm('Reset timesheet and overtime decisions to the Daily Report baseline?')) return;
   try {
-    const response = await fetch(`/monthly/workforce/reset/${encodeURIComponent(monthlyDraftId)}`, {method:'POST'});
+    const response = await fetch(`/monthly/workforce/reset/${encodeURIComponent(monthlyDraftId)}`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({executive_summary:document.getElementById('review-executive-summary').value}),
+    });
     const data = await responsePayload(response, 'Workforce validation could not be reset.');
     applyWorkforceDraftPreservingReview(data);
     showMonthlyAlert('Timesheet and overtime reset to the Daily Report baseline.', 'success');
@@ -3199,8 +3255,11 @@ function addMonthlyReportToHistory(report, downloadUrl='') {
 }
 
 function requireTimesheetDecision() {
-  if (monthlyWorkforce.timesheet?.status !== 'preview') return true;
-  const message = 'Timesheet analyzed, not applied. Choose Apply Timesheet Totals or Keep Daily Report Data before generating the PDF.';
+  const state = monthlyWorkforce.timesheet || {};
+  const mode = document.getElementById('timesheet-source-mode').value;
+  const appliedMode = state.source_mode || (state.status === 'kept' ? 'daily_only' : 'combined');
+  if (state.status !== 'preview' && (!state.preview || mode === appliedMode)) return true;
+  const message = 'Source selection not applied. Review the selected manpower source and click Apply Source before generating the PDF.';
   showMonthlyAlert(message, 'warning');
   setFinalGenerateStatus('Choose timesheet source', 'warning');
   const notice = document.getElementById('timesheet-pending-notice');

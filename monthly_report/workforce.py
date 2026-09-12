@@ -183,6 +183,9 @@ def standardise_timesheet_preview(preview: Mapping[str, Any]) -> dict[str, Any]:
             "indirect_man_hours": _compact_number(_number(indirect_totals.get("physical_manhours"))),
             "total_man_hours": _compact_number(_number(source_totals.get("physical_manhours"))),
             "peak_headcount": int(_number(source_totals.get("peak_present_count"))),
+            "average_daily_headcount": round(sum(row["total_headcount"] for row in effective_daily) / len(effective_daily), 2) if effective_daily else None,
+            "manpower_supplied_day_count": len(supplied_dates),
+            "manpower_not_supplied_day_count": len(not_supplied_dates),
             "hours_complete": result["coverage"]["complete"],
             "partial_dates": copy.deepcopy(partial_dates),
             "not_supplied_dates": copy.deepcopy(not_supplied_dates),
@@ -201,9 +204,12 @@ def set_timesheet_preview(
     state = ensure_workforce_state(draft)
     _restore_baseline(draft, state)
     prepared = standardise_timesheet_preview(reconcile_timesheet(preview, state["baseline"].get("manpower", {})))
+    timesheet_only = standardise_timesheet_preview(reconcile_timesheet(
+        preview, state["baseline"].get("manpower", {}), include_daily_fallback=False))
     state["timesheet"] = {
         "status": "preview",
         "preview": prepared,
+        "preview_options": {"combined": prepared, "timesheet_only": timesheet_only},
         "reviewed_by": actor,
         "reviewed_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -217,23 +223,37 @@ def decide_timesheet(
     decision: str,
     *,
     confirm_exceptions: bool = False,
+    source_mode: str | None = None,
     actor: str,
 ) -> dict[str, Any]:
     state = ensure_workforce_state(draft)
     timesheet = state.get("timesheet") if isinstance(state.get("timesheet"), dict) else {}
     if decision not in {"apply", "keep"}:
         raise ValueError("Timesheet decision must be apply or keep.")
+    mode = source_mode or ("daily_only" if decision == "keep" else "combined")
+    if mode not in {"daily_only", "combined", "timesheet_only"}:
+        raise ValueError("Choose Daily PDF only, Timesheet + Daily fallback, or Timesheet only.")
+    if (decision == "keep") != (mode == "daily_only"):
+        raise ValueError("The decision does not match the selected workforce source.")
     preview = timesheet.get("preview") if isinstance(timesheet.get("preview"), Mapping) else None
     if preview is None:
         raise ValueError("Analyze an attendance timesheet before saving a decision.")
+    options = timesheet.get("preview_options") or {}
+    if mode != "daily_only":
+        if mode in options:
+            preview = options[mode]
+        elif mode == "timesheet_only" or timesheet.get("source_mode") == "timesheet_only":
+            raise ValueError("Analyze the timesheet again to select this workforce source.")
     _restore_baseline(draft, state)
     state["overtime"] = {"status": "not_reviewed"}
     if decision == "keep":
+        timesheet["source_mode"] = mode
         timesheet["status"] = "kept"
         timesheet["decided_by"] = actor
         timesheet["decided_at"] = datetime.now().isoformat(timespec="seconds")
         timesheet["confirmed_exceptions"] = False
         state["effective"] = _baseline_effective(draft)
+        state["effective"]["source_mode"] = mode
         return state
 
     manpower = preview.get("manpower") if isinstance(preview.get("manpower"), Mapping) else {}
@@ -245,6 +265,8 @@ def decide_timesheet(
             "Confirm missing roles, attendance conflicts, and incomplete dates before applying the timesheet."
         )
     timesheet["status"] = "applied"
+    timesheet["source_mode"] = mode
+    timesheet["preview"] = copy.deepcopy(preview)
     timesheet["decided_by"] = actor
     timesheet["decided_at"] = datetime.now().isoformat(timespec="seconds")
     timesheet["confirmed_exceptions"] = bool(confirm_exceptions)
@@ -257,6 +279,7 @@ def decide_timesheet(
     regular_complete = bool(totals.get("hours_complete"))
     state["effective"] = {
         "source": "timesheet",
+        "source_mode": mode,
         "peak_headcount": safety["total_manpower"],
         "regular_man_hours": safety["total_man_hours"],
         "regular_coverage_complete": regular_complete,
@@ -497,6 +520,7 @@ def _keep_regular_workforce(
         "overtime_applied": False,
         "total_hours_complete": False,
         "note": "Reviewed overtime workbook was not applied.",
+        "source_mode": (state.get("timesheet") or {}).get("source_mode", "combined"),
     }
     return state
 
@@ -839,6 +863,7 @@ def decide_overtime(
         "overtime_man_hours": _compact_number(total_ot),
         "total_man_hours": totals["total_man_hours"],
         "overtime_applied": True,
+        "source_mode": timesheet.get("source_mode", "combined"),
         "overtime_coverage_complete": not not_supplied_dates,
         "overtime_supplied_dates": copy.deepcopy(selected_populated_dates),
         "overtime_not_supplied_dates": copy.deepcopy(not_supplied_dates),

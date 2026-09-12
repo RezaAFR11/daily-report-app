@@ -107,6 +107,25 @@ class WorkforceMatchingTests(unittest.TestCase):
         self.assertNotIn('people', _issued_report_copy(draft)['manpower']['daily'][0])
         self.assertIn('people', draft['manpower']['daily'][0])
 
+    def test_source_modes_switch_without_carrying_daily_fallback(self):
+        source = baseline('M. Ali', 'New Worker')
+        source['totals'] = {'peak_headcount': 2, 'total_person_days': 2, 'total_man_hours': 16}
+        draft = {'manpower': source, 'safety': {'total_manpower': 2, 'total_man_hours': 16}}
+        set_timesheet_preview(draft, timesheet(employee('Muhammad Ali')), actor='test')
+        for mode, hours in [('timesheet_only', 10), ('combined', 18), ('timesheet_only', 10), ('daily_only', 16)]:
+            decide_timesheet(draft, 'keep' if mode == 'daily_only' else 'apply',
+                             source_mode=mode, confirm_exceptions=True, actor='test')
+            self.assertEqual(draft['safety']['total_man_hours'], hours)
+            self.assertEqual(draft['workforce_validation']['effective']['source_mode'], mode)
+        only = draft['workforce_validation']['timesheet']['preview_options']['timesheet_only']
+        self.assertEqual(only['daily_fallback_count'], 0)
+        self.assertTrue(any(w['code'] == 'daily_person_not_in_timesheet' for w in only['warnings']))
+        issued = _issued_report_copy(draft)
+        self.assertEqual(issued['workforce_validation']['timesheet']['source_mode'], 'daily_only')
+        self.assertNotIn('preview_options', issued['workforce_validation']['timesheet'])
+        with self.assertRaises(ValueError):
+            decide_timesheet(draft, 'apply', source_mode='invalid', actor='test')
+
 
 if __name__ == '__main__':
     unittest.main()

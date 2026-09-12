@@ -198,6 +198,47 @@ class WorkforceWebTests(unittest.TestCase):
         template = Path(__file__).resolve().parents[1] / "templates" / "reports.html"
         self.app.jinja_env.parse(template.read_text(encoding="utf-8"))
 
+    def test_workforce_decision_preserves_prose_but_refreshes_summary_facts(self):
+        prose = ('Cable 3x95mm installed over 120 meters. Across 1 day with manpower data, '
+                 'average daily headcount was 2, peak daily headcount was 2, '
+                 'and 20 known man hours were recorded.')
+        with patch("monthly_report.web.compile_timesheets", return_value=_timesheet()):
+            response = self.client.post(
+                f"/monthly/workforce/timesheet/{self.draft_id}/preview",
+                data={"files": (io.BytesIO(b"xlsx"), "attendance.xlsx")},
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(response.status_code, 200)
+        # Analyze alone must not change the effective Daily figures.
+        self.assertEqual(response.get_json()['draft']['safety']['total_man_hours'], 20)
+        response = self.client.post(
+            f"/monthly/workforce/timesheet/{self.draft_id}/decision",
+            json={"decision": "apply", "confirm_exceptions": True, "executive_summary": prose},
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        applied = response.get_json()['draft']
+        summary = applied['executive_summary']
+        self.assertIn('Cable 3x95mm installed over 120 meters.', summary)
+        self.assertIn('average daily headcount was 3', summary)
+        self.assertIn('peak daily headcount was 3,', summary)
+        self.assertIn('30 known man hours', summary)
+        # A stale textarea submitted on Generate is repaired on refresh too.
+        from monthly_report.web import _refresh_deterministic_summary
+        reviewed = _apply_review(applied, {'executive_summary': prose}, actor='reza')
+        _refresh_deterministic_summary(reviewed)
+        self.assertIn('30 known man hours', reviewed['executive_summary'])
+        response = self.client.post(
+            f"/monthly/workforce/timesheet/{self.draft_id}/decision",
+            json={"decision": "keep", "executive_summary": summary},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('20 known man hours', response.get_json()['draft']['executive_summary'])
+        self.assertEqual(response.get_json()['draft']['workforce_validation']['effective']['source'], 'daily_report')
+        response = self.client.post(f"/monthly/workforce/reset/{self.draft_id}",
+                                    json={"executive_summary": summary})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('20 known man hours', response.get_json()['draft']['executive_summary'])
+
     def test_timesheet_upload_accepts_31_files_with_automatic_cutoff(self):
         from tests.test_monthly_timesheet import _cross_year_fixture
         draft = _draft()
