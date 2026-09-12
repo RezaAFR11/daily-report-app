@@ -221,6 +221,20 @@ class TimesheetParserTests(unittest.TestCase):
         )
         self.assertIn("duplicate_file", {item["code"] for item in result["warnings"]})
 
+    def test_cumulative_blank_does_not_conflict_with_recorded_attendance(self):
+        for value, expected in [("1", "present"), ("0", "nonpresent"), ("S", "sick"), (None, "missing")]:
+            with self.subTest(value=value):
+                sources = [("early.xlsx", _cross_year_fixture(alice_first=None)),
+                           ("later.xlsx", _cross_year_fixture(alice_first=value))]
+                for ordered in [sources, list(reversed(sources))]:
+                    result = compile_timesheets(ordered, start_date="2026-12-29", end_date="2026-12-29")
+                    alice = next(e for e in result["employees"] if e["name"] == "Alice Example")
+                    self.assertEqual(alice["statuses"][0]["status"], expected)
+                    self.assertEqual(alice["physical_manhours"], 10 if expected == "present" else 0)
+                    self.assertFalse(result["unresolved"])
+                    if value is not None:
+                        self.assertEqual(len(alice["statuses"][0]["sources"]), 2)
+
     def test_employee_date_conflict_requires_review_and_counts_zero(self):
         present = _cross_year_fixture(alice_first="1")
         sick = _cross_year_fixture(alice_first="S")

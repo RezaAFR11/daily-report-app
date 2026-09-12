@@ -790,7 +790,11 @@ def _build_preview(parsed_sources: list[dict], *, cutoff_date: date | None) -> d
 
     resolved: dict[tuple[str, str], dict] = {}
     for (employee_key, day), items in observations.items():
-        statuses = sorted({item["status"] for item in items})
+        # Cumulative snapshots leave later dates blank until attendance is entered.
+        # A blank is no observation, not a competing attendance status. Retain
+        # every source below, and still flag contradictory nonblank statuses.
+        observed_statuses = {item["status"] for item in items} - {"missing"}
+        statuses = sorted(observed_statuses or {"missing"})
         if len(statuses) == 1:
             status = statuses[0]
         else:
