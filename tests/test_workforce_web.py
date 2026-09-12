@@ -194,6 +194,10 @@ class WorkforceWebTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_reports_template_has_valid_jinja_syntax(self):
+        template = Path(__file__).resolve().parents[1] / "templates" / "reports.html"
+        self.app.jinja_env.parse(template.read_text(encoding="utf-8"))
+
     def test_timesheet_upload_accepts_31_files_with_automatic_cutoff(self):
         from tests.test_monthly_timesheet import _cross_year_fixture
         draft = _draft()
