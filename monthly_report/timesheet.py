@@ -1041,7 +1041,16 @@ def compile_timesheets(
         )
         seen_hashes[digest] = parsed["manifest"]["source_id"]
         parsed_sources.append(parsed)
-    return _build_preview(parsed_sources, cutoff_date=cutoff)
+    # Use the latest selected workbook date, already bounded by the report
+    # period and any manual cutoff. Blank attendance cells remain unknown.
+    selected_ends = [
+        date.fromisoformat(sheet["effective_end"])
+        for source in parsed_sources
+        for sheet in source["manifest"]["sheets"]
+        if sheet.get("effective_end")
+    ]
+    effective_cutoff = max(selected_ends) if selected_ends else (cutoff or requested_end)
+    return _build_preview(parsed_sources, cutoff_date=effective_cutoff)
 
 
 def parse_timesheet_xlsx(

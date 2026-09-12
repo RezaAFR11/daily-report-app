@@ -194,6 +194,32 @@ class WorkforceWebTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_timesheet_upload_accepts_31_files_with_automatic_cutoff(self):
+        from tests.test_monthly_timesheet import _cross_year_fixture
+        draft = _draft()
+        draft["period"] = {"start": "2026-12-29", "end": "2027-01-10"}
+        draft_id = _save_draft(str(self.data_dir), "reza", draft)
+        payload = _cross_year_fixture()
+        response = self.client.post(
+            f"/monthly/workforce/timesheet/{draft_id}/preview",
+            data={"files": [(io.BytesIO(payload), f"attendance-{i}.xlsx") for i in range(31)]},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        preview = response.get_json()["draft"]["workforce_validation"]["timesheet"]["preview"]
+        self.assertEqual(len(preview["source_manifest"]), 31)
+        self.assertEqual(preview["period"]["cutoff"], "2027-01-03")
+
+    def test_workbook_upload_rejects_32_files(self):
+        for kind in ("timesheet", "overtime"):
+            response = self.client.post(
+                f"/monthly/workforce/{kind}/{self.draft_id}/preview",
+                data={"files": [(io.BytesIO(b"xlsx"), f"attendance-{i}.xlsx") for i in range(32)]},
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("31 workbooks", response.get_json()["error"])
+
     def test_timesheet_overtime_apply_and_reset_routes(self):
         with patch("monthly_report.web.compile_timesheets", return_value=_timesheet()):
             response = self.client.post(

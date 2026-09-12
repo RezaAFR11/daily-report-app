@@ -582,13 +582,14 @@
             <div class="col-lg-6">
               <div class="coverage-card h-100">
                 <div class="section-label mb-2">1. Attendance Timesheet</div>
-                <label class="form-label small" for="timesheet-files">KN attendance workbook (.xlsx)</label>
+                <label class="form-label small" for="timesheet-files">KN attendance workbooks (.xlsx, up to 31 files)</label>
                 <input class="form-control form-control-sm mb-2" type="file" id="timesheet-files"
                   accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple>
                 <div class="row g-2 mb-2">
                   <div class="col-sm-7">
                     <label class="form-label small" for="timesheet-cutoff">Data cutoff / as-of date</label>
                     <input class="form-control form-control-sm" type="date" id="timesheet-cutoff">
+                    <div class="form-text">Defaults to the report end date and adjusts to the workbook period after analysis. You can choose an earlier cutoff.</div>
                   </div>
                   <div class="col-sm-5 d-flex align-items-end">
                     <button type="button" class="btn btn-sm btn-outline-primary w-100" id="analyze-timesheet-btn"
@@ -2202,6 +2203,17 @@ function workforceDailyRows(result) {
 
 function populateWorkforceReview(draft) {
   monthlyWorkforce = draft.workforce_validation || {};
+  const cutoff = document.getElementById('timesheet-cutoff');
+  if (cutoff.dataset.draftId !== monthlyDraftId) {
+    cutoff.dataset.draftId = monthlyDraftId;
+    cutoff.dataset.manual = '';
+  }
+  cutoff.dataset.reportEnd = draft.period?.end || '';
+  cutoff.min = draft.period?.start || '';
+  cutoff.max = draft.period?.end || '';
+  if (!cutoff.dataset.manual) {
+    cutoff.value = monthlyWorkforce.timesheet?.preview?.period?.cutoff || cutoff.dataset.reportEnd;
+  }
   const card = document.getElementById('workforce-review-card');
   card.classList.toggle('d-none', !monthlySourceValidationApplied);
   const effective = monthlyWorkforce.effective || {};
@@ -2367,11 +2379,16 @@ async function postWorkbookPreview(kind, inputId, cutoffId='') {
   }
   const files = Array.from(document.getElementById(inputId).files || []);
   if (!files.length) throw new Error('Choose at least one .xlsx workbook.');
+  if (files.length > 31) throw new Error('Choose no more than 31 workbooks at once.');
   const invalid = files.find(file => !file.name.toLowerCase().endsWith('.xlsx'));
   if (invalid) throw new Error(`${invalid.name} is not an .xlsx workbook.`);
   const form = new FormData();
   files.forEach(file => form.append('files', file, file.name));
-  if (cutoffId) form.append('cutoff_date', document.getElementById(cutoffId).value || '');
+  if (cutoffId) {
+    const cutoff = document.getElementById(cutoffId);
+    if (!cutoff.checkValidity()) throw new Error('Choose a cutoff within the report period.');
+    form.append('cutoff_date', cutoff.dataset.manual ? cutoff.value : '');
+  }
   const response = await fetch(`/monthly/workforce/${kind}/${encodeURIComponent(monthlyDraftId)}/preview`, {
     method:'POST', body:form,
   });
@@ -3394,6 +3411,14 @@ function updateMonthlyCount() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  const timesheetCutoff = document.getElementById('timesheet-cutoff');
+  timesheetCutoff.addEventListener('change', () => {
+    timesheetCutoff.dataset.manual = timesheetCutoff.value ? 'true' : '';
+    if (!timesheetCutoff.value) timesheetCutoff.value = timesheetCutoff.dataset.reportEnd || '';
+  });
+  document.getElementById('timesheet-files').addEventListener('change', () => {
+    if (!timesheetCutoff.dataset.manual) timesheetCutoff.value = timesheetCutoff.dataset.reportEnd || '';
+  });
   const deleteModal = document.getElementById('delete-periodic-modal');
   deleteModal.addEventListener('shown.bs.modal', () => {
     document.getElementById('delete-periodic-cancel').focus();

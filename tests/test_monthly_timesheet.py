@@ -253,6 +253,20 @@ class TimesheetParserTests(unittest.TestCase):
             {item["type"] for item in result["unresolved"]},
         )
 
+    def test_automatic_cutoff_uses_report_and_workbook_bounds(self):
+        for end, manual, expected in [
+            ("2027-01-01", None, "2027-01-01"),
+            ("2027-01-10", None, "2027-01-03"),
+            ("2027-01-10", "2026-12-30", "2026-12-30"),
+        ]:
+            with self.subTest(end=end, manual=manual):
+                result = compile_timesheets(
+                    [("attendance.xlsx", _cross_year_fixture())],
+                    start_date="2026-12-29", end_date=end, cutoff_date=manual,
+                )
+                self.assertEqual(result["period"]["cutoff"], expected)
+                self.assertTrue(all(row["date"] <= expected for row in result["daily_totals"]))
+
     def test_rejects_non_xlsx_upload(self):
         with self.assertRaisesRegex(TimesheetError, "Only .xlsx"):
             parse_timesheet_xlsx(b"not xlsx", filename="attendance.xls")
