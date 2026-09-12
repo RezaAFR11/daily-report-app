@@ -3405,8 +3405,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const trigger = pendingPeriodicDelete?.button;
     const tabId = pendingPeriodicDelete?.kind === 'daily' ? 'daily-tab' : 'monthly-tab';
     pendingPeriodicDelete = null;
-    if (trigger?.isConnected) trigger.focus();
-    else document.getElementById(tabId).focus();
+    if (trigger?.isConnected) trigger.focus({preventScroll:true});
+    else document.getElementById(tabId).focus({preventScroll:true});
   });
   document.querySelectorAll('[data-bs-toggle="tab"]').forEach(tab => {
     tab.addEventListener('shown.bs.tab', event => {
