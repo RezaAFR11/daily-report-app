@@ -2254,13 +2254,14 @@ function renderWarningBox(id, warnings) {
 }
 
 function renderTimesheetPreview(result, status='') {
+  const statusLabels = {preview:'Analyzed, not applied', applied:'Applied to report', kept:'Daily Report data kept'};
   document.getElementById('timesheet-pending-notice').classList.toggle('d-none', !result || status !== 'preview');
   const rows = workforceDailyRows(result);
   const totals = result?.manpower?.totals || result?.totals || {};
   const summary = document.getElementById('timesheet-summary');
   summary.textContent = result
     ? [
-        status ? `Status: ${{preview:'Analyzed, not applied', applied:'Applied to report', kept:'Daily Report data kept'}[status] || status}` : '',
+        status ? `Status: ${statusLabels[status] || status}` : '',
         result.period?.start && result.period?.end ? `${result.period.start}–${result.period.end}` : '',
         totals.total_person_days !== undefined ? `${totals.total_person_days} person-days` : '',
         totals.peak_headcount !== undefined ? `peak ${totals.peak_headcount}` : '',
