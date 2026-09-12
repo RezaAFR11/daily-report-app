@@ -39,6 +39,20 @@ class WorkforceMatchingTests(unittest.TestCase):
         worker = dict(employee('Muhammad Ali'), employee_id='A')
         self.assertEqual(match_employee('M. Ali', [worker], 'B'), (None, 'unmatched'))
 
+    def test_embedded_name_fragment_does_not_override_daily_attendance(self):
+        worker = employee('Hargo Wahono Edy.S', 'nonpresent')
+        self.assertEqual(match_employee('Edy Suryadi', [worker]), (None, 'unmatched'))
+        self.assertEqual(match_employee('Hargo Wahono Edy.S', [employee('Edy Suryadi')]), (None, 'unmatched'))
+        result = reconcile_timesheet(timesheet(worker), baseline('Edy Suryadi'))
+        self.assertEqual(result['daily_fallback_count'], 1)
+        self.assertEqual(result['totals']['physical_manhours'], 8)
+
+    def test_dede_candidates_remain_ambiguous(self):
+        workers = [employee('Muhamad Dede Saputra'), employee('Dede A.S')]
+        self.assertEqual(match_employee('Dede Saputra', workers), (None, 'ambiguous'))
+        result = reconcile_timesheet(timesheet(*workers), baseline('Dede Saputra'))
+        self.assertTrue(any('counted twice' in w.get('message', '') for w in result['warnings']))
+
     def test_timesheet_absence_overrides_daily_and_unknown_worker_falls_back(self):
         preview = timesheet(employee('Muhammad Ali', 'nonpresent'), employee('Budi'))
         original = copy.deepcopy(preview)

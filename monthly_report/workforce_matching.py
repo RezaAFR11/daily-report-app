@@ -36,6 +36,14 @@ def _name_matches(a, b, *, typo=False):
         full_words = [word for word in b if len(word) > 1]
         first = full_words[0] if full_words else ''
         return len(a[0]) > 1 and (a[0] == first or (typo and _one_typo(a[0], first)))
+    # Do not find an arbitrary matching name fragment in the middle of an
+    # unrelated full name (Edy Suryadi must not match Hargo Wahono Edy.S).
+    # A leading Muhammad/M. may be omitted, but other leading names may not.
+    anchors = [b[0]]
+    if b[0] in {'muhammad', 'm'} and len(b) > 1:
+        anchors.append(b[1])
+    if not any(_word_matches(a[0], token) or (typo and _one_typo(a[0], token)) for token in anchors):
+        return False
     position = 0
     for token in a:
         while position < len(b) and not (_word_matches(token, b[position]) or (typo and _one_typo(token, b[position]))):
@@ -97,7 +105,7 @@ def reconcile_timesheet(preview, baseline):
             if method == 'ambiguous':
                 result.setdefault('unresolved', []).append({'name': person['name'], 'date': date, 'reason': 'ambiguous_daily_name'})
                 warnings.append({'code': 'ambiguous_daily_name', 'severity': 'warning', 'date': date,
-                    'message': f"{date}: {person['name']} matches multiple timesheet workers. Daily entry retained separately pending identity review."})
+                    'message': f"{date}: {person['name']} matches multiple timesheet workers. Daily entry retained separately pending identity review; headcount and hours may be counted twice. Verify the full name or employee ID before Final issue."})
             key = 'daily:' + (person.get('employee_id') or ' '.join(name_tokens(person.get('name', ''))))
             if key not in fallback:
                 fallback[key] = {'employee_key': key, 'name': person.get('name', ''), 'employee_id': person.get('employee_id', ''),

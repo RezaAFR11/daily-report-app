@@ -597,12 +597,9 @@
                   </div>
                 </div>
                 <div class="small text-muted mb-2" id="timesheet-summary">No attendance workbook reviewed.</div>
-                <div class="alert alert-warning py-2 small d-none" id="timesheet-warnings"></div>
-                <div class="table-responsive d-none mb-2" id="timesheet-daily-panel">
-                  <table class="table table-sm table-bordered mb-0">
-                    <thead class="table-light"><tr><th>Date</th><th>Direct</th><th>Indirect</th><th>HC</th><th>Regular MH</th></tr></thead>
-                    <tbody id="timesheet-daily-body"></tbody>
-                  </table>
+                <div class="alert alert-warning py-2 d-none" id="timesheet-pending-notice" tabindex="-1" role="status">
+                  <strong>Analyzed, not applied.</strong> The report still uses Daily Report totals.
+                  Review the results, then choose Apply Timesheet Totals or Keep Daily Report Data.
                 </div>
                 <div class="form-check d-none mb-2" id="timesheet-confirm-panel">
                   <input class="form-check-input" type="checkbox" id="timesheet-confirm-exceptions">
@@ -610,9 +607,16 @@
                     I reviewed missing roles, status conflicts, blank cells, and incomplete attendance dates.
                   </label>
                 </div>
-                <div class="d-flex gap-2 flex-wrap d-none" id="timesheet-actions">
+                <div class="d-flex gap-2 flex-wrap d-none mb-3" id="timesheet-actions">
                   <button type="button" class="btn btn-sm btn-primary" onclick="decideTimesheet('apply')">Apply Timesheet Totals</button>
                   <button type="button" class="btn btn-sm btn-outline-secondary" onclick="decideTimesheet('keep')">Keep Daily Report Data</button>
+                </div>
+                <div class="alert alert-warning py-2 small d-none" id="timesheet-warnings"></div>
+                <div class="table-responsive d-none mb-2" id="timesheet-daily-panel">
+                  <table class="table table-sm table-bordered mb-0">
+                    <thead class="table-light"><tr><th>Date</th><th>Direct</th><th>Indirect</th><th>HC</th><th>Regular MH</th></tr></thead>
+                    <tbody id="timesheet-daily-body"></tbody>
+                  </table>
                 </div>
               </div>
             </div>
@@ -2250,12 +2254,13 @@ function renderWarningBox(id, warnings) {
 }
 
 function renderTimesheetPreview(result, status='') {
+  document.getElementById('timesheet-pending-notice').classList.toggle('d-none', !result || status !== 'preview');
   const rows = workforceDailyRows(result);
   const totals = result?.manpower?.totals || result?.totals || {};
   const summary = document.getElementById('timesheet-summary');
   summary.textContent = result
     ? [
-        status ? `Status: ${status}` : '',
+        status ? `Status: ${{preview:'Analyzed, not applied', applied:'Applied to report', kept:'Daily Report data kept'}[status] || status}` : '',
         result.period?.start && result.period?.end ? `${result.period.start}–${result.period.end}` : '',
         totals.total_person_days !== undefined ? `${totals.total_person_days} person-days` : '',
         totals.peak_headcount !== undefined ? `peak ${totals.peak_headcount}` : '',
@@ -2403,7 +2408,7 @@ async function analyzeTimesheet() {
     const data = await postWorkbookPreview('timesheet', 'timesheet-files', 'timesheet-cutoff');
     populateWorkforcePreservingReview(data.draft);
     document.getElementById('timesheet-confirm-exceptions').checked = false;
-    showMonthlyAlert('Timesheet analyzed. Review the totals and warnings before applying it.', 'success');
+    showMonthlyAlert('Timesheet analyzed, not applied. Review the results and choose Apply Timesheet Totals or Keep Daily Report Data.', 'warning');
   } catch (error) { showMonthlyAlert(error.message, 'warning'); }
   finally { setLoading('analyze-timesheet-btn', false); }
 }
@@ -3192,8 +3197,21 @@ function addMonthlyReportToHistory(report, downloadUrl='') {
   updateMonthlyCount();
 }
 
+function requireTimesheetDecision() {
+  if (monthlyWorkforce.timesheet?.status !== 'preview') return true;
+  const message = 'Timesheet analyzed, not applied. Choose Apply Timesheet Totals or Keep Daily Report Data before generating the PDF.';
+  showMonthlyAlert(message, 'warning');
+  setFinalGenerateStatus('Choose timesheet source', 'warning');
+  const notice = document.getElementById('timesheet-pending-notice');
+  notice.classList.remove('d-none');
+  notice.scrollIntoView({behavior:'smooth', block:'center'});
+  notice.focus({preventScroll:true});
+  return false;
+}
+
 async function postMonthlyPdf(endpoint, save) {
   if (!monthlyDraftId) { showMonthlyAlert(`Compile a ${reportType} draft first.`, 'warning'); return; }
+  if (save && !requireTimesheetDecision()) return;
   const typeName = reportType === 'weekly' ? 'Weekly' : 'Monthly';
   const finalRequested = save && document.getElementById('monthly-report-mode').value === 'final';
   try { validateSourceReview({forFinal:finalRequested}); }
