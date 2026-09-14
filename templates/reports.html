@@ -2266,6 +2266,135 @@ function renderWarningBox(id, warnings) {
   box.classList.toggle('d-none', unique.length === 0);
 }
 
+function groupTimesheetWarnings(result) {
+  const groups = [
+    {key:'identity', title:'Check worker identities', open:true, items:[]},
+    {key:'attendance', title:'Review attendance differences', open:true, items:[]},
+    {key:'details', title:'Complete worker details', open:true, items:[]},
+    {key:'fallback', title:'Review Daily Report workers', open:false, items:[]},
+    {key:'matches', title:'Review matched name variants', open:false, items:[]},
+    {key:'other', title:'Other source notes', open:false, items:[]},
+  ];
+  const entries = new Map();
+  const sources = new Map((result?.source_manifest || []).map(s => [s.source_id, s.filename]));
+  const readable = value => String(value ?? '').replace(/_/g, ' ').trim();
+  const add = (group, code, name, message, dates=[], refs=[]) => {
+    const key = JSON.stringify([group, code, name, message]);
+    if (!entries.has(key)) {
+      const item = {name, message, dates:new Set(), refs:new Set()};
+      entries.set(key, item);
+      groups.find(g => g.key === group).items.push(item);
+    }
+    const item = entries.get(key);
+    dates.filter(Boolean).forEach(date => item.dates.add(date));
+    refs.filter(Boolean).forEach(ref => item.refs.add(ref));
+  };
+  const variants = (result?.identity_matches || []).filter(m => ['name_variant','spelling_variant'].includes(m.method));
+  const fallback = (result?.employees || []).filter(e => e.source === 'daily_fallback');
+  for (const raw of [...(result?.warnings || []), ...(result?.conflicts || []), ...(result?.unresolved || [])]) {
+    const value = typeof raw === 'string' ? {message:raw} : raw || {};
+    const detail = {...value, ...(value.details || {})};
+    const code = value.code || value.type || value.reason || '';
+    if (code === 'matched_name_variants' && variants.length) continue;
+    if (code === 'daily_person_fallback' && fallback.length) continue;
+    let message = String(value.message || value.text || '').replace(/^\d{4}-\d{2}-\d{2}:\s*/, '');
+    let name = detail.employee || detail.name || '';
+    if (!name) name = message.match(/^(.+?) (?:is listed in the Daily Report|matches multiple timesheet workers|has no confirmed timesheet match)/)?.[1] || '';
+    let group = 'other';
+    if (/ambiguous|identity/.test(code)) {
+      group = 'identity';
+      // The structured unresolved record duplicates the detailed warning.
+      if (!message && (result?.warnings || []).some(w => w.code === code && w.date === detail.date && String(w.message).includes(name))) continue;
+      message ||= 'Multiple worker matches require identity review.';
+    } else if (code === 'missing_role') {
+      group = 'details'; message = 'Position is blank. Check and complete the source timesheet.';
+    } else if (code === 'employee_date_status_conflict') {
+      group = 'attendance';
+      message = `Conflicting statuses: ${(detail.statuses || []).map(readable).sort().join(' / ')}. No regular hours counted for these dates.`;
+    } else if (/attendance|hours_missing|status|incomplete|missing.*date/.test(code)) {
+      group = 'attendance';
+    } else if (/role|section/.test(code)) {
+      group = 'details';
+    } else if (/daily_person/.test(code)) {
+      group = 'fallback';
+    } else if (code === 'matched_name_variants') {
+      group = 'matches';
+    }
+    message ||= readable(code) || 'Review the source workbook.';
+    const refs = [];
+    const reference = item => [item.filename || sources.get(item.source_id), item.sheet, item.row ? `row ${item.row}` : ''].filter(Boolean).join(' / ');
+    const ownRef = reference(detail);
+    if (ownRef) refs.push(ownRef);
+    for (const observation of detail.observations || []) {
+      const ref = reference(observation);
+      if (ref) refs.push(`${detail.date ? detail.date + ' / ' : ''}${ref}: ${readable(observation.status)}`);
+    }
+    if (detail.roles) refs.push(`Positions: ${detail.roles.join(' / ')}`);
+    if (detail.sections) refs.push(`Sections: ${detail.sections.join(' / ')}`);
+    add(group, code, name, message, [detail.date], refs);
+  }
+  for (const worker of fallback) {
+    add('fallback', 'daily_person_fallback', worker.name,
+        'Daily attendance and hours were added because no confirmed timesheet match was found.',
+        (worker.statuses || []).map(s => s.date));
+  }
+  for (const match of variants) {
+    add('matches', 'matched_name_variants', `${match.daily_name} → ${match.timesheet_name}`,
+        'Matched by name variation. Confirm these names refer to the same worker.', [match.date]);
+  }
+  return groups.filter(g => g.items.length).map(g => ({...g, items:g.items.map(item => ({
+    ...item, dates:[...item.dates].sort(), refs:[...item.refs].sort(),
+  }))}));
+}
+
+function renderTimesheetWarnings(result) {
+  const box = document.getElementById('timesheet-warnings');
+  box.replaceChildren();
+  const groups = groupTimesheetWarnings(result);
+  box.classList.toggle('d-none', !groups.length);
+  if (!groups.length) return;
+  const note = document.createElement('div');
+  note.className = 'small text-muted mb-2';
+  note.textContent = 'Grouped for reading only. Repeated issues are combined; calculations and confirmation rules are unchanged.';
+  box.appendChild(note);
+  for (const group of groups) {
+    const section = document.createElement('details');
+    section.className = 'border rounded p-2 mb-2 bg-white';
+    section.open = group.open;
+    const heading = document.createElement('summary');
+    heading.className = 'fw-semibold';
+    heading.textContent = `${group.title} (${group.items.length})`;
+    section.appendChild(heading);
+    const list = document.createElement('ul');
+    list.className = 'mt-2 mb-0 ps-3';
+    list.style.maxHeight = '320px';
+    list.style.overflowY = 'auto';
+    for (const item of group.items) {
+      const row = document.createElement('li');
+      row.className = 'mb-3 text-break';
+      const name = document.createElement('strong');
+      name.className = 'd-block'; name.textContent = item.name || 'Source workbook';
+      row.appendChild(name);
+      if (item.dates.length) {
+        const dates = document.createElement('div');
+        dates.className = 'small fw-semibold mb-1'; dates.textContent = `Dates: ${item.dates.join(', ')}`;
+        row.appendChild(dates);
+      }
+      row.appendChild(document.createTextNode(item.message));
+      if (item.refs.length) {
+        const refs = document.createElement('details'); refs.className = 'small text-muted mt-1';
+        const label = document.createElement('summary'); label.textContent = 'Source details'; refs.appendChild(label);
+        for (const text of item.refs) {
+          const line = document.createElement('div'); line.textContent = text; refs.appendChild(line);
+        }
+        row.appendChild(refs);
+      }
+      list.appendChild(row);
+    }
+    section.appendChild(list); box.appendChild(section);
+  }
+}
+
 function workforceSourceLabel(mode) {
   const labels = {daily_only:'Daily PDF only', combined:'Timesheet + Daily fallback', timesheet_only:'Timesheet only'};
   return labels[mode] || 'Daily PDF only';
@@ -2321,7 +2450,7 @@ function renderTimesheetPreview(result, status='') {
         result.daily_fallback_count ? `${result.daily_fallback_count} workers use Daily Report attendance/hours` : '',
       ].filter(Boolean).join(' · ')
     : 'No attendance workbook reviewed.';
-  renderWarningBox('timesheet-warnings', result ? workbookWarnings(result) : []);
+  renderTimesheetWarnings(result);
   const body = document.getElementById('timesheet-daily-body');
   body.replaceChildren();
   rows.forEach(row => {
