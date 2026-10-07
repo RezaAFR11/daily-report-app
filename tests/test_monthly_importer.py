@@ -362,8 +362,8 @@ class MonthlyPDFImporterTests(unittest.TestCase):
         with self.assertRaisesRegex(PDFValidationError, "per-file limit"):
             import_daily_report_pdf(PDF_BYTES, limits=limits)
 
-    def test_default_file_size_limit_is_50_mib_and_boundary_is_inclusive(self):
-        self.assertEqual(DEFAULT_LIMITS.max_bytes, 50 * 1024 * 1024)
+    def test_default_file_size_limit_is_100_mib_and_boundary_is_inclusive(self):
+        self.assertEqual(DEFAULT_LIMITS.max_bytes, 100 * 1024 * 1024)
         limits = ImportLimits(
             max_bytes=len(PDF_BYTES),
             max_pages=2,

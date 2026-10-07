@@ -925,7 +925,7 @@ let monthlyWorkforce = {};
 let monthlyAiSuggestion = null;
 let monthlyAlertTimer = null;
 const MAX_MONTHLY_UPLOAD_FILES = 35;
-const MAX_MONTHLY_PDF_BYTES = {{ pdf_upload_max_bytes|default(52428800)|int }};
+const MAX_MONTHLY_PDF_BYTES = {{ pdf_upload_max_bytes|default(104857600)|int }};
 const MAX_LEGACY_EXCEL_BYTES = {{ legacy_excel_upload_max_bytes|default(134217728)|int }};
 const MONTHLY_UPLOAD_CLEANUP_KEY = 'gpa-report-upload-cleanup';
 
@@ -1659,7 +1659,7 @@ function validateMonthlyUploadQueue() {
   if (nonPdf) throw new Error(`${nonPdf.file.name} is not a PDF file.`);
   const oversized = monthlyUploadQueue.find(item => item.file.size > MAX_MONTHLY_PDF_BYTES);
   if (oversized) {
-    throw new Error(`${oversized.file.name} exceeds the 50 MB per-file limit. Compress it and choose the files again.`);
+    throw new Error(`${oversized.file.name} exceeds the ${MAX_MONTHLY_PDF_BYTES / (1024 * 1024)} MB per-file limit. Compress it and choose the files again.`);
   }
 }
 

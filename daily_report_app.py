@@ -2225,7 +2225,7 @@ def request_entity_too_large(_error):
         return jsonify({
             'error': (
                 'PDF upload exceeds the request limit. Use the Weekly / Monthly Report page '
-                'to upload PDFs one at a time; each PDF may be up to 50 MB.'
+                f'to upload PDFs one at a time; each PDF may be up to {_REPORT_PDF_MAX_FILE_BYTES // (1024 * 1024)} MB.'
             )
         }), 413
     if request.path in ('/export_draft_bundle', '/import_draft_bundle'):

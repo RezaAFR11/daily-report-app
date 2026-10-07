@@ -57,7 +57,7 @@ class PDFExtractionError(PDFImportError):
 class ImportLimits:
     """Resource bounds applied to every individual PDF import."""
 
-    max_bytes: int = 50 * 1024 * 1024
+    max_bytes: int = 100 * 1024 * 1024
     max_pages: int = 50
     max_text_chars: int = 500_000
 
