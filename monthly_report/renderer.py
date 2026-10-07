@@ -2717,6 +2717,7 @@ def _appendices_story(
     manpower: Mapping[str, Any],
     photo_base_dir: str | os.PathLike[str] | None,
     chapter_number: int,
+    curve_note: str = "",
 ) -> list[Flowable]:
     story: list[Flowable] = []
     if visible_appendices:
@@ -2740,6 +2741,11 @@ def _appendices_story(
                 Spacer(1, 10),
                 _SCurveFlowable(labels, planned, actual, illustrative=illustrative),
             ])
+            if curve_note:
+                story.extend(_content_flowables(
+                    curve_note, styles,
+                    empty_message="", bullets=False,
+                ))
         elif content == "__reviewed_photos__":
             story.extend(_photo_grid_flowables(
                 photos,
@@ -2846,6 +2852,8 @@ def _build_story(
             visible_appendices,
             styles,
             curve=curve,
+            curve_note=str((report.get("s_curve") or {}).get("note", ""))
+            if isinstance(report.get("s_curve"), Mapping) else "",
             photos=photos,
             manpower=manpower,
             photo_base_dir=photo_base_dir,

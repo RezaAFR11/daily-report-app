@@ -596,6 +596,36 @@ def _save_monthly_index(data_dir: str | Path, username: str, rows: list[dict[str
     _atomic_json(_monthly_user_dir(data_dir, username) / "index.json", rows)
 
 
+def _refresh_history_s_curve(data_dir, username, report):
+    from .scurve import apply_history_curve
+
+    if report.get("report_type", "monthly") != "monthly":
+        return
+    root = (_monthly_user_dir(data_dir, username) / "reports").resolve()
+    history = []
+    for entry in get_monthly_reports_index(data_dir, username):
+        if (str(entry.get("status", "")).lower() != "final"
+                or entry.get("lifecycle_status", "active") != "active"
+                or entry.get("report_type", "monthly") != "monthly"
+                or str(entry.get("project_no", "")).strip().casefold() != str(report.get("project_no", "")).strip().casefold()):
+            continue
+        name = str(entry.get("json_filename") or "")
+        if not name or Path(name).name != name:
+            continue
+        path = (root / name).resolve()
+        if path.parent != root:
+            continue
+        try:
+            with path.open(encoding="utf-8") as handle:
+                old = json.load(handle)
+            if isinstance(old, dict):
+                old["lifecycle_status"] = entry.get("lifecycle_status", "active")
+                history.append(old)
+        except (OSError, ValueError, TypeError):
+            continue
+    apply_history_curve(report, history)
+
+
 def _save_draft(
     data_dir: str | Path,
     username: str,
@@ -626,6 +656,7 @@ def _save_draft(
     value["draft_id"] = draft_id
     value["owner"] = username
     value.setdefault("created_at", datetime.now().isoformat(timespec="seconds"))
+    _refresh_history_s_curve(data_dir, username, value)
     _atomic_json(drafts_dir / f"{draft_id}.json", value)
     return draft_id
 
@@ -641,6 +672,7 @@ def _load_draft(data_dir: str | Path, username: str, draft_id: str) -> dict[str,
             value = json.load(handle)
         if not isinstance(value, dict) or value.get("owner") != username:
             return None
+        _refresh_history_s_curve(data_dir, username, value)
         return value
     except (OSError, ValueError, TypeError):
         return None
@@ -650,6 +682,7 @@ def _update_draft(data_dir: str | Path, username: str, draft: dict[str, Any]) ->
     draft_id = str(draft.get("draft_id") or "")
     if not _DRAFT_ID_RE.fullmatch(draft_id):
         raise ValueError("Invalid report draft ID")
+    _refresh_history_s_curve(data_dir, username, draft)
     _atomic_json(_monthly_user_dir(data_dir, username) / "drafts" / f"{draft_id}.json", draft)
 
 
@@ -8319,6 +8352,7 @@ def _generate_periodic_report_request(
     try:
         reviewed = _apply_review(draft, body, actor=session.get("username", ""))
         _refresh_deterministic_summary(reviewed)
+        _refresh_history_s_curve(data_dir, username, reviewed)
         is_final, preflight = _periodic_generation_preflight(
             reviewed,
             data_dir=data_dir,
