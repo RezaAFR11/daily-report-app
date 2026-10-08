@@ -1322,6 +1322,48 @@ app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'gpa-daily-report-s3cr3t-2026')
 app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_UPLOAD_BYTES', 128 * 1024 * 1024))
 
+def _positive_env_bytes(name, default):
+    """Read a positive byte limit while keeping a safe default for bad env values."""
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+DAILY_SAVE_DRAFT_MAX_BYTES = _positive_env_bytes(
+    'DAILY_SAVE_DRAFT_MAX_BYTES',
+    32 * 1024 * 1024,
+)
+DAILY_GENERATE_MAX_BYTES = _positive_env_bytes(
+    'DAILY_GENERATE_MAX_BYTES',
+    48 * 1024 * 1024,
+)
+DAILY_PREVIEW_MAX_BYTES = _positive_env_bytes(
+    'DAILY_PREVIEW_MAX_BYTES',
+    48 * 1024 * 1024,
+)
+def _daily_json_request(max_bytes, endpoint_name):
+    """Reject oversized Daily JSON before Flask reads and decodes its body."""
+    content_length = request.content_length
+    if content_length is not None and content_length > max_bytes:
+        max_mb = max_bytes / (1024 * 1024)
+        return None, (
+            jsonify({
+                'error': (
+                    f'{endpoint_name} JSON payload is too large '
+                    f'(maximum {max_mb:g} MB). Upload photos first '
+                    'and send their filenames.'
+                ),
+                'max_bytes': max_bytes,
+            }),
+            413,
+        )
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return None, (jsonify({'error': 'Invalid report data'}), 400)
+    return payload, None
+
 SCRIPT_DIR        = os.path.dirname(os.path.abspath(__file__))
 # Keep mutable data outside the deployed source when DATA_DIR is configured.
 # Railway should mount a persistent Volume at this path (for example /data).
@@ -1812,6 +1854,10 @@ def resolve_photos(d, username):
         for photo in area.get('photos', []):
             if not photo.get('img_data') and photo.get('photo_filename'):
                 fname = photo['photo_filename']
+                if not isinstance(fname, str) or not _SAFE_PHOTO.fullmatch(fname):
+                    raise ValueError('Invalid photo reference. Please upload the photo again.')
+                if not os.path.isfile(os.path.join(temp_dir, fname)):
+                    raise ValueError('A stored photo is missing. Please upload the photo again.')
                 if _SAFE_PHOTO.match(fname):
                     fpath = os.path.join(temp_dir, fname)
                     if os.path.isfile(fpath):
@@ -1820,7 +1866,8 @@ def resolve_photos(d, username):
                             ext = fname.rsplit('.', 1)[-1].lower()
                             mime = 'image/jpeg' if ext in ('jpg','jpeg') else f'image/{ext}'
                             photo['img_data'] = f'data:{mime};base64,{base64.b64encode(raw).decode()}'
-                        except: pass
+                        except OSError as exc:
+                            raise ValueError('A stored photo cannot be read. Please upload it again.') from exc
     return d
 
 @app.route('/upload_temp_photo', methods=['POST'])
@@ -1892,9 +1939,9 @@ def serve_temp_photo(filename):
 @login_required
 def generate():
     username = session['username']
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict):
-        return jsonify({'error': 'Invalid report data'}), 400
+    payload, error_response = _daily_json_request(DAILY_GENERATE_MAX_BYTES, 'Generate')
+    if error_response:
+        return error_response
 
     try:
         # Keep an unmodified copy for the immutable final JSON archive.  The
@@ -1906,6 +1953,8 @@ def generate():
         day_str = _safe_report_filename_part(d.get('day_no'), 'Unnumbered')
         fname = f"Daily Report - PT GPA - KN - {date_str} (Day {day_str}).pdf"
         buf = generate_pdf(d, None, cfg)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
         app.logger.exception('PDF generation failed for user %s', username)
         return jsonify({'error': f'PDF generation failed: {e}'}), 500
@@ -1976,7 +2025,9 @@ def generate():
 @login_required
 def save_draft():
     username = session['username']
-    data = request.json
+    data, error_response = _daily_json_request(DAILY_SAVE_DRAFT_MAX_BYTES, 'Save draft')
+    if error_response:
+        return error_response
     with open(get_draft_file(username),'w') as f:
         json.dump(data, f)
     save_draft_snapshot(username, data)
@@ -1987,8 +2038,11 @@ def save_draft():
 @app.route('/preview', methods=['POST'])
 @login_required
 def preview():
+    payload, error_response = _daily_json_request(DAILY_PREVIEW_MAX_BYTES, 'Preview')
+    if error_response:
+        return error_response
     try:
-        d = resolve_photos(request.json, session['username'])
+        d = resolve_photos(payload, session['username'])
         cfg = load_config()
         buf = generate_pdf(d, None, cfg)
         return send_file(buf, mimetype='application/pdf')

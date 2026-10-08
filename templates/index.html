@@ -1844,17 +1844,22 @@ function addPhoto(btn, d={}) {
   const col   = document.createElement('div');
   col.className = 'col-12 col-sm-6 col-md-4';
   // Support server-stored photos (photo_filename) or legacy base64 (img_data)
-  const hasFilename = !!d.photo_filename;
+  const missingFilename = !!d.photo_filename && d.photo_missing === true;
+  const hasFilename = !!d.photo_filename && !missingFilename;
   const hasImg = !hasFilename && d.img_data && d.img_data.includes(',');
-  const previewSrc = hasFilename ? `/temp_photo/${d.photo_filename}` : (hasImg ? d.img_data : '');
+  const previewSrc = hasFilename ? `/temp_photo/${encodeURIComponent(d.photo_filename)}` : (hasImg ? d.img_data : '');
   const isFilled = hasFilename || hasImg;
+  const placeholder = missingFilename
+    ? `⚠️ Photo file missing<br><span style="font-size:.72rem">${esc(d.photo_filename)}</span>`
+    : `📷 No photo<br><span style="font-size:.72rem">Browse or paste below</span>`;
   col.innerHTML = `
-    <div class="photo-box${isFilled?' filled':''}">
-      <div class="photo-ph"${isFilled?' style="display:none"':''}>📷 No photo<br><span style="font-size:.72rem">Browse or paste below</span></div>
+    <div class="photo-box${isFilled?' filled':''}" data-upload-state="${missingFilename?'failed':(hasFilename?'ready':'idle')}">
+      <div class="photo-ph"${isFilled?' style="display:none"':''}>${placeholder}</div>
       <img class="photo-prev${isFilled?' show':''}" src="${previewSrc}" alt="photo">
       <input type="text" class="form-control form-control-sm photo-desc" maxlength="300"
              placeholder="Description / caption…" value="${esc(d.desc||'')}">
       <div class="photo-btns">
+        <button class="btn btn-sm btn-outline-warning photo-retry" style="font-size:.75rem;${missingFilename?'':'display:none;'}" onclick="retryPhotoUpload(this)" title="Retry photo upload">Retry</button>
         <label class="btn btn-sm btn-outline-secondary" style="font-size:.75rem;flex:1;">
           📁 Browse / Multi<input type="file" accept="image/*" multiple style="display:none" onchange="handlePhotoFile(this)">
         </label>
@@ -1863,10 +1868,21 @@ function addPhoto(btn, d={}) {
       </div>
       <input type="hidden" class="photo-data" value="">
       <input type="hidden" class="photo-filename" value="${esc(d.photo_filename||'')}">
+      <input type="hidden" class="photo-missing" value="${missingFilename?'true':''}">
     </div>`;
   cont.appendChild(col);
 
   const box = col.querySelector('.photo-box');
+  const preview = box.querySelector('.photo-prev');
+  if (hasFilename) {
+    preview.addEventListener('error', () => {
+      box.dataset.uploadState = 'failed';
+      box.dataset.uploadError = 'Stored photo file is unavailable.';
+      box.querySelector('.photo-missing').value = 'true';
+      const retry = box.querySelector('.photo-retry');
+      if (retry) retry.style.display = '';
+    }, {once:true});
+  }
   box.setAttribute('tabindex','0');
   box.addEventListener('paste', e => {
     const items = (e.clipboardData||window.clipboardData).items;
@@ -1881,7 +1897,7 @@ function addPhoto(btn, d={}) {
 
   // Old-format draft: has base64 img_data but no server filename → re-compress & upload to server now
   if (hasImg && !hasFilename) {
-    recompressDataUrl(d.img_data).then(compressed => setPhoto(box, compressed));
+    _prepareLegacyMedia(box, d.img_data, 1280, 0.74, setPhoto);
   }
 }
 
@@ -1914,9 +1930,8 @@ async function pastePhoto(btn) {
       for (const type of item.types) {
         if (type.startsWith('image/')) {
           const blob = await item.getType(type);
-          const reader = new FileReader();
-          reader.onload = e => setPhoto(box, e.target.result);
-          reader.readAsDataURL(blob); return;
+          const compressed = await compressImage(blob);
+          setPhoto(box, compressed); return;
         }
       }
     }
@@ -1956,6 +1971,138 @@ function dataUrlToBlob(dataUrl) {
   return new Blob([arr], {type: mime});
 }
 
+function _prepareLegacyMedia(box, dataUrl, maxPx, quality, setter) {
+  const root = box;
+  const dataInput = root.querySelector('.photo-data');
+  const retryButton = root.querySelector('.photo-retry');
+  dataInput.value = dataUrl;
+  box.dataset.uploadState = 'uploading';
+  _pendingUploads++;
+  recompressDataUrl(dataUrl, maxPx, quality)
+    .then(compressed => setter(box, compressed))
+    .catch(error => {
+      box.dataset.uploadState = 'failed';
+      box.dataset.uploadError = error.message || 'Legacy media could not be prepared.';
+      if (retryButton) retryButton.style.display = '';
+    })
+    .finally(() => {
+      _pendingUploads = Math.max(0, _pendingUploads - 1);
+    });
+}
+
+async function _startMediaUpload(box, dataUrl, kind) {
+  const root = box;
+  const dataInput = root.querySelector('.photo-data');
+  const filenameInput = root.querySelector('.photo-filename');
+  const retryButton = root.querySelector('.photo-retry');
+  const token = String(++_mediaUploadSequence);
+
+  box.dataset.uploadToken = token;
+  box.dataset.uploadState = 'uploading';
+  box.dataset.uploadError = '';
+  if (retryButton) retryButton.style.display = 'none';
+
+  let blob;
+  try {
+    blob = dataUrlToBlob(dataUrl);
+  } catch (error) {
+    box.dataset.uploadState = 'failed';
+    box.dataset.uploadError = error.message;
+    if (retryButton) retryButton.style.display = '';
+    toast(`Photo could not be prepared for upload.`, 'warning');
+    return false;
+  }
+
+  _pendingUploads++;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 25000);
+  try {
+    const form = new FormData();
+    form.append('photo', blob, 'photo.jpg');
+    const response = await fetch(`/upload_temp_photo?kind=${encodeURIComponent(kind)}`, {
+      method: 'POST',
+      body: form,
+      signal: controller.signal,
+    });
+    let result = {};
+    try { result = await response.json(); } catch (_) {}
+    if (!response.ok || !result.ok || !result.photo_filename) {
+      throw new Error(result.error || `Upload failed (${response.status})`);
+    }
+
+    // Ignore late responses after the user replaces or clears this media.
+    if (box.dataset.uploadToken !== token) return false;
+    filenameInput.value = result.photo_filename;
+    dataInput.value = '';
+    box.dataset.uploadState = 'ready';
+    box.dataset.uploadError = '';
+    if (retryButton) retryButton.style.display = 'none';
+    return true;
+  } catch (error) {
+    if (box.dataset.uploadToken === token) {
+      const message = error.name === 'AbortError'
+        ? 'Upload timed out. Check the connection and retry.'
+        : error.message;
+      box.dataset.uploadState = 'failed';
+      box.dataset.uploadError = message;
+      if (retryButton) retryButton.style.display = '';
+      toast(`Photo upload failed. Use Retry before saving or generating.`, 'warning');
+    }
+    return false;
+  } finally {
+    clearTimeout(timeout);
+    _pendingUploads = Math.max(0, _pendingUploads - 1);
+    if (_pendingUploads === 0 && _draftSaveDeferredForMedia && !_hasMediaUploadFailures()) {
+      _draftSaveDeferredForMedia = false;
+      setTimeout(() => saveDraft({automatic:true}), 0);
+    }
+  }
+}
+
+function retryPhotoUpload(btn) {
+  const box = btn.closest('.photo-box');
+  const dataUrl = box.querySelector('.photo-data').value;
+  if (!dataUrl || !dataUrl.includes(',')) {
+    toast('Photo data is unavailable. Please browse or paste the photo again.', 'warning');
+    return;
+  }
+  _startMediaUpload(box, dataUrl, 'photo');
+}
+
+function _hasMediaUploadFailures() {
+  return Array.from(document.querySelectorAll('.photo-box'))
+    .some(box => box.dataset.uploadState === 'failed');
+}
+
+async function _ensureMediaReady(action, timeoutMs=27000) {
+  let showedProgress = false;
+  if (_pendingUploads > 0) {
+    _setProgress('Finishing media uploads…', 10);
+    showedProgress = true;
+    const deadline = Date.now() + timeoutMs;
+    while (_pendingUploads > 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+  }
+  if (_pendingUploads > 0) {
+    _hideProgress();
+    toast(`Media upload is taking too long. Retry before you ${action}.`, 'warning');
+    return false;
+  }
+  if (_hasMediaUploadFailures()) {
+    _hideProgress();
+    toast(`A photo upload failed. Retry or replace it before you ${action}.`, 'warning');
+    return false;
+  }
+  if (_payloadContainsInlineMedia(collectData())) {
+    _hideProgress();
+    toast('Photos are not ready. Retry the upload before continuing.', 'warning');
+    return false;
+  }
+  if (showedProgress) _hideProgress();
+  return true;
+}
+
 function setPhoto(box, dataUrl) {
   // Show preview immediately from local data
   const img = box.querySelector('.photo-prev');
@@ -1964,28 +2111,22 @@ function setPhoto(box, dataUrl) {
   box.classList.add('filled');
   box.querySelector('.photo-data').value = dataUrl;   // temporary until server upload done
   box.querySelector('.photo-filename').value = '';
+  box.querySelector('.photo-missing').value = '';
 
   // Upload to server as binary (FormData) — avoids base64 33% overhead → stays under nginx limit
-  _pendingUploads++;
-  const blob = dataUrlToBlob(dataUrl);
-  const fd = new FormData();
-  fd.append('photo', blob, 'photo.jpg');
-  fetch('/upload_temp_photo', {method: 'POST', body: fd})
-  .then(r => r.json())
-  .then(j => {
-    if (j.ok && j.photo_filename) {
-      box.querySelector('.photo-filename').value = j.photo_filename;
-      box.querySelector('.photo-data').value = '';   // free memory, server holds the file
-    }
-  })
-  .catch(() => { /* keep base64 in photo-data as fallback */ })
-  .finally(() => { _pendingUploads = Math.max(0, _pendingUploads - 1); });
+  _startMediaUpload(box, dataUrl, 'photo');
 }
 
 function clearPhoto(btn) {
   const box = btn.closest('.photo-box');
+  box.dataset.uploadToken = String(++_mediaUploadSequence);
   box.querySelector('.photo-data').value = '';
   box.querySelector('.photo-filename').value = '';
+  box.querySelector('.photo-missing').value = '';
+  box.dataset.uploadState = 'idle';
+  box.dataset.uploadError = '';
+  const retry = box.querySelector('.photo-retry');
+  if (retry) retry.style.display = 'none';
   const img = box.querySelector('.photo-prev');
   img.src = ''; img.classList.remove('show');
   box.querySelector('.photo-ph').style.display = '';
@@ -2288,7 +2429,10 @@ function populateForm(d) {
 // GENERATE PDF
 // ════════════════════════════════════════════════════════════
 async function generatePDF() {
-  if (!validateForm()) return;
+  if (_pdfGenerationInFlight || !validateForm()) return;
+  _pdfGenerationInFlight = true;
+  try {
+  if (!await _ensureMediaReady('generate the PDF')) return;
 
   // Check for duplicate report date
   const reportDate = (document.getElementById('f_date') || {}).value;
@@ -2310,16 +2454,6 @@ async function generatePDF() {
   if (btn) { btn.innerHTML = '⏳ Generating…'; btn.disabled = true; }
 
   try {
-    // Step 1 — wait for any in-flight photo uploads to finish
-    if (_pendingUploads > 0) {
-      _setProgress('📤 Uploading photos… please wait', 10);
-      await new Promise(resolve => {
-        const poll = setInterval(() => {
-          if (_pendingUploads === 0) { clearInterval(poll); resolve(); }
-        }, 250);
-      });
-    }
-
     // Step 2 — send to server and animate progress while waiting
     _setProgress('⚙️ Building PDF on server…', 20);
     _animateProgress(20, 85, 12000);   // animate over 12 s (covers most reports)
@@ -2374,6 +2508,9 @@ async function generatePDF() {
   } finally {
     if (btn) { btn.innerHTML = orig; btn.disabled = false; }
   }
+  } finally {
+    _pdfGenerationInFlight = false;
+  }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -2382,6 +2519,8 @@ async function generatePDF() {
 // ════════════════════════════════════════════════════════════
 // GENERATION PROGRESS BAR
 // ════════════════════════════════════════════════════════════
+let _mediaUploadSequence = 0;
+let _pdfGenerationInFlight = false;
 let _pendingUploads = 0;   // tracks in-flight photo uploads
 let _genTimer = null;
 
@@ -2415,6 +2554,7 @@ function previewPDF() {
 }
 
 async function renderPDFPreview() {
+  if (!await _ensureMediaReady('preview the PDF')) return;
   if (!_previewModal) _previewModal = new bootstrap.Modal(document.getElementById('previewModal'));
   const frame = document.getElementById('previewFrame');
   const loading = document.getElementById('previewLoading');
@@ -2749,27 +2889,7 @@ function checkLogoStatus() {
 // ════════════════════════════════════════════════════════════
 // PHOTO PASTE
 // ════════════════════════════════════════════════════════════
-function pastePhoto(btn) {
-  const box = btn.closest('.photo-box');
-  if (!navigator.clipboard || !navigator.clipboard.read) {
-    alert('Clipboard paste not supported. Please use Browse.');
-    return;
-  }
-  navigator.clipboard.read().then(items => {
-    for (const item of items) {
-      const type = item.types.find(t => t.startsWith('image/'));
-      if (type) {
-        item.getType(type).then(blob => {
-          const reader = new FileReader();
-          reader.onload = e => setPhoto(box, e.target.result);
-          reader.readAsDataURL(blob);
-        });
-        return;
-      }
-    }
-    alert('No image in clipboard.');
-  }).catch(() => alert('Clipboard access denied.'));
-}
+
 
 // ════════════════════════════════════════════════════════════
 // DEFAULTS ON FRESH FORM
@@ -2804,7 +2924,10 @@ function initSignOffDefaults() {
 // ════════════════════════════════════════════════════════════
 // SAVE DRAFT PERIODICALLY + ON UNLOAD
 // ════════════════════════════════════════════════════════════
-let _draftSaveQueue = Promise.resolve(true);
+let _draftSaveInFlight = false;
+let _draftSavePending = null;
+let _draftSavePromise = Promise.resolve(true);
+let _draftSaveDeferredForMedia = false;
 
 function loadDraftFromServer() {
   fetch('/load_draft')
@@ -2835,31 +2958,76 @@ function showAutosaveStatus(message, type='info', autoHide=true) {
   }
 }
 
-function saveDraft() {
-  // Capture the payload at invocation time and serialize writes so rapid
-  // saves cannot let an older request overwrite the newest form data.
-  const payload = collectData();
-  const runSave = () => {
-    showAutosaveStatus('💾 Saving…', 'info', false);
-    return fetch('/save_draft', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload),
-    })
-    .then(async response => {
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || `Server returned ${response.status}`);
-      showAutosaveStatus(`✓ Saved ${data.saved_at||''}`, 'success');
-      return true;
-    })
-    .catch(() => {
-      showAutosaveStatus('⚠ Draft save failed.', 'danger');
-      return false;
-    });
-  };
+function _payloadContainsInlineMedia(payload) {
+  return (payload.areas || []).some(area => (area.photos || []).some(photo =>
+    typeof photo.img_data === 'string' && photo.img_data.includes(',')));
+}
 
-  _draftSaveQueue = _draftSaveQueue.then(runSave, runSave);
-  return _draftSaveQueue;
+async function _drainDraftSaves() {
+  _draftSaveInFlight = true;
+  let allSaved = true;
+  try {
+    // Keep one request in flight and only the newest waiting payload.
+    while (_draftSavePending) {
+      const pending = _draftSavePending;
+      _draftSavePending = null;
+      const body = JSON.stringify(pending.payload);
+      const keepalive = pending.keepalive === true && new Blob([body]).size <= 60 * 1024;
+      showAutosaveStatus('💾 Saving…', 'info', false);
+      try {
+        const response = await fetch('/save_draft', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body,
+          keepalive,
+        });
+        let data = {};
+        try { data = await response.json(); } catch (_) {}
+        if (!response.ok) {
+          throw new Error(data.error || `Server returned ${response.status}`);
+        }
+        showAutosaveStatus(`✓ Saved ${data.saved_at||''}`, 'success');
+      } catch (error) {
+        allSaved = false;
+        showAutosaveStatus(`⚠ Draft save failed: ${error.message}`, 'danger');
+      }
+    }
+  } finally {
+    _draftSaveInFlight = false;
+  }
+  return allSaved;
+}
+
+function saveDraft(options={}) {
+  const automatic = options && options.automatic === true;
+  if (_pendingUploads > 0) {
+    _draftSaveDeferredForMedia = true;
+    showAutosaveStatus('Waiting for media upload before saving…', 'info');
+    return Promise.resolve(false);
+  }
+  if (_hasMediaUploadFailures()) {
+    showAutosaveStatus('Retry failed media before saving.', 'danger');
+    if (!automatic) {
+      toast('Draft was not overwritten because a media upload failed.', 'warning');
+    }
+    return Promise.resolve(false);
+  }
+
+  const payload = collectData();
+  if (_payloadContainsInlineMedia(payload)) {
+    showAutosaveStatus('Media is not ready; draft was not sent.', 'danger');
+    return Promise.resolve(false);
+  }
+
+  _draftSaveDeferredForMedia = false;
+  _draftSavePending = {
+    payload,
+    keepalive: options && options.keepalive === true,
+  };
+  if (!_draftSaveInFlight) {
+    _draftSavePromise = _drainDraftSaves();
+  }
+  return _draftSavePromise;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -3388,10 +3556,15 @@ document.addEventListener('DOMContentLoaded', () => {
   updateAutoDay();
 
   // Auto-save draft every 90s
-  setInterval(saveDraft, 90000);
+  setInterval(() => saveDraft({automatic:true}), 90000);
 
   // Save on page unload
-  window.addEventListener('beforeunload', saveDraft);
+  window.addEventListener('beforeunload', event => {
+    if (_pendingUploads > 0 || _hasMediaUploadFailures() || _draftSaveInFlight) {
+      event.preventDefault();
+      event.returnValue = '';
+    }
+  });
 
   // Hint update
   updateHint();
