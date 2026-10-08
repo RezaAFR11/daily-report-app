@@ -599,30 +599,34 @@ def _save_monthly_index(data_dir: str | Path, username: str, rows: list[dict[str
 def _refresh_history_s_curve(data_dir, username, report):
     from .scurve import apply_history_curve
 
-    if report.get("report_type", "monthly") != "monthly":
+    kind = report.get("report_type") or "monthly"
+    if kind not in ("monthly", "weekly"):
         return
     root = (_monthly_user_dir(data_dir, username) / "reports").resolve()
     history = []
     for entry in get_monthly_reports_index(data_dir, username):
         if (str(entry.get("status", "")).lower() != "final"
                 or entry.get("lifecycle_status", "active") != "active"
-                or entry.get("report_type", "monthly") != "monthly"
+                or (entry.get("report_type") or "monthly") != kind
                 or str(entry.get("project_no", "")).strip().casefold() != str(report.get("project_no", "")).strip().casefold()):
             continue
         name = str(entry.get("json_filename") or "")
-        if not name or Path(name).name != name:
-            continue
+        old = {"status": entry.get("status"), "project_no": entry.get("project_no"),
+               "report_type": kind, "revision": entry.get("revision", 0),
+               "generated_at": entry.get("generated_at", ""),
+               "period": {"start": entry.get("period_start"), "end": entry.get("period_end")}}
         path = (root / name).resolve()
-        if path.parent != root:
-            continue
-        try:
-            with path.open(encoding="utf-8") as handle:
-                old = json.load(handle)
-            if isinstance(old, dict):
-                old["lifecycle_status"] = entry.get("lifecycle_status", "active")
-                history.append(old)
-        except (OSError, ValueError, TypeError):
-            continue
+        if name and Path(name).name == name and path.parent == root:
+            try:
+                with path.open(encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    old = loaded
+            except (OSError, ValueError, TypeError):
+                pass
+        old["lifecycle_status"] = entry.get("lifecycle_status", "active")
+        old["_history_id"] = name or str(entry.get("report_id") or entry.get("filename") or "")
+        history.append(old)
     apply_history_curve(report, history)
 
 
@@ -4893,6 +4897,15 @@ def _apply_reviewed_site(
 def _apply_review(draft: dict[str, Any], review: dict[str, Any], *, actor: str = "") -> dict[str, Any]:
     value = copy.deepcopy(draft)
     kind = _report_type(value.get("report_type") or "monthly")
+    if kind in ("monthly", "weekly") and "s_curve_selection" in review:
+        selection = review["s_curve_selection"]
+        if (not isinstance(selection, dict) or not isinstance(selection.get("enabled"), bool)
+                or not isinstance(selection.get("report_ids", []), list)
+                or len(selection.get("report_ids", [])) > 240
+                or any(not isinstance(key, str) or len(key) > 255 for key in selection.get("report_ids", []))):
+            raise ValueError("Invalid S-Curve selection.")
+        value["s_curve_selection"] = {"enabled": selection["enabled"],
+                                      "report_ids": list(dict.fromkeys(selection.get("report_ids", [])))}
     mode = _normalise_report_mode(kind, review.get("report_mode") or value.get("report_mode"))
     period = value.get("period") if isinstance(value.get("period"), dict) else {}
     _parse_period(period.get("start"), period.get("end"), kind, mode)
@@ -5471,6 +5484,8 @@ def _issued_report_copy(report: dict[str, Any]) -> dict[str, Any]:
     value = copy.deepcopy(report)
     value.pop("_source_records", None)
     value.pop("ai_request_control", None)
+    for key in ("s_curve_candidates", "s_curve_current_point", "s_curve_selection_error"):
+        value.pop(key, None)
     # Per-person Daily rows are retained only in editable drafts for attendance
     # reconciliation, following the same boundary as raw timesheet identities.
     manpower = value.get("manpower")
@@ -7888,6 +7903,8 @@ def _preview_periodic_report_request(
         reviewed = _apply_review(draft, body, actor=session.get("username", ""))
         _refresh_deterministic_summary(reviewed)
         _update_draft(data_dir, session["username"], reviewed)
+        if reviewed.get("s_curve_selection_error"):
+            raise ValueError(reviewed["s_curve_selection_error"])
         buffer = _render(
             reviewed,
             config_provider(),
@@ -8353,6 +8370,8 @@ def _generate_periodic_report_request(
         reviewed = _apply_review(draft, body, actor=session.get("username", ""))
         _refresh_deterministic_summary(reviewed)
         _refresh_history_s_curve(data_dir, username, reviewed)
+        if reviewed.get("s_curve_selection_error"):
+            raise ValueError(reviewed["s_curve_selection_error"])
         is_final, preflight = _periodic_generation_preflight(
             reviewed,
             data_dir=data_dir,

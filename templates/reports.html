@@ -774,6 +774,23 @@
           </table>
         </div>
 
+        <div class="border rounded p-3 mb-4 d-none" id="scurve-selection-panel">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="include-history-scurve" onchange="updateSCurveSelection()">
+            <label class="form-check-label fw-bold" for="include-history-scurve">Include S-Curve</label>
+          </div>
+          <div class="small text-muted mt-1" id="scurve-selection-help">Select saved Final reports from this project. Cumulative percentages are compared, never added. The current period is included when progress data is available.</div>
+          <div id="scurve-selection-details" class="d-none mt-3">
+            <div class="table-responsive"><table class="table table-sm table-bordered">
+              <thead><tr><th>Use</th><th>Reporting period</th><th>Revision</th><th>Progress source date</th><th>Plan %</th><th>Actual %</th><th>Status</th></tr></thead>
+              <tbody id="scurve-source-rows"></tbody>
+            </table></div>
+            <div class="small mb-2" id="scurve-current-point"></div>
+            <div class="small mb-2" id="scurve-selection-message" role="status"></div>
+            <button type="button" class="btn btn-sm btn-outline-primary" id="scurve-preview-button" onclick="previewMonthly()">Preview S-Curve in Report</button>
+          </div>
+        </div>
+
         <div class="section-label">Safety Status</div>
         <div class="row g-2 mb-4">
           <div class="col-6 col-md-3"><label class="form-label small">Total Manpower</label><input type="number" min="0" class="form-control" id="review-total-manpower"></div>
@@ -2135,7 +2152,87 @@ function renderGroupedWarnings(element, warnings, manifest = []) {
   }
 }
 
+let sCurveCurrentPoint = null;
+let sCurveCandidates = [];
+function populateSCurveSelection(draft) {
+  document.getElementById('scurve-selection-panel').classList.toggle('d-none', !['weekly', 'monthly'].includes(reportType));
+  document.getElementById('scurve-selection-help').textContent = `Select earlier Final ${reportType} reports from this project by reporting period. Cumulative percentages are compared, never added. The current period is included when progress data is available.`;
+  sCurveCurrentPoint = draft.s_curve_current_point || null;
+  sCurveCandidates = draft.s_curve_candidates || [];
+  const selection = draft.s_curve_selection || {};
+  document.getElementById('include-history-scurve').checked = selection.enabled === true;
+  const selected = new Set(selection.report_ids || []);
+  const tbody = document.getElementById('scurve-source-rows');
+  tbody.replaceChildren();
+  sCurveCandidates.forEach(candidate => {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    const input = document.createElement('input');
+    input.type = 'checkbox'; input.className = 'form-check-input'; input.value = candidate.id;
+    input.disabled = !candidate.available; input.checked = candidate.available && selected.has(candidate.id);
+    input.setAttribute('aria-label', `Use report ${candidate.period_start} to ${candidate.period_end}, revision ${candidate.revision}`);
+    input.addEventListener('change', updateSCurveSelection);
+    td.appendChild(input); tr.appendChild(td);
+    const point = candidate.point || {};
+    [`${candidate.period_start} to ${candidate.period_end}`, `R${candidate.revision}`, point.date || '—',
+      point.plan ?? '—', point.actual ?? '—', candidate.available ? 'Available' : 'Progress data unavailable'].forEach(value => {
+      const cell = document.createElement('td'); cell.textContent = value; tr.appendChild(cell);
+    });
+    tbody.appendChild(tr);
+  });
+  document.getElementById('scurve-current-point').textContent = sCurveCurrentPoint
+    ? `Current period: ${sCurveCurrentPoint.date} · Plan ${sCurveCurrentPoint.plan}% · Actual ${sCurveCurrentPoint.actual}% (included automatically; final values follow the progress review).`
+    : 'Current period: progress data unavailable; no point will be invented.';
+  updateSCurveSelection();
+}
+
+function updateSCurveSelection() {
+  const enabled = document.getElementById('include-history-scurve').checked;
+  document.getElementById('scurve-selection-details').classList.toggle('d-none', !enabled);
+  const selected = new Set(Array.from(document.querySelectorAll('#scurve-source-rows input:checked')).map(input => input.value));
+  const chosen = sCurveCandidates.filter(c => selected.has(c.id) && c.point);
+  const points = chosen.map(c => c.point);
+  if (sCurveCurrentPoint) points.push(sCurveCurrentPoint);
+  const dates = [...new Set(points.map(p => p.date))].sort();
+  const duplicate = points.length !== dates.length;
+  const months = new Set(dates.map(d => d.slice(0, 7)));
+  const gaps = [];
+  if (reportType === 'monthly' && dates.length > 1) {
+    let year = Number(dates[0].slice(0, 4)), month = Number(dates[0].slice(5, 7));
+    const end = dates[dates.length - 1].slice(0, 7);
+    for (let i = 0; i < 1200; i++) {
+      const key = `${year}-${String(month).padStart(2, '0')}`;
+      if (key >= end) break;
+      if (!months.has(key)) gaps.push(key);
+      if (++month > 12) { month = 1; year++; }
+    }
+  }
+  if (reportType === 'weekly') {
+    const periods = chosen.map(c => ({start:c.period_start, end:c.period_end}));
+    if (sCurveCurrentPoint) periods.push({start:sCurveCurrentPoint.period_start, end:sCurveCurrentPoint.period_end});
+    periods.sort((a, b) => a.start.localeCompare(b.start));
+    let end = periods.length ? periods[0].end : '';
+    for (const period of periods.slice(1)) {
+      const next = new Date(`${end}T00:00:00Z`);
+      next.setUTCDate(next.getUTCDate() + 1);
+      if (next.toISOString().slice(0,10) < period.start) {
+        const last = new Date(`${period.start}T00:00:00Z`);
+        last.setUTCDate(last.getUTCDate() - 1);
+        gaps.push(`${next.toISOString().slice(0,10)} to ${last.toISOString().slice(0,10)}`);
+      }
+      if (period.end > end) end = period.end;
+    }
+  }
+  const message = document.getElementById('scurve-selection-message');
+  message.textContent = duplicate ? 'Select only one report for each progress source date.'
+    : dates.length < 2 ? 'Select at least two different source dates, including the current period when available.'
+    : `${dates.length} source dates selected.${gaps.length ? ` No selected data for: ${gaps.join(', ')}. Connecting lines do not represent measured progress in those periods.` : ''}`;
+  message.className = `small mb-2 ${duplicate || dates.length < 2 || gaps.length ? 'text-warning-emphasis' : 'text-muted'}`;
+  document.getElementById('scurve-preview-button').disabled = !enabled || duplicate || dates.length < 2;
+}
+
 function populateMonthlyReview(draft) {
+  populateSCurveSelection(draft);
   const coverage = draft.coverage || {};
   document.getElementById('coverage-included').textContent = coverage.included_count ?? (draft.source_manifest || []).length;
   document.getElementById('coverage-missing').textContent = (coverage.missing_dates || []).length;
@@ -3300,6 +3397,10 @@ function collectMonthlyReview() {
   });
   return {
     report_type:reportType,
+    ...(['weekly', 'monthly'].includes(reportType) ? {s_curve_selection: {
+      enabled: document.getElementById('include-history-scurve').checked,
+      report_ids: Array.from(document.querySelectorAll('#scurve-source-rows input:checked')).map(input => input.value),
+    }} : {}),
     report_mode:document.getElementById('monthly-report-mode').value,
     confirm_final:document.getElementById('review-confirm-final').checked,
     source_validation:sourceValidationPayload(),

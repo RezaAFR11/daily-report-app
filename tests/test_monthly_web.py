@@ -489,6 +489,7 @@ class MonthlyWebRouteTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def _compile_stored(self, report_mode="mtd", report_type="monthly"):
+        date_to = "2026-07-07" if report_type == "weekly" else "2026-07-02"
         with patch("monthly_report.web.list_canonical_records", return_value=self.records) as loader:
             response = self.client.post(
                 "/monthly/compile/stored",
@@ -496,7 +497,7 @@ class MonthlyWebRouteTests(unittest.TestCase):
                     "project_no": PROJECT_NO,
                     "project_title": PROJECT_TITLE,
                     "date_from": "2026-07-01",
-                    "date_to": "2026-07-02",
+                    "date_to": date_to,
                     "report_mode": report_mode,
                     "report_type": report_type,
                 },
@@ -505,7 +506,7 @@ class MonthlyWebRouteTests(unittest.TestCase):
             str(self.data_dir),
             username="reza",
             date_from="2026-07-01",
-            date_to="2026-07-02",
+            date_to=date_to,
         )
         return response
 
@@ -657,6 +658,50 @@ class MonthlyWebRouteTests(unittest.TestCase):
         )
         self.assertTrue(draft_path.is_file())
         self.assertEqual(json.loads(draft_path.read_text(encoding="utf-8"))["owner"], "reza")
+
+    def test_manual_history_curve_preview_and_final_recheck(self):
+        self._check_manual_history_curve('monthly')
+
+    def test_weekly_manual_history_curve_preview_and_final_recheck(self):
+        self._check_manual_history_curve('weekly')
+
+    def _check_manual_history_curve(self, kind):
+        from monthly_report.web import _monthly_user_dir, _save_monthly_index
+        old = {
+            "status": "FINAL", "report_type": kind, "project_no": PROJECT_NO,
+            "revision": 1, "period": {"start": "2026-06-24", "end": "2026-06-30"},
+            "progress": {"rows": [{"description": "OVERALL PROGRESS", "is_total": True,
+                "source_date": "2026-06-30", "plan": 25, "to_date": 20}]},
+        }
+        root = _monthly_user_dir(self.data_dir, "reza") / "reports"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "june.json").write_text(json.dumps(old), encoding="utf-8")
+        _save_monthly_index(self.data_dir, "reza", [{"status": "FINAL", "project_no": PROJECT_NO,
+            "json_filename": "june.json", "revision": 1, "report_type": kind}])
+        compiled = self._compile_stored(report_type=kind, report_mode='draft')
+        self.assertEqual(compiled.status_code, 200, compiled.get_data(as_text=True))
+        body = compiled.get_json()
+        validated = self._apply_source_validation(body)
+        draft_id = validated['draft_id']
+        self.assertFalse(validated['draft']['include_s_curve'])
+        self.assertEqual(validated['draft']['s_curve_candidates'][0]['id'], 'june.json')
+        selection = {'enabled': True, 'report_ids': ['june.json']}
+        preview = self.client.post(f'/monthly/preview/{draft_id}', json={'s_curve_selection': selection})
+        self.assertEqual(preview.status_code, 200, preview.get_data(as_text=False)[:100])
+        text = '\n'.join(p.extract_text() for p in PdfReader(io.BytesIO(preview.data)).pages)
+        self.assertIn('Progress S-Curve', text)
+        self.assertIn('2026-06-30', text)
+        preview.close()
+        _save_monthly_index(self.data_dir, 'reza', [])
+        final = self.client.post(f'/monthly/generate/{draft_id}', json={
+            's_curve_selection': selection, 'report_mode': 'final', 'confirm_final': True})
+        self.assertEqual(final.status_code, 400)
+        self.assertIn('selected S-Curve report is unavailable', final.get_json()['error'])
+        off = self.client.post(f'/monthly/preview/{draft_id}', json={
+            's_curve_selection': {'enabled': False, 'report_ids': []}})
+        self.assertEqual(off.status_code, 200)
+        self.assertNotIn('Progress S-Curve', '\n'.join(p.extract_text() for p in PdfReader(io.BytesIO(off.data)).pages))
+        off.close()
 
     def test_stored_json_photo_is_reviewable_and_rendered_in_dynamic_appendix(self):
         self._attach_canonical_photo(self.records[0])
