@@ -12,7 +12,7 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 from reportlab.platypus import (BaseDocTemplate, Table, TableStyle, Paragraph,
-                               Spacer, PageBreak, Image, KeepTogether)
+                               Spacer, Image, KeepTogether)
 
 PAGE_W, PAGE_H = A4
 MARGIN = 8 * mm
@@ -182,49 +182,48 @@ def photo_tables(report):
         empty=table([[cell('DOCUMENTATION PHOTO',DOCUMENTATION_TITLE)], [cell('-')]], [WIDTH],
                     commands=[('BACKGROUND',(0,0),(-1,0),DOCUMENTATION_GREEN)])
         return [empty]
-    result=[];cw=WIDTH/3;card_w=cw-6;image_h=34*mm
-    for start in range(0,len(photos),12):
-        if result: result.append(PageBreak())
-        rows=[[cell('DOCUMENTATION PHOTO',DOCUMENTATION_TITLE),'','']]
-        for r in range(start,min(start+12,len(photos)),3):
-            prepared=[]
-            for area,desc,source in photos[r:min(r+3,start+12)]:
-                try: image=cover_image(source,card_w,image_h)
-                except Exception as exc:
-                    raise ValueError('A documentation photo cannot be read. Replace it before generating.') from exc
-                label=' / '.join(str(v).strip() for v in (report.get('photo_documentation_title'),area) if v)
-                prepared.append((cell(label,BOLD),cell(desc,PHOTO_CAPTION),image))
-            # Align image tops across the row without truncating longer captions.
-            title_h=max(title.wrap(card_w-4,PAGE_H)[1] for title,_,_ in prepared)+4
-            caption_h=max(caption.wrap(card_w-4,PAGE_H)[1] for _,caption,_ in prepared)+4
-            cards=[]
-            for title,caption,image in prepared:
-                card=Table([[title],[caption],[image]],colWidths=[card_w],
-                           rowHeights=[title_h,caption_h,image_h],hAlign='LEFT')
-                card.setStyle(TableStyle([
-                    ('VALIGN',(0,0),(-1,-1),'TOP'),
-                    ('LEFTPADDING',(0,0),(-1,-1),0),
-                    ('RIGHTPADDING',(0,0),(-1,-1),0),
-                    ('TOPPADDING',(0,0),(-1,-1),0),
-                    ('BOTTOMPADDING',(0,0),(-1,-1),0),
-                    ('LEFTPADDING',(0,0),(0,1),2),
-                    ('RIGHTPADDING',(0,0),(0,1),2),
-                    ('TOPPADDING',(0,0),(0,1),2),
-                    ('BOTTOMPADDING',(0,0),(0,1),2),
-                    ('BACKGROUND',(0,0),(0,0),colors.HexColor('#dcecf6')),
-                    ('BACKGROUND',(0,1),(0,1),colors.HexColor('#f8f9fa')),
-                    ('BOX',(0,0),(-1,-1),.5,colors.HexColor('#00b7ef')),
-                    ('LINEBELOW',(0,0),(0,1),.4,colors.HexColor('#00b7ef')),
-                ]))
-                cards.append(card)
-            rows.append(cards+['']*(3-len(cards)))
-        grid=table(rows,[cw]*3,1,[('SPAN',(0,0),(-1,0)),
-                   ('BACKGROUND',(0,0),(-1,0),DOCUMENTATION_GREEN),
-                   ('LEFTPADDING',(0,1),(-1,-1),3),('RIGHTPADDING',(0,1),(-1,-1),3),
-                   ('TOPPADDING',(0,1),(-1,-1),3),('BOTTOMPADDING',(0,1),(-1,-1),3)])
-        grid.splitInRow=0  # Keep each photo and its caption together.
-        result.append(grid)
-    return result
+    # A continuous grid fills remaining page space. The image height keeps
+    # at most four complete photo rows on an A4 page with the repeated header.
+    cw=WIDTH/3;card_w=cw-6;image_h=40*mm
+    rows=[[cell('DOCUMENTATION PHOTO',DOCUMENTATION_TITLE),'','']]
+    for r in range(0,len(photos),3):
+        prepared=[]
+        for area,desc,source in photos[r:r+3]:
+            try: image=cover_image(source,card_w,image_h)
+            except Exception as exc:
+                raise ValueError('A documentation photo cannot be read. Replace it before generating.') from exc
+            label=' / '.join(str(v).strip() for v in (report.get('photo_documentation_title'),area) if v)
+            prepared.append((cell(label,BOLD),cell(desc,PHOTO_CAPTION),image))
+        # Align image tops across the row without truncating longer captions.
+        title_h=max(title.wrap(card_w-4,PAGE_H)[1] for title,_,_ in prepared)+4
+        caption_h=max(caption.wrap(card_w-4,PAGE_H)[1] for _,caption,_ in prepared)+4
+        cards=[]
+        for title,caption,image in prepared:
+            card=Table([[title],[caption],[image]],colWidths=[card_w],
+                       rowHeights=[title_h,caption_h,image_h],hAlign='LEFT')
+            card.setStyle(TableStyle([
+                ('VALIGN',(0,0),(-1,-1),'TOP'),
+                ('LEFTPADDING',(0,0),(-1,-1),0),
+                ('RIGHTPADDING',(0,0),(-1,-1),0),
+                ('TOPPADDING',(0,0),(-1,-1),0),
+                ('BOTTOMPADDING',(0,0),(-1,-1),0),
+                ('LEFTPADDING',(0,0),(0,1),2),
+                ('RIGHTPADDING',(0,0),(0,1),2),
+                ('TOPPADDING',(0,0),(0,1),2),
+                ('BOTTOMPADDING',(0,0),(0,1),2),
+                ('BACKGROUND',(0,0),(0,0),colors.HexColor('#dcecf6')),
+                ('BACKGROUND',(0,1),(0,1),colors.HexColor('#f8f9fa')),
+                ('BOX',(0,0),(-1,-1),.5,colors.HexColor('#00b7ef')),
+                ('LINEBELOW',(0,0),(0,1),.4,colors.HexColor('#00b7ef')),
+            ]))
+            cards.append(card)
+        rows.append(cards+['']*(3-len(cards)))
+    grid=table(rows,[cw]*3,1,[('SPAN',(0,0),(-1,0)),
+               ('BACKGROUND',(0,0),(-1,0),DOCUMENTATION_GREEN),
+               ('LEFTPADDING',(0,1),(-1,-1),3),('RIGHTPADDING',(0,1),(-1,-1),3),
+               ('TOPPADDING',(0,1),(-1,-1),3),('BOTTOMPADDING',(0,1),(-1,-1),3)])
+    grid.splitInRow=0  # Keep each photo and its caption together.
+    return [grid]
 
 
 def signatures(report, signature_cell):
@@ -256,7 +255,7 @@ def build_story(report, signature_cell):
                   [[i,v] for i,v in enumerate(today,1)],[[i,v] for i,v in enumerate(tomorrow,1)],
                   [8*mm,WIDTH/2-8*mm]),Spacer(1,4*mm),
            paired('D. INDIRECT MANPOWER','E. DIRECT MANPOWER',['No.','Description','Qty','Working Hours'],
-                  manpower(indirect),manpower(direct),[7*mm,WIDTH/2-39*mm,10*mm,22*mm]),PageBreak(),
+                  manpower(indirect),manpower(direct),[7*mm,WIDTH/2-39*mm,10*mm,22*mm]),Spacer(1,4*mm),
            numbered('F. CONSTRAINTS / PROBLEM',named_lines(report,'constraints')),Spacer(1,4*mm),
            numbered('G. REMARKS',lines(report.get('global_remarks'))+named_lines(report,'remarks')),Spacer(1,4*mm)]
     keys=['description','bq_contract','progress_today','total_accum','progress_percent']
@@ -268,7 +267,7 @@ def build_story(report, signature_cell):
         ('SPAN',(0,0),(-1,0)),('VALIGN',(0,1),(-1,1),'MIDDLE'),
         ('LEFTPADDING',(0,1),(-1,1),2),('RIGHTPADDING',(0,1),(-1,1),2)]),Spacer(1,5*mm)]
     story += signatures(report,signature_cell)
-    story += [PageBreak()]+photo_tables(report)
+    story += [Spacer(1,4*mm)]+photo_tables(report)
     return story
 
 
