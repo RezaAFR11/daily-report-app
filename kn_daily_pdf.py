@@ -121,30 +121,20 @@ def weather_cell(value, max_width=12*mm, max_height=8*mm):
 
 
 def weather(report):
-    values=(list(report.get('kn_weather_hourly') or [])+['']*11)[:11]
-    conclusions=(list(report.get('kn_weather_intervals') or [])+['']*4)[:4]
-    rows=[[cell('A. WEATHER REPORT',BOLD)]+['']*10,
-          [cell(f'{h:02d}:00 - {h+1:02d}:00',CENTER) for h in range(7,18)],
-          [cell(v,CENTER) for v in values]]
-    commands=[('SPAN',(0,0),(-1,0)),('VALIGN',(0,2),(-1,2),'MIDDLE')]
-    # Conclusions are independent admin selections, not calculated from hourly text.
-    blocks=['']*11
-    for i,(start,end,label) in enumerate([(0,2,'07:00 - 10:00'),(3,5,'10:00 - 13:00'),
-                                         (6,8,'13:00 - 16:00'),(9,10,'16:00 - 18:00')]):
-        content=weather_cell(conclusions[i],20*mm,14*mm)
-        blocks[start]=[cell(label,CENTER),Spacer(1,3)]+(content if isinstance(content,list) else [content])
-        commands.append(('SPAN',(start,3),(end,3)))
-    rows.append(blocks)
-    commands.append(('VALIGN',(0,3),(-1,3),'MIDDLE'))
-    commands.append(('ALIGN',(0,3),(-1,3),'CENTER'))
-    # Preserve old period-level notes as text; do not infer a selected conclusion.
-    observed=any(str(v or '').strip() for v in values)
-    legacy=[f'{k}: {v}' for k,v in (report.get('weather') or {}).items()
-            if str(v or '').strip() and (not observed or k in ('Wind','Temperature','Impact'))]
-    if legacy:
-        row=len(rows);rows.append([cell('Reported weather: '+ '; '.join(legacy))]+['']*10)
-        commands.append(('SPAN',(0,row),(-1,row)))
-    return table(rows,[WIDTH/11]*11,2,commands)
+    legacy=report.get('weather') or {}
+    periods=['Morning','Afternoon','Evening','Dusk']
+    values=report.get('kn_weather_intervals')
+    if values is None:
+        values=[legacy.get(k,'') for k in periods]
+    values=(list(values)+['']*4)[:4]
+    times=['07.00–10.00','10.00–13.00','13.00–16.00','16.00–18.00']
+    headings=[cell(f'{name}\n{time}',HEADER_CENTER) for name,time in zip(periods,times)]
+    headings += [cell(v,HEADER_CENTER) for v in ['Wind','Temperature (°C)','Impact on Work']]
+    rows=[[cell('A. WEATHER REPORT',BOLD)]+['']*6,headings,
+          [weather_cell(v,18*mm,13*mm) for v in values]+
+          [cell(legacy.get(k),CENTER) for k in ['Wind','Temperature','Impact']]]
+    return table(rows,[WIDTH/7]*7,2,[('SPAN',(0,0),(-1,0)),
+                 ('ALIGN',(0,1),(-1,-1),'CENTER'),('VALIGN',(0,1),(-1,-1),'MIDDLE')])
 
 
 def header_table(report):
@@ -243,6 +233,57 @@ def signatures(report, signature_cell):
     return result
 
 
+def progress_table(report):
+    import math
+    def number(value):
+        value=str(value if value is not None else '').strip().replace('%','').replace(' ','')
+        value=value.replace(',','.') if ',' in value and '.' not in value else value.replace(',','')
+        try:
+            value=float(value)
+            return value if math.isfinite(value) else None
+        except ValueError:
+            return None
+    def percent(value):
+        n=number(value)
+        return f'{n:g}%' if n is not None else text(value)
+    small=ParagraphStyle('progress-small',parent=CENTER,fontSize=5.5,leading=7)
+    bold=ParagraphStyle('progress-bold',parent=small,fontName='Helvetica-Bold')
+    base=['description','duration','weight_factor','start','finish']
+    metrics=['cumulative_previous_plan','cumulative_previous_actual','this_period_plan',
+             'this_period_actual','cumulative_to_date_plan','cumulative_to_date_actual']
+    rows=[[cell('H. CONCLUSION',BOLD)]+['']*12,
+          [cell(v,bold) for v in ['No.','Description','Duration','Weight Factor','Start','Finish',
+           'Cumulative Previous','','This Period','','Cumulative To Date','','']],
+          ['']*6+[cell(v,bold) for v in ['Plan','Actual','Plan','Actual','Plan','Actual','Deviation']]]
+    entries=[r for r in report.get('overall_progress',[]) if isinstance(r,dict) and any(str(v or '').strip() for v in r.values())]
+    totals={k:None for k in metrics}
+    for i,r in enumerate(entries,1):
+        values=[str(i)]+[percent(r.get(k)) if k=='weight_factor' else r.get(k) for k in base]
+        values += [percent(r.get(k)) for k in metrics]
+        plan,actual=number(r.get(metrics[-2])),number(r.get(metrics[-1]))
+        values += [percent(actual-plan) if plan is not None and actual is not None else '-']
+        rows.append([cell(v,small) for v in values])
+        weight=number(r.get('weight_factor'))
+        for k in metrics:
+            value=number(r.get(k))
+            if weight is not None and value is not None:
+                totals[k]=(totals[k] or 0)+weight*value/100
+    commands=[('SPAN',(0,0),(-1,0)),('SPAN',(6,1),(7,1)),('SPAN',(8,1),(9,1)),
+              ('SPAN',(10,1),(12,1)),('VALIGN',(0,1),(-1,-1),'MIDDLE'),
+              ('LEFTPADDING',(0,1),(-1,-1),2),('RIGHTPADDING',(0,1),(-1,-1),2)]
+    commands += [('SPAN',(i,1),(i,2)) for i in range(6)]
+    if entries:
+        plan,actual=totals[metrics[-2]],totals[metrics[-1]]
+        rows.append([cell('OVERALL PROGRESS',bold)]+['']*5+
+                    [cell(percent(totals[k]),bold) for k in metrics]+
+                    [cell(percent(actual-plan) if plan is not None and actual is not None else '-',bold)])
+        commands += [('SPAN',(0,len(rows)-1),(5,len(rows)-1)),('BACKGROUND',(0,len(rows)-1),(-1,len(rows)-1),BLUE)]
+    else:
+        rows.append([cell('-',small) for _ in range(13)])
+    widths=[6,35,12,13,15,15]+[14]*7
+    return table(rows,[WIDTH*w/sum(widths) for w in widths],3,commands)
+
+
 def build_story(report, signature_cell):
     today=named_lines(report,'activities_today'); tomorrow=named_lines(report,'activities_tomorrow')
     indirect=list(report.get('indirect_manpower') or [])
@@ -258,14 +299,18 @@ def build_story(report, signature_cell):
                   manpower(indirect),manpower(direct),[7*mm,WIDTH/2-39*mm,10*mm,22*mm]),Spacer(1,4*mm),
            numbered('F. CONSTRAINTS / PROBLEM',named_lines(report,'constraints')),Spacer(1,4*mm),
            numbered('G. REMARKS',lines(report.get('global_remarks'))+named_lines(report,'remarks')),Spacer(1,4*mm)]
-    keys=['description','bq_contract','progress_today','total_accum','progress_percent']
-    entries=[r for r in report.get('kn_conclusion',[]) if any(r.get(k) is not None and str(r.get(k)).strip() for k in keys)]
-    rows=[[cell('H. CONCLUSION',BOLD)]+['']*5,
-          [cell(h,HEADER_CENTER) for h in ['No.','Description','BQ Contract','Progress Today','Total Accum.','Progress (%)']]]
-    rows += [[cell(i)]+[cell(r.get(k)) for k in keys] for i,r in enumerate(entries,1)] or [[cell(1)]+[cell('-')]*5]
-    story += [table(rows,[8*mm,WIDTH-96*mm,22*mm,22*mm,22*mm,22*mm],2,[
-        ('SPAN',(0,0),(-1,0)),('VALIGN',(0,1),(-1,1),'MIDDLE'),
-        ('LEFTPADDING',(0,1),(-1,1),2),('RIGHTPADDING',(0,1),(-1,1),2)]),Spacer(1,5*mm)]
+    if report.get('show_conclusion', True) not in (False, 'false', 'off', '0', 0):
+        if report.get('kn_conclusion_mode') == 'overall_progress':
+            story += [progress_table(report), Spacer(1,5*mm)]
+        else:
+            keys=['description','bq_contract','progress_today','total_accum','progress_percent']
+            entries=[r for r in report.get('kn_conclusion',[]) if any(r.get(k) is not None and str(r.get(k)).strip() for k in keys)]
+            rows=[[cell('H. CONCLUSION',BOLD)]+['']*5,
+                  [cell(h,HEADER_CENTER) for h in ['No.','Description','BQ Contract','Progress Today','Total Accum.','Progress (%)']]]
+            rows += [[cell(i)]+[cell(r.get(k)) for k in keys] for i,r in enumerate(entries,1)] or [[cell(1)]+[cell('-')]*5]
+            story += [table(rows,[8*mm,WIDTH-96*mm,22*mm,22*mm,22*mm,22*mm],2,[
+                ('SPAN',(0,0),(-1,0)),('VALIGN',(0,1),(-1,1),'MIDDLE'),
+                ('LEFTPADDING',(0,1),(-1,1),2),('RIGHTPADDING',(0,1),(-1,1),2)]),Spacer(1,5*mm)]
     story += signatures(report,signature_cell)
     story += [Spacer(1,4*mm)]+photo_tables(report)
     return story

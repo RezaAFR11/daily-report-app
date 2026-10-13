@@ -301,35 +301,8 @@
     <span>🌤️ <span class="form-step-number">Step 2 · </span>Weather Report</span>
   </div>
   <div class="card-body">
-    <div class="fld-lbl">Hourly Weather (07:00?18:00)</div>
-    <p class="small text-muted">Fill observed hours only. When all hours are blank, the weather entries below are used.</p>
-    <div id="kn_hourly_fields" class="row g-2 mb-3"></div>
-    <div class="fld-lbl">Weather conclusion by interval</div>
-    <p class="small text-muted">Select each icon separately after reviewing the hourly weather. These choices do not change the hourly entries.</p>
     <div id="kn_weather_interval_fields" class="row g-2 mb-3"></div>
-    <datalist id="weather_conditions">
-      <option value="Sunny"></option><option value="Cloud"></option>
-      <option value="Rain"></option><option value="Lightning"></option>
-    </datalist>
     <div class="row g-2">
-      <div class="col-6 col-md-2">
-        <div class="fld-lbl">Morning</div>
-        <select id="wx_morning" class="form-select form-select-sm">
-          <option>Sunny</option><option>Partly Cloudy</option><option>Cloudy</option><option>Rainy</option><option>Heavy Rain</option>
-        </select>
-      </div>
-      <div class="col-6 col-md-2">
-        <div class="fld-lbl">Afternoon</div>
-        <select id="wx_afternoon" class="form-select form-select-sm">
-          <option>Sunny</option><option>Partly Cloudy</option><option>Cloudy</option><option>Rainy</option><option>Heavy Rain</option>
-        </select>
-      </div>
-      <div class="col-6 col-md-2">
-        <div class="fld-lbl">Evening</div>
-        <select id="wx_evening" class="form-select form-select-sm">
-          <option>Sunny</option><option>Partly Cloudy</option><option>Cloudy</option><option>Rainy</option><option>Heavy Rain</option>
-        </select>
-      </div>
       <div class="col-6 col-md-2">
         <div class="fld-lbl">Wind</div>
         <select id="wx_wind" class="form-select form-select-sm">
@@ -371,31 +344,30 @@
 </div>
 
 <div class="card mb-3 border-0 shadow-sm report-section">
-  <div class="card-header section-hdr"><span id="conclusionSectionNo">Step 4 ? </span>Conclusion</div>
-  <div class="card-body">
+  <div class="card-header section-hdr d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span>Step 4 · Conclusion / Overall Progress</span>
+    <div class="form-check form-switch mb-0">
+      <input id="showConclusion" class="form-check-input" type="checkbox" checked onchange="syncConclusionSection()">
+      <label for="showConclusion" id="conclusionToggleLabel">ON · Show in Report</label>
+    </div>
+  </div>
+  <div class="px-3 pt-3">
+    <label for="conclusionMode" class="fld-lbl">Table type</label>
+    <select id="conclusionMode" class="form-select form-select-sm" onchange="syncConclusionSection()">
+      <option value="conclusion">Conclusion</option><option value="overall_progress">Overall Progress</option>
+    </select>
+  </div>
+  <div class="card-body" id="conclusionBody">
     <div class="table-responsive"><table class="table table-sm table-bordered">
       <thead><tr><th>Description</th><th>BQ Contract</th><th>Progress Today</th><th>Total Accum.</th><th>Progress (%)</th><th></th></tr></thead>
       <tbody id="kn_conclusion_rows"></tbody>
     </table></div>
     <button type="button" class="btn btn-sm btn-outline-primary" onclick="addKNConclusion()">Add conclusion row</button>
   </div>
-</div>
 
-<!-- Legacy progress values retained when loading existing drafts. -->
-<div class="card mb-3 border-0 shadow-sm report-section" id="overallProgressCard" hidden>
-  <div class="card-header section-hdr d-flex justify-content-between align-items-center flex-wrap gap-2">
-    <span>📈 <span id="overallProgressSectionNo"></span>Overall Progress <span id="overallProgressInactiveBadge" class="badge bg-secondary ms-1">Inactive</span></span>
-    <div class="d-flex align-items-center flex-wrap gap-3">
-      <div class="form-check form-switch mb-0">
-        <input class="form-check-input" type="checkbox" role="switch" id="showOverallProgress"
-               onchange="syncOverallProgressSection()" aria-expanded="false">
-        <label class="form-check-label text-white" for="showOverallProgress" id="overallProgressToggleLabel" style="font-size:.75rem;">
-          OFF · Show in Report
-        </label>
-      </div>
-      <button type="button" class="btn btn-sm btn-outline-light d-none" id="addOverallProgressBtn" onclick="addOverallProgressRow()">+ Add Progress Item</button>
-    </div>
-  </div>
+<div id="overallProgressCard" hidden>
+  <input type="checkbox" id="showOverallProgress" hidden>
+  <div class="px-3 pt-2"><button type="button" class="btn btn-sm btn-outline-primary" id="addOverallProgressBtn" onclick="addOverallProgressRow()">+ Add Progress Item</button></div>
   <div class="card-body p-2 d-none" id="overallProgressBody">
     <div class="table-responsive">
       <table class="table table-sm table-bordered overall-progress-table mb-1">
@@ -450,10 +422,12 @@
   </div>
 </div>
 
+</div>
+
 <!-- ── S5: Areas ── -->
 <div class="card mb-3 border-0 shadow-sm report-section">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center">
-    <span>📍 <span id="areasSectionNo">Step 4 · </span>Daily Activities &amp; Manpower by Area</span>
+    <span>📍 <span id="areasSectionNo">Step 5 · </span>Daily Activities &amp; Manpower by Area</span>
     <div class="d-flex gap-2 align-items-center">
       <button class="btn btn-sm btn-outline-light" onclick="addAreaBlock()">+ Add Area</button>
     </div>
@@ -474,7 +448,7 @@
 <!-- ── S6: Sign-Off Builder ── -->
 <div class="card mb-3 border-0 shadow-sm report-section">
   <div class="card-header section-hdr d-flex justify-content-between align-items-center">
-    <span>✍️ <span id="signOffSectionNo">Step 5 · </span>Sign-Off Columns</span>
+    <span>✍️ <span id="signOffSectionNo">Step 6 · </span>Sign-Off Columns</span>
     <div class="d-flex gap-2 align-items-center">
       <button class="btn btn-sm btn-outline-light" onclick="addSignOffCol()">+ Add Column</button>
     </div>
@@ -1172,16 +1146,18 @@ function applySectionOrder(sectionOrder) {
 }
 
 function updateFormStepNumbering() {
-  const firstSteps = document.querySelectorAll('.form-step-number');
-  firstSteps.forEach((label, index) => { label.textContent = `Step ${index + 1} · `; });
-  const overallEnabled = document.getElementById('showOverallProgress')?.checked === true;
-  const overallLabel = document.getElementById('overallProgressSectionNo');
-  const areasLabel = document.getElementById('areasSectionNo');
-  const signOffLabel = document.getElementById('signOffSectionNo');
-  let nextStep = 4;
-  if (overallLabel) overallLabel.textContent = overallEnabled ? `Step ${nextStep++} · ` : 'Optional · ';
-  if (areasLabel) areasLabel.textContent = `Step ${nextStep++} · `;
-  if (signOffLabel) signOffLabel.textContent = `Step ${nextStep} · `;
+  document.querySelectorAll('.form-step-number').forEach((label,index)=>label.textContent=`Step ${index+1} · `);
+  document.getElementById('areasSectionNo').textContent='Step 5 · ';
+  document.getElementById('signOffSectionNo').textContent='Step 6 · ';
+}
+function syncConclusionSection() {
+  const enabled=document.getElementById('showConclusion').checked;
+  const progress=document.getElementById('conclusionMode').value==='overall_progress';
+  document.getElementById('conclusionBody').hidden=!enabled || progress;
+  document.getElementById('overallProgressCard').hidden=!enabled || !progress;
+  document.getElementById('showOverallProgress').checked=enabled && progress;
+  document.getElementById('conclusionToggleLabel').textContent=`${enabled?'ON':'OFF'} · Show in Report`;
+  syncOverallProgressSection();
 }
 
 function isOverallProgressIncluded() {
@@ -2299,7 +2275,7 @@ function collectKNConclusion() {
 function populateWeatherIntervals(values=[]) {
   const container=document.getElementById('kn_weather_interval_fields');container.replaceChildren();
   const choices={Sunny:'sunny',Cloud:'cloud',Rain:'rain',Lightning:'lightning'};
-  ['07:00?10:00','10:00?13:00','13:00?16:00','16:00?18:00'].forEach((interval,i)=>{
+  ['Morning (07.00–10.00)','Afternoon (10.00–13.00)','Evening (13.00–16.00)','Dusk (16.00–18.00)'].forEach((interval,i)=>{
     const col=document.createElement('div');col.className='col-6 col-md-3';
     const card=document.createElement('div');card.className='border rounded p-2 text-center h-100';
     const label=document.createElement('label');label.className='fld-lbl d-block';label.textContent=interval;
@@ -2326,16 +2302,11 @@ function populateWeatherIntervals(values=[]) {
 }
 
 function populateKNFields(data={}) {
-  populateWeatherIntervals(data.kn_weather_intervals || []);
+  populateWeatherIntervals(data.kn_weather_intervals || ['Morning','Afternoon','Evening','Dusk'].map(k=>data.weather?.[k] || ''));
   document.getElementById('f_work_package').value=data.work_package || '';
-  const hourly=document.getElementById('kn_hourly_fields');hourly.replaceChildren();
-  for(let i=0;i<11;i++) {
-    const col=document.createElement('div');col.className='col-6 col-md-2';
-    const label=document.createElement('label');label.className='fld-lbl';
-    label.textContent=`${String(i+7).padStart(2,'0')}:00?${String(i+8).padStart(2,'0')}:00`;
-    const input=document.createElement('input');input.className='form-control form-control-sm';input.value=data.kn_weather_hourly?.[i] || '';
-    input.setAttribute('aria-label',label.textContent);input.setAttribute('list','weather_conditions');col.append(label,input);hourly.appendChild(col);
-  }
+  document.getElementById('conclusionMode').value=data.kn_conclusion_mode==='overall_progress'?'overall_progress':'conclusion';
+  document.getElementById('showConclusion').checked=coerceReportFlag(data.show_conclusion,true);
+  syncConclusionSection();
   document.getElementById('kn_conclusion_rows').replaceChildren();
   (data.kn_conclusion || []).forEach(addKNConclusion);
 }
@@ -2354,6 +2325,7 @@ function collectData() {
     ['Impact',      'wx_impact'],
   ];
   wxFields.forEach(([label, eid]) => { const el = document.getElementById(eid); if (el) weather[label] = el.value; });
+  document.querySelectorAll('#kn_weather_interval_fields select').forEach((el,i)=>weather[['Morning','Afternoon','Evening','Dusk'][i]]=el.value);
 
   // Global indirect manpower
   const indirect_manpower = [];
@@ -2447,7 +2419,8 @@ function collectData() {
     global_remarks: v('f_global_remarks'),
     work_package: v('f_work_package'),
     kn_conclusion: collectKNConclusion(),
-    kn_weather_hourly: Array.from(document.querySelectorAll('#kn_hourly_fields input')).map(input=>input.value.trim()),
+    kn_conclusion_mode: v('conclusionMode'),
+    show_conclusion: document.getElementById('showConclusion').checked,
     kn_weather_intervals: Array.from(document.querySelectorAll('#kn_weather_interval_fields select')).map(input=>input.value),
     weather,
     indirect_manpower,
@@ -2486,11 +2459,7 @@ function populateForm(d) {
   document.getElementById('indirectContainer').innerHTML = '';
   (d.indirect_manpower || []).forEach(p => addIndirectRow(p));
 
-  // Overall progress always starts collapsed when a form is opened or loaded.
-  // Existing rows are still restored into the hidden table and remain intact.
-  const overallProgressToggle = document.getElementById('showOverallProgress');
-  if (overallProgressToggle) overallProgressToggle.checked = false;
-  syncOverallProgressSection();
+  syncConclusionSection();
   document.getElementById('overallProgressContainer').innerHTML = '';
   (Array.isArray(d.overall_progress) ? d.overall_progress : []).forEach(row => addOverallProgressRow(row));
   renumberOverallProgressRows();
@@ -2703,8 +2672,7 @@ function clearFormConfirm() {
   document.getElementById('indirectContainer').innerHTML = '';
   document.getElementById('overallProgressContainer').innerHTML = '';
   const overallProgressToggle = document.getElementById('showOverallProgress');
-  if (overallProgressToggle) overallProgressToggle.checked = false;
-  syncOverallProgressSection();
+  syncConclusionSection();
   _aidx = 0; _soidx = 0;
   ['f_date','f_day_no','f_location','f_customer','f_equipment',
    'f_prepared_by','f_checked_by','f_approved_by','f_global_remarks',
@@ -3544,6 +3512,8 @@ function applyAIUpdates(badge) {
 
   // Weather
   if (updates.weather) {
+    const current=Array.from(document.querySelectorAll('#kn_weather_interval_fields select')).map(el=>el.value);
+    populateWeatherIntervals(['Morning','Afternoon','Evening','Dusk'].map((k,i)=>updates.weather[k] ?? current[i]));
     const wxMap = { Morning:'wx_morning', Afternoon:'wx_afternoon', Evening:'wx_evening',
                     Wind:'wx_wind', Temperature:'wx_temp', Impact:'wx_impact' };
     Object.entries(wxMap).forEach(([k,id]) => {
@@ -3561,8 +3531,9 @@ function applyAIUpdates(badge) {
   if (updates.show_overall_progress !== undefined) {
     const overallProgressToggle = document.getElementById('showOverallProgress');
     if (overallProgressToggle) {
-      overallProgressToggle.checked = coerceReportFlag(updates.show_overall_progress, false);
-      syncOverallProgressSection();
+      document.getElementById('conclusionMode').value='overall_progress';
+      document.getElementById('showConclusion').checked=coerceReportFlag(updates.show_overall_progress,false);
+      syncConclusionSection();
     }
   }
   if (Array.isArray(updates.overall_progress) && updates.overall_progress.length > 0) {
