@@ -304,6 +304,10 @@
     <div class="fld-lbl">Hourly Weather (07:00?18:00)</div>
     <p class="small text-muted">Fill observed hours only. When all hours are blank, the weather entries below are used.</p>
     <div id="kn_hourly_fields" class="row g-2 mb-3"></div>
+    <datalist id="weather_conditions">
+      <option value="Sunny"></option><option value="Cloud"></option>
+      <option value="Rain"></option><option value="Lightning"></option>
+    </datalist>
     <div class="row g-2">
       <div class="col-6 col-md-2">
         <div class="fld-lbl">Morning</div>
@@ -2297,7 +2301,7 @@ function populateKNFields(data={}) {
     const label=document.createElement('label');label.className='fld-lbl';
     label.textContent=`${String(i+7).padStart(2,'0')}:00?${String(i+8).padStart(2,'0')}:00`;
     const input=document.createElement('input');input.className='form-control form-control-sm';input.value=data.kn_weather_hourly?.[i] || '';
-    input.setAttribute('aria-label',label.textContent);col.append(label,input);hourly.appendChild(col);
+    input.setAttribute('aria-label',label.textContent);input.setAttribute('list','weather_conditions');col.append(label,input);hourly.appendChild(col);
   }
   document.getElementById('kn_conclusion_rows').replaceChildren();
   (data.kn_conclusion || []).forEach(addKNConclusion);

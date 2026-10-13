@@ -3,6 +3,7 @@ import base64
 import io
 from html import escape
 from itertools import zip_longest
+from pathlib import Path
 
 from PIL import Image as PILImage, ImageOps
 from reportlab.lib import colors
@@ -25,6 +26,16 @@ PHOTO_CAPTION = ParagraphStyle('kn-photo-caption', parent=SMALL, fontName='Helve
 DOCUMENTATION_TITLE = ParagraphStyle('documentation-title', parent=BOLD, fontSize=16, leading=19, alignment=1)
 DOCUMENTATION_GREEN = colors.HexColor('#d6e3bc')
 CENTER = ParagraphStyle('kn-center', parent=SMALL, alignment=1)
+WEATHER_ICON_DIR = Path(__file__).parent / 'static' / 'pdf_assets' / 'weather'
+WEATHER_ICONS = {
+    'sunny': 'sunny', 'clear': 'sunny', 'cerah': 'sunny',
+    'cloud': 'cloud', 'cloudy': 'cloud', 'partly cloudy': 'cloud',
+    'overcast': 'cloud', 'berawan': 'cloud', 'mendung': 'cloud',
+    'rain': 'rain', 'rainy': 'rain', 'light rain': 'rain', 'heavy rain': 'rain',
+    'hujan': 'rain', 'hujan ringan': 'rain', 'hujan lebat': 'rain',
+    'lightning': 'lightning', 'thunderstorm': 'lightning',
+    'petir': 'lightning', 'badai petir': 'lightning',
+}
 
 
 def text(value):
@@ -92,6 +103,20 @@ def manpower(people):
     return out
 
 
+def weather_cell(value):
+    """Keep the supplied label and add the matching original Word icon."""
+    label = text(value)
+    icon = WEATHER_ICONS.get(' '.join(label.casefold().split()))
+    if not icon:
+        return cell(label, CENTER)
+    path = WEATHER_ICON_DIR / f'{icon}.png'
+    with PILImage.open(path) as source:
+        scale = min(12*mm/source.width, 8*mm/source.height)
+        width, height = source.width*scale, source.height*scale
+    return [Image(str(path), width=width, height=height, hAlign='CENTER'),
+            Spacer(1, 2), cell(label, CENTER)]
+
+
 def weather(report):
     values=(list(report.get('kn_weather_hourly') or [])+['']*11)[:11]
     rows=[[cell('A. WEATHER REPORT',BOLD)]+['']*10,
@@ -100,13 +125,25 @@ def weather(report):
     observed=any(str(v or '').strip() for v in values)
     legacy=[f'{k}: {v}' for k,v in (report.get('weather') or {}).items() if str(v or '').strip()]
     if observed:
-        rows.append([cell(v,CENTER) for v in values])
+        rows.append([weather_cell(v) for v in values])
         legacy=[f'{k}: {v}' for k,v in (report.get('weather') or {}).items()
                 if k in ('Wind','Temperature','Impact') and str(v or '').strip()]
+    else:
+        # Period-level observations are shown as supplied, never copied into hours.
+        periods = [(key, value) for key, value in (report.get('weather') or {}).items()
+                   if key in ('Morning','Afternoon','Evening') and str(value or '').strip()]
+        if periods:
+            summary = table([[cell(key,CENTER) for key,_ in periods],
+                             [weather_cell(value) for _,value in periods]],
+                            [(WIDTH-8)/len(periods)]*len(periods))
+            row=len(rows);rows.append([summary]+['']*10)
+            commands.append(('SPAN',(0,row),(-1,row)))
+            legacy=[f'{k}: {v}' for k,v in (report.get('weather') or {}).items()
+                    if k not in ('Morning','Afternoon','Evening') and str(v or '').strip()]
     if legacy:
         row=len(rows);rows.append([cell('Reported weather: '+ '; '.join(legacy))]+['']*10)
         commands.append(('SPAN',(0,row),(-1,row)))
-    elif not observed:
+    elif len(rows) == 2:
         rows.append([cell('-')]+['']*10);commands.append(('SPAN',(0,2),(-1,2)))
     return table(rows,[WIDTH/11]*11,2,commands)
 

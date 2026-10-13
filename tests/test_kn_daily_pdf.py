@@ -103,6 +103,26 @@ class KNLayoutTests(unittest.TestCase):
         for label in ('PDF Format', 'Report layout', 'KN format', 'id="pdf_layout"', 'Existing GPA format'):
             self.assertNotIn(label, html)
 
+    def test_hourly_weather_renders_original_icons_and_keeps_unknown_text(self):
+        report = self.report()
+        report['kn_weather_hourly'] = ['Sunny', 'Cloud', 'Rain', 'Lightning', 'Fog'] + [''] * 6
+        page = self.render(report)[0]
+        self.assertEqual(len(page.get_images()), 5)  # Four icons plus the report logo.
+        for condition in ('Sunny', 'Cloud', 'Rain', 'Lightning', 'Fog'):
+            self.assertIn(condition, page.get_text())
+
+    def test_period_weather_icons_do_not_invent_hourly_observations(self):
+        report = self.report()
+        report['weather'] = {'Morning': 'Sunny', 'Afternoon': 'Rainy', 'Impact': 'Work paused'}
+        page = self.render(report)[0]
+        self.assertEqual(len(page.get_images()), 3)
+        rendered = page.get_text()
+        self.assertIn('Morning', rendered)
+        self.assertIn('Afternoon', rendered)
+        self.assertIn('Work paused', rendered)
+        self.assertEqual(rendered.count('Sunny'), 1)
+        self.assertEqual(rendered.count('Rainy'), 1)
+
     def test_kn_fields_survive_draft_save_and_load(self):
         report = self.report()
         report['kn_weather_hourly'] = ['Rain'] + [''] * 10
