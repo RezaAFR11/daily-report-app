@@ -103,7 +103,7 @@ def manpower(people):
     return out
 
 
-def weather_cell(value):
+def weather_cell(value, max_width=12*mm, max_height=8*mm):
     """Keep the supplied label and add the matching original Word icon."""
     label = text(value)
     icon = WEATHER_ICONS.get(' '.join(label.casefold().split()))
@@ -111,7 +111,7 @@ def weather_cell(value):
         return cell(label, CENTER)
     path = WEATHER_ICON_DIR / f'{icon}.png'
     with PILImage.open(path) as source:
-        scale = min(12*mm/source.width, 8*mm/source.height)
+        scale = min(max_width/source.width, max_height/source.height)
         width, height = source.width*scale, source.height*scale
     return [Image(str(path), width=width, height=height, hAlign='CENTER'),
             Spacer(1, 2), cell(label, CENTER)]
@@ -119,32 +119,28 @@ def weather_cell(value):
 
 def weather(report):
     values=(list(report.get('kn_weather_hourly') or [])+['']*11)[:11]
+    conclusions=(list(report.get('kn_weather_intervals') or [])+['']*4)[:4]
     rows=[[cell('A. WEATHER REPORT',BOLD)]+['']*10,
-          [cell(f'{h:02d}:00 - {h+1:02d}:00',CENTER) for h in range(7,18)]]
-    commands=[('SPAN',(0,0),(-1,0))]
+          [cell(f'{h:02d}:00 - {h+1:02d}:00',CENTER) for h in range(7,18)],
+          [cell(v,CENTER) for v in values]]
+    commands=[('SPAN',(0,0),(-1,0)),('VALIGN',(0,2),(-1,2),'MIDDLE')]
+    # Conclusions are independent admin selections, not calculated from hourly text.
+    blocks=['']*11
+    for i,(start,end,label) in enumerate([(0,2,'07:00 - 10:00'),(3,5,'10:00 - 13:00'),
+                                         (6,8,'13:00 - 16:00'),(9,10,'16:00 - 18:00')]):
+        content=weather_cell(conclusions[i],20*mm,14*mm)
+        blocks[start]=[cell(label,CENTER),Spacer(1,3)]+(content if isinstance(content,list) else [content])
+        commands.append(('SPAN',(start,3),(end,3)))
+    rows.append(blocks)
+    commands.append(('VALIGN',(0,3),(-1,3),'MIDDLE'))
+    commands.append(('ALIGN',(0,3),(-1,3),'CENTER'))
+    # Preserve old period-level notes as text; do not infer a selected conclusion.
     observed=any(str(v or '').strip() for v in values)
-    legacy=[f'{k}: {v}' for k,v in (report.get('weather') or {}).items() if str(v or '').strip()]
-    if observed:
-        rows.append([weather_cell(v) for v in values])
-        legacy=[f'{k}: {v}' for k,v in (report.get('weather') or {}).items()
-                if k in ('Wind','Temperature','Impact') and str(v or '').strip()]
-    else:
-        # Period-level observations are shown as supplied, never copied into hours.
-        periods = [(key, value) for key, value in (report.get('weather') or {}).items()
-                   if key in ('Morning','Afternoon','Evening') and str(value or '').strip()]
-        if periods:
-            summary = table([[cell(key,CENTER) for key,_ in periods],
-                             [weather_cell(value) for _,value in periods]],
-                            [(WIDTH-8)/len(periods)]*len(periods))
-            row=len(rows);rows.append([summary]+['']*10)
-            commands.append(('SPAN',(0,row),(-1,row)))
-            legacy=[f'{k}: {v}' for k,v in (report.get('weather') or {}).items()
-                    if k not in ('Morning','Afternoon','Evening') and str(v or '').strip()]
+    legacy=[f'{k}: {v}' for k,v in (report.get('weather') or {}).items()
+            if str(v or '').strip() and (not observed or k in ('Wind','Temperature','Impact'))]
     if legacy:
         row=len(rows);rows.append([cell('Reported weather: '+ '; '.join(legacy))]+['']*10)
         commands.append(('SPAN',(0,row),(-1,row)))
-    elif len(rows) == 2:
-        rows.append([cell('-')]+['']*10);commands.append(('SPAN',(0,2),(-1,2)))
     return table(rows,[WIDTH/11]*11,2,commands)
 
 

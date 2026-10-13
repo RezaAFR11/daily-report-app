@@ -7,4 +7,4 @@ Extracted without image changes from the user-supplied `DAILY ACTIVITY REPORT.do
 - `rain.png`: `word/media/image3.png` (Rain)
 - `lightning.png`: `word/media/image4.png` (Lightning)
 
-The PDF retains the entered weather text. Recognized conditions get the matching icon; blank or unrecognized conditions are not assigned an invented icon. Period-level weather is not expanded into hourly observations.
+Hourly observations are printed as text. Four interval conclusions (07:00?10:00, 10:00?13:00, 13:00?16:00, 16:00?18:00) are selected independently by the administrator and displayed with centered icons. Missing conclusions stay blank/dash; no icon is inferred from the hourly observations. Original labels are retained for unrecognized saved values.

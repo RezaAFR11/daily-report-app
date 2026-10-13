@@ -10,7 +10,7 @@ import fitz
 from PIL import Image
 from reportlab.platypus import Table, Spacer
 import daily_report_app as app
-from kn_daily_pdf import WIDTH, build_story, numbered
+from kn_daily_pdf import WIDTH, MARGIN, build_story, numbered
 
 
 class KNLayoutTests(unittest.TestCase):
@@ -103,19 +103,27 @@ class KNLayoutTests(unittest.TestCase):
         for label in ('PDF Format', 'Report layout', 'KN format', 'id="pdf_layout"', 'Existing GPA format'):
             self.assertNotIn(label, html)
 
-    def test_hourly_weather_renders_original_icons_and_keeps_unknown_text(self):
+    def test_independent_conclusions_render_centered_icons(self):
         report = self.report()
-        report['kn_weather_hourly'] = ['Sunny', 'Cloud', 'Rain', 'Lightning', 'Fog'] + [''] * 6
+        report['kn_weather_hourly'] = ['Sunny'] * 10 + ['Fog']
+        report['kn_weather_intervals'] = ['Sunny', 'Cloud', 'Rain', 'Lightning']
+        original = deepcopy(report)
         page = self.render(report)[0]
         self.assertEqual(len(page.get_images()), 5)  # Four icons plus the report logo.
         for condition in ('Sunny', 'Cloud', 'Rain', 'Lightning', 'Fog'):
             self.assertIn(condition, page.get_text())
+        self.assertEqual(report, original)
+        icons = sorted((i for i in page.get_image_info() if i['bbox'][1] > 150), key=lambda i: i['bbox'][0])
+        self.assertEqual(len(icons), 4)
+        for icon, center in zip(icons, (1.5, 4.5, 7.5, 10)):
+            self.assertAlmostEqual((icon['bbox'][0] + icon['bbox'][2]) / 2,
+                                   MARGIN + WIDTH * center / 11, delta=1)
 
-    def test_period_weather_icons_do_not_invent_hourly_observations(self):
+    def test_period_weather_does_not_invent_interval_conclusions(self):
         report = self.report()
         report['weather'] = {'Morning': 'Sunny', 'Afternoon': 'Rainy', 'Impact': 'Work paused'}
         page = self.render(report)[0]
-        self.assertEqual(len(page.get_images()), 3)
+        self.assertEqual(len(page.get_images()), 1)  # Only the logo; no chosen icons.
         rendered = page.get_text()
         self.assertIn('Morning', rendered)
         self.assertIn('Afternoon', rendered)
@@ -123,9 +131,17 @@ class KNLayoutTests(unittest.TestCase):
         self.assertEqual(rendered.count('Sunny'), 1)
         self.assertEqual(rendered.count('Rainy'), 1)
 
+    def test_hourly_conditions_do_not_automatically_select_icons(self):
+        report = self.report()
+        report['kn_weather_hourly'] = ['Sunny'] * 11
+        page = self.render(report)[0]
+        self.assertEqual(len(page.get_images()), 1)
+        self.assertEqual(page.get_text().count('Sunny'), 11)
+
     def test_kn_fields_survive_draft_save_and_load(self):
         report = self.report()
         report['kn_weather_hourly'] = ['Rain'] + [''] * 10
+        report['kn_weather_intervals'] = ['Cloud', '', 'Lightning', 'Sunny']
         report['kn_conclusion'] = [{'description': 'Measured item', 'progress_today': '0'}]
         client = app.app.test_client()
         with client.session_transaction() as session:

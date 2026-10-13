@@ -304,6 +304,9 @@
     <div class="fld-lbl">Hourly Weather (07:00?18:00)</div>
     <p class="small text-muted">Fill observed hours only. When all hours are blank, the weather entries below are used.</p>
     <div id="kn_hourly_fields" class="row g-2 mb-3"></div>
+    <div class="fld-lbl">Weather conclusion by interval</div>
+    <p class="small text-muted">Select each icon separately after reviewing the hourly weather. These choices do not change the hourly entries.</p>
+    <div id="kn_weather_interval_fields" class="row g-2 mb-3"></div>
     <datalist id="weather_conditions">
       <option value="Sunny"></option><option value="Cloud"></option>
       <option value="Rain"></option><option value="Lightning"></option>
@@ -2293,7 +2296,37 @@ function collectKNConclusion() {
     const result={};row.querySelectorAll('[data-key]').forEach(input=>result[input.dataset.key]=input.value.trim());return result;
   }).filter(row=>Object.values(row).some(Boolean));
 }
+function populateWeatherIntervals(values=[]) {
+  const container=document.getElementById('kn_weather_interval_fields');container.replaceChildren();
+  const choices={Sunny:'sunny',Cloud:'cloud',Rain:'rain',Lightning:'lightning'};
+  ['07:00?10:00','10:00?13:00','13:00?16:00','16:00?18:00'].forEach((interval,i)=>{
+    const col=document.createElement('div');col.className='col-6 col-md-3';
+    const card=document.createElement('div');card.className='border rounded p-2 text-center h-100';
+    const label=document.createElement('label');label.className='fld-lbl d-block';label.textContent=interval;
+    const select=document.createElement('select');select.className='form-select form-select-sm';
+    select.setAttribute('aria-label',`Weather conclusion ${interval}`);
+    for (const value of ['',...Object.keys(choices)]) {
+      const option=document.createElement('option');option.value=value;option.textContent=value || 'Not selected';select.appendChild(option);
+    }
+    const saved=values[i] || '';
+    if(saved && !choices[saved]) {
+      const option=document.createElement('option');option.value=saved;option.textContent=saved;select.appendChild(option);
+    }
+    select.value=saved;
+    const preview=document.createElement('div');preview.className='d-flex align-items-center justify-content-center mt-2';preview.style.height='65px';
+    const update=()=>{
+      preview.replaceChildren();const icon=choices[select.value];
+      if(icon) {
+        const image=document.createElement('img');image.src=`/static/pdf_assets/weather/${icon}.png`;image.alt=select.value;
+        image.style.maxWidth='90px';image.style.maxHeight='58px';preview.appendChild(image);
+      } else {preview.textContent='-';}
+    };
+    select.addEventListener('change',update);update();card.append(label,select,preview);col.appendChild(card);container.appendChild(col);
+  });
+}
+
 function populateKNFields(data={}) {
+  populateWeatherIntervals(data.kn_weather_intervals || []);
   document.getElementById('f_work_package').value=data.work_package || '';
   const hourly=document.getElementById('kn_hourly_fields');hourly.replaceChildren();
   for(let i=0;i<11;i++) {
@@ -2415,6 +2448,7 @@ function collectData() {
     work_package: v('f_work_package'),
     kn_conclusion: collectKNConclusion(),
     kn_weather_hourly: Array.from(document.querySelectorAll('#kn_hourly_fields input')).map(input=>input.value.trim()),
+    kn_weather_intervals: Array.from(document.querySelectorAll('#kn_weather_interval_fields select')).map(input=>input.value),
     weather,
     indirect_manpower,
     show_overall_progress: document.getElementById('showOverallProgress')?.checked === true,
