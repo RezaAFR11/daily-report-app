@@ -279,11 +279,16 @@ def progress_table(report):
         rows.append([cell('OVERALL PROGRESS',bold)]+['']*5+
                     [cell(percent(totals[k]),bold) for k in metrics]+
                     [cell(percent(actual-plan) if plan is not None and actual is not None else '-',bold)])
-        commands += [('SPAN',(0,len(rows)-1),(5,len(rows)-1)),('BACKGROUND',(0,len(rows)-1),(-1,len(rows)-1),BLUE)]
+        # Keep the final detail and weighted total on the same page.
+        commands += [('NOSPLIT',(0,len(rows)-2),(-1,len(rows)-1)),
+                     ('SPAN',(0,len(rows)-1),(5,len(rows)-1)),
+                     ('BACKGROUND',(0,len(rows)-1),(-1,len(rows)-1),BLUE)]
     else:
         rows.append([cell('-',small) for _ in range(13)])
     widths=[6,35,12,13,15,15]+[14]*7
-    return table(rows,[WIDTH*w/sum(widths) for w in widths],3,commands)
+    result=table(rows,[WIDTH*w/sum(widths) for w in widths],3,commands)
+    result.splitInRow=0
+    return result
 
 
 def build_story(report, signature_cell):
