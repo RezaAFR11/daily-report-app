@@ -21,6 +21,7 @@ LINE = colors.HexColor('#555555')
 NORMAL = ParagraphStyle('kn-normal', fontName='Helvetica', fontSize=8, leading=10)
 BOLD = ParagraphStyle('kn-bold', parent=NORMAL, fontName='Helvetica-Bold')
 SMALL = ParagraphStyle('kn-small', parent=NORMAL, fontSize=7, leading=8.5)
+PHOTO_CAPTION = ParagraphStyle('kn-photo-caption', parent=SMALL, fontName='Helvetica-Oblique')
 CENTER = ParagraphStyle('kn-center', parent=SMALL, alignment=1)
 
 
@@ -141,20 +142,45 @@ def photo_tables(report):
                 raise ValueError('A documentation photo is unavailable. Upload it again before generating.')
     if not photos:
         return [numbered('DOCUMENTATION PHOTO',[])]
-    result=[];cw=WIDTH/3;image_h=34*mm
+    result=[];cw=WIDTH/3;card_w=cw-6;image_h=34*mm
     for start in range(0,len(photos),12):
         if result: result.append(PageBreak())
         rows=[[cell('DOCUMENTATION PHOTO',BOLD),'','']]
         for r in range(start,min(start+12,len(photos)),3):
-            cards=[]
+            prepared=[]
             for area,desc,source in photos[r:min(r+3,start+12)]:
-                try: image=cover_image(source,cw-8,image_h)
+                try: image=cover_image(source,card_w,image_h)
                 except Exception as exc:
                     raise ValueError('A documentation photo cannot be read. Replace it before generating.') from exc
                 label=' / '.join(str(v).strip() for v in (report.get('photo_documentation_title'),area) if v)
-                cards.append([cell(label,BOLD),image,cell(desc,SMALL)])
+                prepared.append((cell(label,BOLD),cell(desc,PHOTO_CAPTION),image))
+            # Align image tops across the row without truncating longer captions.
+            title_h=max(title.wrap(card_w-4,PAGE_H)[1] for title,_,_ in prepared)+4
+            caption_h=max(caption.wrap(card_w-4,PAGE_H)[1] for _,caption,_ in prepared)+4
+            cards=[]
+            for title,caption,image in prepared:
+                card=Table([[title],[caption],[image]],colWidths=[card_w],
+                           rowHeights=[title_h,caption_h,image_h],hAlign='LEFT')
+                card.setStyle(TableStyle([
+                    ('VALIGN',(0,0),(-1,-1),'TOP'),
+                    ('LEFTPADDING',(0,0),(-1,-1),0),
+                    ('RIGHTPADDING',(0,0),(-1,-1),0),
+                    ('TOPPADDING',(0,0),(-1,-1),0),
+                    ('BOTTOMPADDING',(0,0),(-1,-1),0),
+                    ('LEFTPADDING',(0,0),(0,1),2),
+                    ('RIGHTPADDING',(0,0),(0,1),2),
+                    ('TOPPADDING',(0,0),(0,1),2),
+                    ('BOTTOMPADDING',(0,0),(0,1),2),
+                    ('BACKGROUND',(0,0),(0,0),colors.HexColor('#dcecf6')),
+                    ('BACKGROUND',(0,1),(0,1),colors.HexColor('#f8f9fa')),
+                    ('BOX',(0,0),(-1,-1),.5,colors.HexColor('#00b7ef')),
+                    ('LINEBELOW',(0,0),(0,1),.4,colors.HexColor('#00b7ef')),
+                ]))
+                cards.append(card)
             rows.append(cards+['']*(3-len(cards)))
-        grid=table(rows,[cw]*3,1,[('SPAN',(0,0),(-1,0))])
+        grid=table(rows,[cw]*3,1,[('SPAN',(0,0),(-1,0)),
+                   ('LEFTPADDING',(0,1),(-1,-1),3),('RIGHTPADDING',(0,1),(-1,-1),3),
+                   ('TOPPADDING',(0,1),(-1,-1),3),('BOTTOMPADDING',(0,1),(-1,-1),3)])
         grid.splitInRow=0  # Keep each photo and its caption together.
         result.append(grid)
     return result
