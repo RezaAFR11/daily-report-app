@@ -21,6 +21,7 @@ BLUE = colors.HexColor('#d9e2f3')
 LINE = colors.HexColor('#555555')
 NORMAL = ParagraphStyle('kn-normal', fontName='Helvetica', fontSize=8, leading=10)
 BOLD = ParagraphStyle('kn-bold', parent=NORMAL, fontName='Helvetica-Bold')
+HEADER_CENTER = ParagraphStyle('kn-header-center', parent=BOLD, alignment=1)
 SMALL = ParagraphStyle('kn-small', parent=NORMAL, fontSize=7, leading=8.5)
 PHOTO_CAPTION = ParagraphStyle('kn-photo-caption', parent=SMALL, fontName='Helvetica-Oblique')
 DOCUMENTATION_TITLE = ParagraphStyle('documentation-title', parent=BOLD, fontSize=16, leading=19, alignment=1)
@@ -84,11 +85,13 @@ def numbered(title, values):
 def paired(title_a, title_b, headings, left, right, half_widths):
     n = len(headings)
     rows = [[cell(title_a, BOLD)] + ['']*(n-1) + [cell(title_b, BOLD)] + ['']*(n-1),
-            [cell(h, BOLD) for h in headings]*2]
+            [cell(h, HEADER_CENTER) for h in headings]*2]
     # Empty sections have one placeholder row; no fixed blank row padding.
     for a,b in zip_longest(left or [['-']*n], right or [['-']*n], fillvalue=['']*n):
         rows.append([cell(v) for v in a+b])
-    return table(rows, half_widths*2, 2, [('SPAN',(0,0),(n-1,0)),('SPAN',(n,0),(-1,0))])
+    return table(rows, half_widths*2, 2, [('SPAN',(0,0),(n-1,0)),('SPAN',(n,0),(-1,0)),
+                 ('VALIGN',(0,1),(-1,1),'MIDDLE'),
+                 ('LEFTPADDING',(0,1),(-1,1),2),('RIGHTPADDING',(0,1),(-1,1),2)])
 
 
 def manpower(people):
@@ -232,11 +235,12 @@ def signatures(report, signature_cell):
     result=[]
     for start in range(0,len(entries),4):
         group=entries[start:start+4];w=WIDTH/len(group)
-        rows=[[cell(p.get('label'),BOLD) for p in group],
+        rows=[[cell(p.get('label'),HEADER_CENTER) for p in group],
               [signature_cell(p.get('_sig_path') or p.get('sig'),w) for p in group],
               [cell(p.get('name'),CENTER) for p in group],
               [cell(p.get('role'),CENTER) for p in group]]
-        result.append(KeepTogether([table(rows,[w]*len(group)),Spacer(1,3*mm)]))
+        result.append(KeepTogether([table(rows,[w]*len(group),commands=[
+            ('ALIGN',(0,0),(-1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'MIDDLE')]),Spacer(1,3*mm)]))
     return result
 
 
@@ -258,9 +262,11 @@ def build_story(report, signature_cell):
     keys=['description','bq_contract','progress_today','total_accum','progress_percent']
     entries=[r for r in report.get('kn_conclusion',[]) if any(r.get(k) is not None and str(r.get(k)).strip() for k in keys)]
     rows=[[cell('H. CONCLUSION',BOLD)]+['']*5,
-          [cell(h,BOLD) for h in ['No.','Description','BQ Contract','Progress Today','Total Accum.','Progress (%)']]]
+          [cell(h,HEADER_CENTER) for h in ['No.','Description','BQ Contract','Progress Today','Total Accum.','Progress (%)']]]
     rows += [[cell(i)]+[cell(r.get(k)) for k in keys] for i,r in enumerate(entries,1)] or [[cell(1)]+[cell('-')]*5]
-    story += [table(rows,[8*mm,WIDTH-96*mm,22*mm,22*mm,22*mm,22*mm],2,[('SPAN',(0,0),(-1,0))]),Spacer(1,5*mm)]
+    story += [table(rows,[8*mm,WIDTH-96*mm,22*mm,22*mm,22*mm,22*mm],2,[
+        ('SPAN',(0,0),(-1,0)),('VALIGN',(0,1),(-1,1),'MIDDLE'),
+        ('LEFTPADDING',(0,1),(-1,1),2),('RIGHTPADDING',(0,1),(-1,1),2)]),Spacer(1,5*mm)]
     story += signatures(report,signature_cell)
     story += [PageBreak()]+photo_tables(report)
     return story
