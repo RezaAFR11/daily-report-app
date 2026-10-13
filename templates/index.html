@@ -299,6 +299,32 @@
   </div>
 </div>
 
+<div class="card mb-3 border-0 shadow-sm">
+  <div class="card-header section-hdr">PDF Format</div>
+  <div class="card-body">
+    <label class="fld-lbl" for="pdf_layout">Report layout</label>
+    <select id="pdf_layout" class="form-select form-select-sm mb-3" onchange="syncKNLayout()">
+      <option value="kn" selected>KN Daily Activity Report (Word format)</option>
+      <option value="standard">Existing GPA format</option>
+    </select>
+    <div id="kn_fields">
+      <label class="fld-lbl" for="f_work_package">Work Package</label>
+      <input id="f_work_package" class="form-control form-control-sm mb-3" maxlength="300">
+      <div class="fld-lbl">Hourly Weather (07:00?18:00)</div>
+      <p class="small text-muted">Fill observed hours only. When all hours are blank, the weather entries below are used.</p>
+      <div id="kn_hourly_fields" class="row g-2 mb-3"></div>
+      <div class="fld-lbl">H. Conclusion</div>
+      <p class="small text-muted">Enter the original quantities and progress values. Empty tables print one row with a dash.</p>
+      <div class="table-responsive"><table class="table table-sm table-bordered">
+        <thead><tr><th>Description</th><th>BQ Contract</th><th>Progress Today</th><th>Total Accum.</th><th>Progress (%)</th><th></th></tr></thead>
+        <tbody id="kn_conclusion_rows"></tbody>
+      </table></div>
+      <button type="button" class="btn btn-sm btn-outline-primary" onclick="addKNConclusion()">Add conclusion row</button>
+      <p class="small text-muted mt-3 mb-0">KN format uses the fixed A?H section order and a repeated identity header. Documentation photos use up to 12 photos per page.</p>
+    </div>
+  </div>
+</div>
+
 <!-- ── S2: Weather ── -->
 <div class="card mb-3 border-0 shadow-sm report-section">
   <div class="card-header section-hdr">
@@ -1601,6 +1627,7 @@ function initPDFSectionOrderModal() {
 }
 
 function openPDFSectionOrderModal() {
+  if (formFieldValue('pdf_layout') === 'kn') { renderPDFPreview(); return; }
   if (_pdfOrderConfirming) return;
   _pendingPDFSectionOrder = getSectionOrder();
   renderPDFSectionOrderList();
@@ -2576,6 +2603,45 @@ function collectAreaData(areaBlock) {
   };
 }
 
+const KN_CONCLUSION_KEYS = ['description','bq_contract','progress_today','total_accum','progress_percent'];
+function addKNConclusion(data={}) {
+  const row = document.createElement('tr');
+  for (const key of KN_CONCLUSION_KEYS) {
+    const td=document.createElement('td');const input=document.createElement('textarea');
+    input.className='form-control form-control-sm';input.rows=1;input.dataset.key=key;
+    input.value=data[key] ?? '';td.appendChild(input);row.appendChild(td);
+  }
+  const td=document.createElement('td');const button=document.createElement('button');
+  button.type='button';button.className='btn btn-sm btn-outline-danger';button.textContent='Remove';
+  button.onclick=()=>row.remove();td.appendChild(button);row.appendChild(td);
+  document.getElementById('kn_conclusion_rows').appendChild(row);
+}
+function collectKNConclusion() {
+  return Array.from(document.querySelectorAll('#kn_conclusion_rows tr')).map(row=>{
+    const result={};row.querySelectorAll('[data-key]').forEach(input=>result[input.dataset.key]=input.value.trim());return result;
+  }).filter(row=>Object.values(row).some(Boolean));
+}
+function syncKNLayout() {
+  const enabled=document.getElementById('pdf_layout').value==='kn';
+  document.getElementById('kn_fields').hidden=!enabled;
+  const progressCard=document.getElementById('showOverallProgress')?.closest('.card');
+  if(progressCard) progressCard.hidden=enabled;
+}
+function populateKNFields(data={}) {
+  document.getElementById('pdf_layout').value=data.pdf_layout || 'kn';
+  document.getElementById('f_work_package').value=data.work_package || '';
+  const hourly=document.getElementById('kn_hourly_fields');hourly.replaceChildren();
+  for(let i=0;i<11;i++) {
+    const col=document.createElement('div');col.className='col-6 col-md-2';
+    const label=document.createElement('label');label.className='fld-lbl';
+    label.textContent=`${String(i+7).padStart(2,'0')}:00?${String(i+8).padStart(2,'0')}:00`;
+    const input=document.createElement('input');input.className='form-control form-control-sm';input.value=data.kn_weather_hourly?.[i] || '';
+    input.setAttribute('aria-label',label.textContent);col.append(label,input);hourly.appendChild(col);
+  }
+  document.getElementById('kn_conclusion_rows').replaceChildren();
+  (data.kn_conclusion || []).forEach(addKNConclusion);syncKNLayout();
+}
+
 function collectData() {
   return {
     section_order:  getSectionOrder(),
@@ -2591,6 +2657,10 @@ function collectData() {
     checked_by:     formFieldValue('f_checked_by'),
     approved_by:    formFieldValue('f_approved_by'),
     global_remarks: formFieldValue('f_global_remarks'),
+    pdf_layout: formFieldValue('pdf_layout'),
+    work_package: formFieldValue('f_work_package'),
+    kn_conclusion: collectKNConclusion(),
+    kn_weather_hourly: Array.from(document.querySelectorAll('#kn_hourly_fields input')).map(input=>input.value.trim()),
     weather: collectWeatherData(),
     indirect_manpower: collectManpowerRows(document, '#indirectContainer .indirect-row'),
     show_overall_progress: document.getElementById('showOverallProgress')?.checked === true,
@@ -2604,6 +2674,7 @@ function collectData() {
 // POPULATE FORM FROM DATA
 // ════════════════════════════════════════════════════════════
 function populateForm(d) {
+  populateKNFields(d);
   applySectionOrder(d.section_order);
   const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
   set('f_date',          d.date);
@@ -3264,6 +3335,7 @@ function pastePhoto(btn) {
 // DEFAULTS ON FRESH FORM
 // ════════════════════════════════════════════════════════════
 function initDefaults() {
+  populateKNFields();
   const cfg = APP_CONFIG;
   const set = (id, val) => { const el = document.getElementById(id); if (el && val) el.value = val; };
   setProjectFields(cfg.project_title, cfg.project_no);
@@ -3281,6 +3353,15 @@ function initDefaults() {
 }
 
 function initSignOffDefaults() {
+  if (formFieldValue('pdf_layout') === 'kn') {
+    populateSignOffs([
+      {label:'Prepared by', name:APP_CONFIG.prepared_by || '', role:''},
+      {label:'Checked by', name:APP_CONFIG.checked_by || '', role:'PT. Kertas Nusantara'},
+      {label:'Approved by', name:APP_CONFIG.approved_by || '', role:'PT. Kertas Nusantara'},
+      {label:'Approved by PMO', name:'', role:'PT. Kertas Nusantara'},
+    ]);
+    return;
+  }
   const cfg = APP_CONFIG;
   [
     { label:'Prepared By',       name: cfg.prepared_by||'', role:'HSE / Administration' },

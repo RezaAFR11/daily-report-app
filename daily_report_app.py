@@ -1985,6 +1985,15 @@ def _render_daily_pdf_story(story, output_path):
 
 def generate_pdf(d, output_path, cfg):
     """Render one Daily Report payload to a PDF byte stream and optional file."""
+    if d.get('pdf_layout') == 'kn':
+        from kn_daily_pdf import generate_kn_pdf
+        logos = {'kn': (resolve_logo_path(cfg['logo_kn'], 'kn') if cfg.get('logo_kn')
+                        else os.path.join(PDF_ASSET_DIR, 'kn_word_logo.png'))}
+        def signature_cell(source, width):
+            if isinstance(source, str) and source.startswith('data:'):
+                source = _decode_pdf_data_uri(source, PHOTO_MAX_INPUT_BYTES)
+            return _pdf_signature_source_cell(source, width)
+        return generate_kn_pdf(d, output_path, logos, signature_cell)
     styles = make_styles(cfg)
     _NC._meta = _daily_pdf_canvas_metadata(d, cfg)
     story = _build_daily_pdf_story(d, cfg, styles)
