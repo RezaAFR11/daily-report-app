@@ -9,7 +9,6 @@ from __future__ import annotations
 import io
 import math
 import os
-import re
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from html import escape
@@ -25,7 +24,6 @@ from reportlab.platypus import (
     BaseDocTemplate,
     Flowable,
     Frame,
-    Image as RLImage,
     LongTable,
     NextPageTemplate,
     PageBreak,
@@ -36,8 +34,6 @@ from reportlab.platypus import (
     TableStyle,
 )
 from reportlab.platypus.tableofcontents import TableOfContents
-
-from .photos import asset_filename, is_asset_id
 
 
 __all__ = ["render_monthly_report"]
@@ -70,7 +66,7 @@ DEFAULT_APPENDICES = (
     ("6.3", "Overall Schedule"),
     ("6.4", "Document Deliverable List / Drawing Status"),
     ("6.5", "Manning Manpower / Equipment Loading"),
-    ("6.6", "Photo Documentation"),
+    ("6.6", "Photographs Activity"),
     ("6.7", "Safety Report"),
     ("6.8", "QC Document"),
 )
@@ -110,113 +106,6 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, Sequence):
         return list(value)
     return [value]
-
-
-_ABSENT_SECTION_TEXT = {
-    "none",
-    "not supplied",
-    "no data",
-    "no data supplied",
-    "manual input required",
-    "manual input required.",
-    "manual weekly input required",
-    "manual weekly input required.",
-    "manual monthly input required",
-    "manual monthly input required.",
-    "no engineering status data was supplied in the available daily reports.",
-    "no procurement status data was supplied in the available daily reports.",
-    "no separate engineering deliverable register was supplied in the available daily reports.",
-    "no separate procurement, equipment-delivery, or shipment register was supplied in the available daily reports.",
-}
-_NON_CONTENT_KEYS = {
-    "available",
-    "source_meta",
-    "source_type",
-    "source_ids",
-    "source_dates",
-    "generated_at",
-    "updated_at",
-}
-
-
-def _has_section_data(value: Any) -> bool:
-    """Return whether a report section contains client-facing source data.
-
-    Zero is meaningful (for example, zero safety incidents), while compiler
-    placeholders and provenance-only mappings are not report content.
-    """
-
-    if value is None or value == "":
-        return False
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return math.isfinite(float(value))
-    if isinstance(value, str):
-        text = " ".join(value.strip().casefold().split())
-        if not text or text in _ABSENT_SECTION_TEXT:
-            return False
-        if text.startswith("no separate engineering deliverable register was supplied"):
-            return False
-        if text.startswith("no separate procurement") or text.startswith("no separate po or material register was supplied"):
-            return False
-        return not re.fullmatch(r"no .+ (?:data|information) (?:was |were )?supplied\.?", text)
-    if isinstance(value, Mapping):
-        return any(
-            _has_section_data(item)
-            for key, item in value.items()
-            if str(key).strip().casefold() not in _NON_CONTENT_KEYS
-        )
-    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-        return any(_has_section_data(item) for item in value)
-    return True
-
-
-_NO_CONCERN_TEXT = {
-    "-",
-    "n/a",
-    "na",
-    "nil",
-    "none",
-    "not applicable",
-    "not supplied",
-    "no issue",
-    "no issues",
-    "no constraint",
-    "no constraints",
-    "no constraint reported",
-    "no constraints reported",
-    "tidak ada",
-}
-
-
-def _has_real_concern_text(value: Any) -> bool:
-    text = " ".join(_plain(value).strip().casefold().split())
-    return bool(text and text not in _NO_CONCERN_TEXT and _has_section_data(value))
-
-
-def _real_concern_rows(value: Any) -> list[Any]:
-    """Return only source-backed concern/action rows suitable for rendering."""
-
-    result: list[Any] = []
-    for raw in _as_list(value):
-        if isinstance(raw, Mapping):
-            concern = _value(raw, "concern", "text", "description")
-            action = _value(raw, "corrective_action", "action", "suggested_action")
-            if _has_real_concern_text(concern) or _has_section_data(action):
-                result.append(raw)
-        elif _has_real_concern_text(raw):
-            result.append(raw)
-    return result
-
-
-def _real_finding_rows(value: Any) -> list[Mapping[str, Any]]:
-    return [
-        raw
-        for raw in _as_list(value)
-        if isinstance(raw, Mapping)
-        and _has_section_data(_value(raw, "text", "remark", "description"))
-    ]
 
 
 def _number(value: Any) -> float | None:
@@ -337,19 +226,14 @@ def _styles() -> dict[str, ParagraphStyle]:
             textColor=BLACK, leftIndent=28.3, spaceBefore=5, spaceAfter=6,
             keepWithNext=True,
         ),
-        "activity_area": ParagraphStyle(
-            "MonthlyActivityArea", fontName="Helvetica-Bold", fontSize=10.5, leading=13,
-            textColor=BLACK, leftIndent=14, spaceBefore=5, spaceAfter=2,
-            keepWithNext=True,
-        ),
         "appendix_item": ParagraphStyle(
             "MonthlyAppendixItem", fontName="Helvetica-Bold", fontSize=11.5,
             leading=15, textColor=BLACK, leftIndent=20, firstLineIndent=-20,
             spaceAfter=4, keepWithNext=False,
         ),
         "toc_title": ParagraphStyle(
-            "MonthlyTOCTitle", fontName="Helvetica-Bold", fontSize=14, leading=16,
-            alignment=TA_LEFT, textColor=BLACK, spaceAfter=6,
+            "MonthlyTOCTitle", fontName="Helvetica-Bold", fontSize=14, leading=17,
+            alignment=TA_CENTER, textColor=BLACK, spaceAfter=10,
         ),
         "toc_subtitle": ParagraphStyle(
             "MonthlyTOCSubtitle", fontName="Helvetica", fontSize=16, leading=19,
@@ -372,18 +256,6 @@ def _heading(text: str, style: ParagraphStyle, level: int) -> Paragraph:
     paragraph._monthly_toc_level = level  # type: ignore[attr-defined]
     paragraph._monthly_toc_text = text  # type: ignore[attr-defined]
     return paragraph
-
-
-def _display_heading(text: str, style: ParagraphStyle) -> Paragraph:
-    """Render a visible heading without registering a TOC/outline entry.
-
-    Photo-documentation pages can span many dates and continuation pages.  Those
-    page-level labels stay visible in the appendix, while the Table of Contents
-    carries only the single appendix entry (for example, ``6.2 Photo
-    Documentation [Attached]``).
-    """
-
-    return Paragraph(escape(text, quote=False), style)
 
 
 def _draw_outer_border(canvas: pdf_canvas.Canvas) -> None:
@@ -577,10 +449,10 @@ def _draw_revision_table(canvas: pdf_canvas.Canvas, report: Mapping[str, Any]) -
         style = ParagraphStyle(
             "RevisionHeader" if header else "RevisionCell",
             parent=styles["table_center"],
-            fontName="Helvetica-Bold",
+            fontName="Helvetica-Bold" if header else "Helvetica",
             fontSize=7.4 if header else 6.8,
             leading=8.2 if header else 7.7,
-            textColor=ROYAL_BLUE,
+            textColor=ROYAL_BLUE if header else BLACK,
         )
         return _paragraph(value, style, default="")
 
@@ -734,46 +606,11 @@ class _NumberedCanvas(pdf_canvas.Canvas):
         super().__init__(*args, **kwargs)
         self._monthly_status = status
         self._monthly_page_states: list[dict[str, Any]] = []
-        self._monthly_page_bookmarks: dict[int, list[tuple[Any, ...]]] = {}
-        self._monthly_page_outlines: dict[int, list[tuple[Any, ...]]] = {}
-
-    def bookmarkPage(  # noqa: N802 - ReportLab API
-        self,
-        key,
-        fit="Fit",
-        left=None,
-        top=None,
-        bottom=None,
-        right=None,
-        zoom=None,
-    ):
-        """Defer destinations until delayed pages are written with footers."""
-
-        self._monthly_page_bookmarks.setdefault(self._pageNumber, []).append((
-            key, fit, left, top, bottom, right, zoom,
-        ))
-
-    def addOutlineEntry(  # noqa: N802 - ReportLab API
-        self,
-        title,
-        key,
-        level=0,
-        closed=None,
-    ):
-        """Keep outline creation aligned with the deferred bookmark page."""
-
-        self._monthly_page_outlines.setdefault(self._pageNumber, []).append((
-            title, key, level, closed,
-        ))
 
     def showPage(self):  # noqa: N802 - ReportLab API
         state = {
             key: value for key, value in self.__dict__.items()
-            if key not in {
-                "_monthly_page_states",
-                "_monthly_page_bookmarks",
-                "_monthly_page_outlines",
-            }
+            if key != "_monthly_page_states"
         }
         self._monthly_page_states.append(state)
         self._startPage()
@@ -782,10 +619,6 @@ class _NumberedCanvas(pdf_canvas.Canvas):
         total_pages = len(self._monthly_page_states)
         for state in self._monthly_page_states:
             self.__dict__.update(state)
-            for bookmark in self._monthly_page_bookmarks.get(self._pageNumber, []):
-                pdf_canvas.Canvas.bookmarkPage(self, *bookmark)
-            for outline in self._monthly_page_outlines.get(self._pageNumber, []):
-                pdf_canvas.Canvas.addOutlineEntry(self, *outline)
             if self._pageNumber > 1:
                 self._draw_monthly_footer(total_pages)
             pdf_canvas.Canvas.showPage(self)
@@ -849,10 +682,14 @@ def _normalise_progress(value: Any) -> list[dict[str, Any]]:
         to_date = _number(_value(
             raw, "to_date", "cumulative", "cumulative_to_date_actual", default=None
         ))
+        if to_date is None and previous is not None and this_month is not None:
+            to_date = previous + this_month
         plan = _number(_value(
             raw, "plan", "to_date_plan", "cumulative_to_date_plan", default=None
         ))
         variance = _number(_value(raw, "variance", "deviation", default=None))
+        if variance is None and to_date is not None and plan is not None:
+            variance = to_date - plan
         rows.append({
             "description": _plain(raw.get("description"), f"Progress item {index}"),
             "previous": previous,
@@ -866,17 +703,11 @@ def _normalise_progress(value: Any) -> list[dict[str, Any]]:
     return rows
 
 
-def _progress_percent(value: Any) -> str:
-    number = _number(value)
-    return f"{number:.2f}%" if number is not None else "—"
-
-
 def _progress_table(
     rows: list[dict[str, Any]],
     styles: Mapping[str, ParagraphStyle],
     *,
     report_type: str = "monthly",
-    period_label: str = "",
 ) -> LongTable:
     display_rows = rows or [
         {"description": description, "previous": None, "this_month": None,
@@ -886,32 +717,27 @@ def _progress_table(
     header = styles["table_header"]
     body = styles["table"]
     centered = styles["table_center"]
-    source_period_label = _plain(period_label)
     current_period_label = (
-        f"{source_period_label}\n(b)"
-        if source_period_label
-        else (
-            "This Week\n(b)"
-            if _normalise_report_type(report_type) == "weekly"
-            else "This Month\n(b)"
-        )
+        "This Week\n(b)"
+        if _normalise_report_type(report_type) == "weekly"
+        else "This Month\n(b)"
     )
     data: list[list[Any]] = [
         [_paragraph("Description", header), _paragraph("Progress", header), "", "",
          _paragraph("To-date Plan\n(d)", header),
-         _paragraph("Reported Variance\n(e)", header)],
+         _paragraph("Variance\n(e) = (c) - (d)", header)],
         ["", _paragraph("Previous\n(a)", header),
          _paragraph(current_period_label, header),
-         _paragraph("To-date\n(c)", header), "", ""],
+         _paragraph("To-date\n(c) = (a) + (b)", header), "", ""],
     ]
     for row in display_rows:
         data.append([
             _paragraph(row.get("description"), body),
-            _paragraph(_progress_percent(row.get("previous")), centered),
-            _paragraph(_progress_percent(row.get("this_month")), centered),
-            _paragraph(_progress_percent(row.get("to_date")), centered),
-            _paragraph(_progress_percent(row.get("plan")), centered),
-            _paragraph(_progress_percent(row.get("variance")), centered),
+            _paragraph(_percent(row.get("previous")), centered),
+            _paragraph(_percent(row.get("this_month")), centered),
+            _paragraph(_percent(row.get("to_date")), centered),
+            _paragraph(_percent(row.get("plan")), centered),
+            _paragraph(_percent(row.get("variance")), centered),
         ])
     table = LongTable(
         data,
@@ -956,14 +782,14 @@ def _executive_summary(report: Mapping[str, Any], progress: list[dict[str, Any]]
     )
     if total and total.get("to_date") is not None and total.get("plan") is not None:
         variance = total.get("variance")
-        summary = (
+        if variance is None:
+            variance = total["to_date"] - total["plan"]
+        return (
             "For this reporting period, overall project progress is "
             f"{_percent(total['to_date'])} compared with the plan of "
-            f"{_percent(total['plan'])}. "
+            f"{_percent(total['plan'])}, for a variance of {_percent(variance)}. "
+            "The summary of progress and S-Curve are shown in the appendices."
         )
-        if variance is not None:
-            summary = summary[:-2] + f", for a reported variance of {_percent(variance)}. "
-        return summary + "The summary of progress and S-Curve are shown in the appendices."
     return (
         "Overall progress values have not been supplied for this reporting period. "
         "Complete and review the progress table before issue."
@@ -972,15 +798,8 @@ def _executive_summary(report: Mapping[str, Any], progress: list[dict[str, Any]]
 
 def _safety_table(value: Any, styles: Mapping[str, ParagraphStyle]) -> Table:
     safety = value if isinstance(value, Mapping) else {}
-    peak_headcount = _value(safety, "peak_daily_headcount")
-    if _plain(peak_headcount):
-        manpower_label = "Peak Daily Headcount"
-        manpower_value = peak_headcount
-    else:
-        manpower_label = "Total Manpower"
-        manpower_value = _value(safety, "total_manpower", "manpower")
     rows = [
-        (manpower_label, manpower_value),
+        ("Total Manpower", _value(safety, "total_manpower", "manpower")),
         ("Total Man hours", _value(safety, "total_man_hours", "man_hours")),
         ("Total Recordable Cases", _value(
             safety, "total_recordable_cases", "recordable_cases"
@@ -992,8 +811,8 @@ def _safety_table(value: Any, styles: Mapping[str, ParagraphStyle]) -> Table:
     ]
     table_data = []
     for label, raw in rows:
-        rendered = _plain(raw, "Not supplied")
-        if label == "Total Man hours" and rendered != "Not supplied" and not rendered.upper().endswith("MH"):
+        rendered = _plain(raw, "\u2014")
+        if label == "Total Man hours" and rendered != "\u2014" and not rendered.upper().endswith("MH"):
             rendered += " MH"
         table_data.append([
             _paragraph("\u2022", styles["body_center"], default=""),
@@ -1019,10 +838,10 @@ def _mapping_summary(value: Any) -> Any:
 
 
 def _describe_mapping(value: Mapping[str, Any]) -> str:
-    preferred = _activity_display_text(value)
+    preferred = _value(value, "text", "description", "activity", "title", "name")
     if preferred:
         area = _plain(_value(value, "area", "location"))
-        return f"{area}: {preferred}" if area else preferred
+        return f"{area}: {_plain(preferred)}" if area else _plain(preferred)
     pairs = []
     for key, item in value.items():
         if item in (None, "", [], {}):
@@ -1030,72 +849,6 @@ def _describe_mapping(value: Mapping[str, Any]) -> str:
         label = str(key).replace("_", " ").strip().title()
         pairs.append(f"{label}: {_plain(item)}")
     return "; ".join(pairs)
-
-
-def _activity_display_text(value: Mapping[str, Any]) -> str:
-    text = _plain(_value(value, "text", "description", "activity", "title", "name"))
-    if not text:
-        return ""
-    status = _plain(value.get("status"))
-    if status and status.casefold() not in text.casefold():
-        return f"{text} — {status}"
-    return text
-
-
-
-
-def _coverage_flowables(report: Mapping[str, Any], styles: Mapping[str, ParagraphStyle]) -> list[Flowable]:
-    coverage = report.get("coverage") if isinstance(report.get("coverage"), Mapping) else {}
-    expected = [str(x) for x in _as_list(coverage.get("expected_dates")) if str(x).strip()]
-    covered = [str(x) for x in _as_list(coverage.get("covered_dates", coverage.get("found_dates"))) if str(x).strip()]
-    missing = [str(x) for x in _as_list(coverage.get("missing_dates")) if str(x).strip()]
-    if not expected and not covered and not missing:
-        return []
-    total = len(expected) if expected else len(set(covered + missing))
-    text = f"Daily Report Coverage: {len(covered)} / {total or len(covered)} day(s)"
-    if covered:
-        text += f" | Available: {', '.join(covered)}"
-    if missing:
-        text += f" | Missing: {', '.join(missing)}"
-    else:
-        text += " | Missing: None"
-    return [
-        Paragraph("<b>Source Coverage</b>", styles["body"]),
-        _paragraph(text, styles["placeholder"]),
-        Spacer(1, 6),
-    ]
-
-def _client_facing_missing_summary(value: Any, *, section: str) -> Any:
-    """Replace internal manual-input placeholders with client-facing wording."""
-
-    section_key = str(section or "").strip().casefold()
-    message = (
-        "No engineering status data was supplied in the available Daily Reports."
-        if section_key == "engineering"
-        else "No procurement status data was supplied in the available Daily Reports."
-    )
-    placeholders = {
-        "",
-        "not supplied",
-        "manual input required",
-        "manual input required.",
-        "manual weekly input required",
-        "manual weekly input required.",
-        "manual monthly input required",
-        "manual monthly input required.",
-    }
-
-    if isinstance(value, Mapping):
-        result = dict(value)
-        summary = _plain(result.get("summary")).strip()
-        if summary.casefold() in placeholders:
-            result["summary"] = message
-        return result
-
-    plain = _plain(value).strip()
-    if plain.casefold() in placeholders:
-        return message
-    return value
 
 
 def _content_flowables(
@@ -1128,109 +881,6 @@ def _content_flowables(
             ))
         else:
             rendered.append(_paragraph(text, styles["body"]))
-    if not rendered:
-        rendered.append(_paragraph(empty_message, styles["placeholder"]))
-    return rendered
-
-
-_ACTIVITY_WORKSTREAM_PREFIXES = (
-    "Oil System & Flushing",
-    "Mechanical Maintenance",
-    "Instrumentation & Electrical",
-    "Actuator & Pneumatic",
-    "Valve Mechanical",
-    "Testing & Commissioning",
-    "Standby / Coordination",
-    "Other Site Work",
-)
-
-
-def _strip_generated_activity_prefixes(value: Any, *, area: str = "", workstream: str = "") -> str:
-    """Last-resort cleanup for old/reviewed drafts with nested display labels."""
-
-    text = _plain(value).strip()
-    if not text:
-        return ""
-    if area:
-        for dash in (" – ", " - ", ": "):
-            prefix = area + dash
-            if text.casefold().startswith(prefix.casefold()):
-                text = text[len(prefix):].lstrip()
-                break
-    ordered = [workstream] if workstream else []
-    ordered.extend(label for label in _ACTIVITY_WORKSTREAM_PREFIXES if label and label not in ordered)
-    for _ in range(4):
-        changed = False
-        for label in ordered:
-            prefix = label + ":"
-            if text.casefold().startswith(prefix.casefold()):
-                text = text[len(prefix):].lstrip(" -–:;")
-                changed = True
-                break
-        if not changed:
-            break
-    return text.strip()
-
-
-def _activity_flowables(
-    value: Any,
-    styles: Mapping[str, ParagraphStyle],
-    *,
-    empty_message: str,
-) -> list[Flowable]:
-    """Render period activities as professional area and workstream bullets.
-
-    Area/workstream metadata comes from the deterministic compiler.  Claude may
-    polish only the narrative body.  Generic placeholders such as ``Site`` are
-    never rendered as stand-alone headings.
-    """
-
-    rows = _as_list(value)
-    structured = [
-        row for row in rows
-        if isinstance(row, Mapping) and _activity_display_text(row)
-    ]
-    if not structured:
-        return _content_flowables(value, styles, empty_message=empty_message, bullets=True)
-
-    rendered: list[Flowable] = []
-    seen: set[str] = set()
-    generic_areas = {"", "site", "general", "all areas", "all area"}
-    for row in rows:
-        if not isinstance(row, Mapping):
-            text = _plain(row)
-            if text and text.casefold() not in seen:
-                rendered.append(Paragraph(f"&#8226;&nbsp;&nbsp;{_xml(text)}", styles["body"]))
-                seen.add(text.casefold())
-            continue
-
-        text = _activity_display_text(row)
-        if not text:
-            continue
-        area = _plain(_value(row, "area", "location")).strip()
-        workstream = _plain(row.get("workstream")).strip()
-        if area.casefold() in generic_areas:
-            area = ""
-
-        detail = _strip_generated_activity_prefixes(text, area=area, workstream=workstream)
-        if not detail:
-            continue
-
-        if area and workstream:
-            display = f"{area}, {workstream}: {detail}"
-        elif area:
-            display = f"{area}: {detail}"
-        elif workstream:
-            display = f"{workstream}: {detail}" if not detail.casefold().startswith((workstream + ":").casefold()) else detail
-        else:
-            display = detail
-
-        key = display.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        rendered.append(Paragraph(f"&#8226;&nbsp;&nbsp;{_xml(display)}", styles["body"]))
-
     if not rendered:
         rendered.append(_paragraph(empty_message, styles["placeholder"]))
     return rendered
@@ -1362,46 +1012,10 @@ def _shipment_table(rows: list[Mapping[str, Any]], styles: Mapping[str, Paragrap
     return table
 
 
-def _key_findings_table(rows: list[Any], styles: Mapping[str, ParagraphStyle]) -> LongTable | None:
-    data: list[list[Any]] = [[
-        _paragraph("Date / Area", styles["table_header"]),
-        _paragraph("Key Remark / Finding", styles["table_header"]),
-    ]]
-    for raw in rows:
-        if not isinstance(raw, Mapping):
-            continue
-        text = _plain(_value(raw, "text", "remark", "description"))
-        if not text:
-            continue
-        date = _plain(_value(raw, "date", "source_date"))
-        area = _plain(raw.get("area"))
-        label = " / ".join(value for value in (date, area) if value) or "Source remark"
-        occurrence_count = int(_number(raw.get("occurrence_count")) or 0)
-        if occurrence_count > 1:
-            label += f" ({occurrence_count} occurrences)"
-        data.append([
-            _paragraph(label, styles["table"]),
-            _paragraph(text, styles["table"]),
-        ])
-    if len(data) == 1:
-        return None
-    table = LongTable(data, colWidths=[110, 360], repeatRows=1, splitByRow=1, splitInRow=1)
-    table.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.5, BLACK),
-        ("BACKGROUND", (0, 0), (-1, 0), GREY_HEADER),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-    ]))
-    return table
-
-
 def _concerns_table(rows: list[Any], styles: Mapping[str, ParagraphStyle]) -> LongTable | None:
     data: list[list[Any]] = [[
         _paragraph("Area of Concern", styles["table_header"]),
-        _paragraph("Source-Recorded Action / Follow-up", styles["table_header"]),
+        _paragraph("Suggested Corrective Action", styles["table_header"]),
     ]]
     for raw in rows:
         if isinstance(raw, Mapping):
@@ -1444,9 +1058,7 @@ def _normalise_s_curve(
             plan = [_number(item) for item in plan_raw[:count]]
             actual = [_number(item) for item in actual_raw[:count]]
             if all(item is not None for item in plan + actual):
-                approved = _coerce_bool(value.get("approved"), False)
-                illustrative = _coerce_bool(value.get("illustrative"), False) or not approved
-                return labels[:count], [float(item) for item in plan], [float(item) for item in actual], illustrative
+                return labels[:count], [float(item) for item in plan], [float(item) for item in actual], False
 
     total = next(
         (row for row in reversed(progress)
@@ -1565,34 +1177,24 @@ class _SCurveFlowable(Flowable):
 
 
 def _normalise_appendices(value: Any, *, has_s_curve: bool) -> list[dict[str, Any]]:
-    # ``source_number`` is the stable internal appendix slot.  ``number`` is the
-    # display number and may later be reassigned after hidden appendices are
-    # removed.  Keeping both lets future data still map to the original 6.1-6.8
-    # definitions without forcing gaps in the issued report numbering.
     appendices = [
-        {
-            "source_number": number,
-            "number": number,
-            "title": title,
-            "status": "Not supplied",
-            "content": None,
-        }
+        {"number": number, "title": title, "status": "Not supplied", "content": None}
         for number, title in DEFAULT_APPENDICES
     ]
-    by_source_number = {item["source_number"]: item for item in appendices}
+    by_number = {item["number"]: item for item in appendices}
     next_index = 9
     for raw in _as_list(value):
         if isinstance(raw, Mapping):
-            source_number = _plain(raw.get("source_number") or raw.get("number"))
+            number = _plain(raw.get("number"))
             title = _plain(_value(raw, "title", "name", "description"))
             status = _plain(raw.get("status"))
             content = _value(raw, "content", "items", "notes", default=None)
         else:
-            source_number, title, status, content = "", _plain(raw), "", None
-        if not title and not source_number:
+            number, title, status, content = "", _plain(raw), "", None
+        if not title and not number:
             continue
-        if source_number in by_source_number:
-            item = by_source_number[source_number]
+        if number in by_number:
+            item = by_number[number]
             if title:
                 item["title"] = title
             if status:
@@ -1602,41 +1204,18 @@ def _normalise_appendices(value: Any, *, has_s_curve: bool) -> list[dict[str, An
                 if not status:
                     item["status"] = "Included"
             continue
-        source_number = source_number or f"6.{next_index}"
         item = {
-            "source_number": source_number,
-            "number": source_number,
+            "number": number or f"6.{next_index}",
             "title": title or "Appendix",
             "status": status or ("Included" if content else "Not supplied"),
             "content": content,
         }
         next_index += 1
         appendices.append(item)
-        by_source_number[source_number] = item
-    if has_s_curve and "6.2" in by_source_number:
-        by_source_number["6.2"]["status"] = "Included (generated)"
+        by_number[item["number"]] = item
+    if has_s_curve:
+        by_number["6.2"]["status"] = "Included (generated)"
     return appendices
-
-
-def _appendix_source_number(item: Mapping[str, Any]) -> str:
-    return _plain(item.get("source_number") or item.get("number"))
-
-
-def _renumber_visible_appendices(
-    items: list[dict[str, Any]],
-    *,
-    chapter_number: int = 6,
-) -> list[dict[str, Any]]:
-    """Assign contiguous display numbers to appendices that will be rendered.
-
-    The stable ``source_number`` remains unchanged, so internal mapping still
-    knows that manpower originated from slot 6.5, photographs from 6.6, etc.
-    Only the client-facing number is compacted to 6.1, 6.2, ... .
-    """
-
-    for index, item in enumerate(items, start=1):
-        item["number"] = f"{chapter_number}.{index}"
-    return items
 
 
 def _appendix_label(item: Mapping[str, Any]) -> str:
@@ -1644,1220 +1223,218 @@ def _appendix_label(item: Mapping[str, Any]) -> str:
     title = _plain(item.get("title"), "Appendix")
     status = _plain(item.get("status"))
     label = f"{number}    {title}".strip()
-    # Photo Documentation is a single navigational appendix entry.  Its
-    # attachment state is self-evident from the rendered photo pages, so keep
-    # the TOC/list label concise instead of showing ``[Attached]``.
-    if status and _appendix_source_number(item) != "6.6":
+    if status:
         label += f"  [{status}]"
     return label
-
-
-def _appendix_is_visible(item: Mapping[str, Any]) -> bool:
-    """Return True when an appendix should be shown in the issued report.
-
-    Appendix definitions are intentionally retained even when they are not
-    supplied.  This keeps the fixed 6.1-6.8 structure available for future
-    reports, while preventing empty ``[Not supplied]`` rows from cluttering the
-    current report and its table of contents.
-
-    Content always wins over a stale status value: if an appendix has actual
-    content, it remains visible even if its status was not updated correctly.
-    """
-
-    content = item.get("content")
-    if content not in (None, "", [], {}):
-        return True
-
-    status = _plain(item.get("status")).strip().casefold()
-    return status not in {"", "not supplied"}
-
-
-def _clean_photo_caption(value: Any, fallback: str = "") -> str:
-    text = _plain(value, fallback)
-    if not text:
-        return ""
-    # Last-resort protection for legacy drafts imported before the parser
-    # boilerplate fix. Never show page headers/footers inside photo captions.
-    return re.sub(
-        r"\s+(?:PT\.?\s+GARUDA\s+PRIMA\s+AKSARA|T\.\s*Garuda\s+Prima\s+Aksara|"
-        r"Daily\s+Activity\s+Report|aily\s+Activity\s+Report)\b.*$",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    ).strip()
-
-
-def _group_photo_references(
-    photos: list[Any],
-) -> tuple[dict[str, list[Mapping[str, Any]]], list[str]]:
-    prepared: list[Mapping[str, Any]] = []
-    seen_references: set[tuple[str, str, str]] = set()
-    for raw in photos:
-        if not isinstance(raw, Mapping):
-            continue
-        asset_id = _plain(raw.get("asset_id"))
-        if not is_asset_id(asset_id):
-            continue
-        reference_key = (
-            asset_id,
-            _plain(raw.get("source_report_id")),
-            _plain(raw.get("source_date")),
-        )
-        if reference_key in seen_references:
-            continue
-        seen_references.add(reference_key)
-        prepared.append(raw)
-
-    prepared.sort(key=lambda row: (
-        _plain(row.get("source_date"), "9999-99-99"),
-        int(_number(row.get("order")) or 0),
-        _plain(row.get("source")),
-        int(_number(row.get("page")) or 0),
-    ))
-    grouped: dict[str, list[Mapping[str, Any]]] = {}
-    group_order: list[str] = []
-    for row in prepared:
-        source_date = _plain(row.get("source_date"), "Undated source")
-        if source_date not in grouped:
-            grouped[source_date] = []
-            group_order.append(source_date)
-        grouped[source_date].append(row)
-    return grouped, group_order
-
-
-def _photo_page_capacity(items: list[Mapping[str, Any]], start: int) -> int:
-    """Choose 12 cards normally, or 9 when captions need more vertical room."""
-
-    probe = items[start:start + 12]
-    captions = [
-        _clean_photo_caption(row.get("caption"))
-        for row in probe
-        if isinstance(row, Mapping)
-    ]
-    non_empty = [caption for caption in captions if caption]
-    long_count = sum(len(caption) > 120 for caption in non_empty)
-    very_long_count = sum(len(caption) > 180 for caption in non_empty)
-    if very_long_count >= 2 or long_count >= 5:
-        return 9
-    return 12
-
-
-def _render_photo_image(
-    path: str,
-    *,
-    width: float,
-    height: float,
-    image_module: Any,
-    image_ops: Any,
-    contain: bool = False,
-) -> RLImage | None:
-    try:
-        with image_module.open(path) as opened:
-            if str(opened.format or "").upper() != "JPEG":
-                return None
-            image = image_ops.exif_transpose(opened).convert("RGB")
-            target_size = (max(1, int(width * 2)), max(1, int(height * 2)))
-            if contain:
-                visible = image_ops.contain(
-                    image,
-                    target_size,
-                    method=image_module.Resampling.LANCZOS,
-                )
-                fitted = image_module.new("RGB", target_size, "white")
-                fitted.paste(
-                    visible,
-                    (
-                        (target_size[0] - visible.width) // 2,
-                        (target_size[1] - visible.height) // 2,
-                    ),
-                )
-            else:
-                fitted = image_ops.fit(
-                    image,
-                    target_size,
-                    method=image_module.Resampling.LANCZOS,
-                )
-            image_buffer = io.BytesIO()
-            fitted.save(image_buffer, format="JPEG", quality=82, optimize=True)
-            image_buffer.seek(0)
-        return RLImage(image_buffer, width=width, height=height)
-    except Exception:
-        return None
-
-
-def _photo_card_text(raw: Mapping[str, Any]) -> tuple[str, str]:
-    source = _plain(raw.get("source"))
-    page = _plain(raw.get("page"))
-    area = _clean_photo_caption(raw.get("source_area"))
-    photo_card = (
-        _plain(raw.get("context_type")).casefold() == "photo_card"
-        or _plain(raw.get("photo_match_method")).casefold() == "photo_card_geometry"
-    )
-    fallback = "" if photo_card else (f"{source} - p.{page}" if source and page else source)
-    return area, _clean_photo_caption(raw.get("caption"), fallback)
-
-
-def _photo_card(
-    raw: Mapping[str, Any],
-    *,
-    root: str,
-    cell_width: float,
-    image_width: float,
-    image_height: float,
-    compact: bool,
-    photo_text_style: ParagraphStyle,
-    image_module: Any,
-    image_ops: Any,
-    text_heights: tuple[float, float] | None = None,
-) -> Table | None:
-    asset_id = _plain(raw.get("asset_id"))
-    path = os.path.realpath(os.path.join(root, asset_filename(asset_id)))
-    if os.path.dirname(path) != root or not os.path.isfile(path):
-        return None
-    rendered_image = _render_photo_image(
-        path,
-        width=image_width,
-        height=image_height,
-        image_module=image_module,
-        image_ops=image_ops,
-        # Fill the fixed frame proportionally, cropping excess from the centre.
-        contain=False,
-    )
-    if rendered_image is None:
-        return None
-
-    area, caption = _photo_card_text(raw)
-
-    card_rows: list[list[Any]] = []
-    if area or (text_heights and text_heights[0]):
-        card_rows.append([Paragraph(f"<b>{_xml(area)}</b>", photo_text_style)])
-    if caption or (text_heights and text_heights[1]):
-        card_rows.append([Paragraph(f"<i>{_xml(caption)}</i>", photo_text_style)])
-    card_rows.append([rendered_image])
-    row_heights = [h for h in text_heights if h] + [None] if text_heights else None
-    card = Table(card_rows, colWidths=[cell_width - 4], rowHeights=row_heights)
-    card_padding = 2 if compact else 3
-    card_style = [
-        ("BOX", (0, 0), (-1, -1), 0.55, CYAN),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), card_padding),
-        ("RIGHTPADDING", (0, 0), (-1, -1), card_padding),
-        ("TOPPADDING", (0, 0), (-1, -1), card_padding),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), card_padding),
-        ("LEFTPADDING", (0, -1), (-1, -1), 0),
-        ("RIGHTPADDING", (0, -1), (-1, -1), 0),
-        ("TOPPADDING", (0, -1), (-1, -1), 0),
-        ("BOTTOMPADDING", (0, -1), (-1, -1), 0),
-    ]
-    if area or (text_heights and text_heights[0]):
-        card_style.extend([
-            ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#DDEBF7")),
-            ("LINEBELOW", (0, 0), (0, 0), 0.35, CYAN),
-        ])
-        if caption or (text_heights and text_heights[1]):
-            card_style.append(("BACKGROUND", (0, 1), (0, 1), LIGHT_GREY))
-    elif caption or (text_heights and text_heights[1]):
-        card_style.append(("BACKGROUND", (0, 0), (0, 0), LIGHT_GREY))
-    card.setStyle(TableStyle(card_style))
-    return card
-
-
-def _photo_grid_table(
-    items: list[Mapping[str, Any]],
-    styles: Mapping[str, ParagraphStyle],
-    *,
-    root: str,
-    compact: bool,
-    image_module: Any,
-    image_ops: Any,
-) -> Table | None:
-    columns = 3
-    cell_width = BODY_WIDTH / columns
-    card_padding = 2 if compact else 3
-    image_width = cell_width - 4
-    text_width = image_width - 2 * card_padding
-    image_height = 88.0 if compact else 122.0
-    photo_text_style = (
-        ParagraphStyle(
-            "MonthlyPhotoCompact",
-            parent=styles["small"],
-            fontSize=7.8,
-            leading=9.2,
-            spaceAfter=1,
-            splitLongWords=1,
-        )
-        if compact
-        else styles["small"]
-    )
-    rows: list[list[Any]] = []
-    current: list[Any] = []
-    text_heights = (0.0, 0.0)
-    for index, raw in enumerate(items):
-        if index % columns == 0:
-            if current:
-                current.extend([""] * (columns - len(current)))
-                rows.append(current)
-                current = []
-            heights = [0.0, 0.0]
-            for item in items[index:index + columns]:
-                for slot, (text, tag) in enumerate(zip(_photo_card_text(item), ("b", "i"))):
-                    if text:
-                        paragraph = Paragraph(f"<{tag}>{_xml(text)}</{tag}>", photo_text_style)
-                        heights[slot] = max(heights[slot], paragraph.wrap(text_width, 10000)[1] + 2 * card_padding)
-            text_heights = tuple(heights)
-        card = _photo_card(
-            raw,
-            root=root,
-            cell_width=cell_width,
-            image_width=image_width,
-            image_height=image_height,
-            compact=compact,
-            photo_text_style=photo_text_style,
-            image_module=image_module,
-            image_ops=image_ops,
-            text_heights=text_heights,
-        )
-        if card is None:
-            continue
-        current.append(card)
-        if len(current) == columns:
-            rows.append(current)
-            current = []
-    if current:
-        current.extend([""] * (columns - len(current)))
-        rows.append(current)
-    if not rows:
-        return None
-    grid_padding_x = 1 if compact else 2
-    grid_padding_y = 2 if compact else 4
-    grid = Table(rows, colWidths=[cell_width] * columns, hAlign="LEFT", splitByRow=1)
-    grid.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), grid_padding_x),
-        ("RIGHTPADDING", (0, 0), (-1, -1), grid_padding_x),
-        ("TOPPADDING", (0, 0), (-1, -1), grid_padding_y),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), grid_padding_y),
-    ]))
-    return grid
-
-
-class _PhotoDocumentationPages(Flowable):
-    """Pack whole dated photo rows into the actual remaining page space."""
-
-    def __init__(self, rows: list[tuple[str, Table, bool]], heading_style: ParagraphStyle):
-        super().__init__()
-        self.rows = rows
-        self.heading_style = heading_style
-
-    def _page_table(self, rows: list[tuple[str, Table, bool]]) -> Table:
-        cells: list[list[Any]] = []
-        previous_date = None
-        for source_date, grid, continued in rows:
-            if source_date != previous_date:
-                if cells:
-                    cells.append([Spacer(1, 8)])
-                suffix = " (continued)" if continued else ""
-                cells.extend([
-                    [_display_heading(f"Photo Documentation: {source_date}{suffix}", self.heading_style)],
-                    [Spacer(1, 6)],
-                ])
-            cells.append([grid])
-            previous_date = source_date
-        table = Table(cells, colWidths=[BODY_WIDTH], splitByRow=0, hAlign="LEFT")
-        table.setStyle(TableStyle([
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ("TOPPADDING", (0, 0), (-1, -1), 0),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-        ]))
-        return table
-
-    def wrap(self, availWidth: float, availHeight: float) -> tuple[float, float]:
-        self.page_table = self._page_table(self.rows[:4])
-        self.width, self.height = self.page_table.wrap(availWidth, availHeight)
-        if len(self.rows) > 4:
-            # Ask ReportLab to split here even when the first four rows fit.
-            return self.width, max(self.height, availHeight + 1)
-        return self.width, self.height
-
-    def split(self, availWidth: float, availHeight: float) -> list[Flowable]:
-        fitted = 0
-        page = None
-        for count in range(1, min(4, len(self.rows)) + 1):
-            candidate = self._page_table(self.rows[:count])
-            if candidate.wrap(availWidth, availHeight)[1] > availHeight:
-                break
-            fitted, page = count, candidate
-        if not fitted:
-            return []
-        if fitted == len(self.rows):
-            return [page]
-        return [page, PageBreak(), _PhotoDocumentationPages(self.rows[fitted:], self.heading_style)]
-
-    def draw(self) -> None:
-        self.page_table.drawOn(self.canv, 0, 0)
-
-
-def _photo_grid_flowables(
-    photos: list[Any],
-    styles: Mapping[str, ParagraphStyle],
-    *,
-    photo_base_dir: str | os.PathLike[str] | None,
-) -> list[Flowable]:
-    """Share pages across dates without mixing dates within a photo row."""
-
-    if photo_base_dir is None:
-        return [Paragraph("Photo assets are unavailable.", styles["placeholder"])]
-    try:
-        from PIL import Image, ImageOps
-    except ImportError:
-        return [Paragraph("Photo rendering requires Pillow.", styles["placeholder"])]
-
-    root = os.path.realpath(os.fspath(photo_base_dir))
-    grouped, group_order = _group_photo_references(photos)
-    rows: list[tuple[str, Table, bool]] = []
-    for source_date in group_order:
-        items = grouped[source_date]
-        for chunk_index in range(0, len(items), 3):
-            capacity = _photo_page_capacity(items, chunk_index)
-            grid = _photo_grid_table(
-                items[chunk_index:chunk_index + 3],
-                styles,
-                root=root,
-                compact=(capacity == 12),
-                image_module=Image,
-                image_ops=ImageOps,
-            )
-            if grid is not None:
-                rows.append((source_date, grid, chunk_index > 0))
-
-    if not rows:
-        return [Paragraph("No selected photo assets are available.", styles["placeholder"])]
-    return [_PhotoDocumentationPages(rows, styles["h2"])]
-
-def _person_days_text(value: Any) -> Any:
-    number = _number(value)
-    if number is None:
-        return value
-    return int(number) if float(number).is_integer() else number
-
-
-def _manpower_summary_table(
-    totals: Mapping[str, Any],
-    styles: Mapping[str, ParagraphStyle],
-) -> Table:
-    header = styles["table_header"]
-    body = styles["table"]
-    center = styles["table_center"]
-    rows = [
-        ["Category", "Person-days", "Regular MH", "OT MH", "Total MH"],
-        [
-            "Direct",
-            _person_days_text(totals.get("direct_person_days", "Not supplied")),
-            totals.get("regular_direct_man_hours", totals.get("direct_man_hours", "Not supplied")),
-            totals.get("direct_overtime_man_hours", "Not supplied"),
-            totals.get("direct_man_hours", "Not supplied"),
-        ],
-        [
-            "Indirect",
-            _person_days_text(totals.get("indirect_person_days", "Not supplied")),
-            totals.get("regular_indirect_man_hours", totals.get("indirect_man_hours", "Not supplied")),
-            totals.get("indirect_overtime_man_hours", "Not supplied"),
-            totals.get("indirect_man_hours", "Not supplied"),
-        ],
-        [
-            "Total",
-            _person_days_text(totals.get("total_person_days", "Not supplied")),
-            totals.get("regular_man_hours", totals.get("total_man_hours", "Not supplied")),
-            totals.get("overtime_man_hours", "Not supplied"),
-            totals.get("total_man_hours", "Not supplied"),
-        ],
-    ]
-    table = Table(
-        [
-            [
-                _paragraph(
-                    cell,
-                    header if row_index == 0 else (body if column_index == 0 else center),
-                )
-                for column_index, cell in enumerate(row)
-            ]
-            for row_index, row in enumerate(rows)
-        ],
-        colWidths=[118, 86, 90, 82, 90],
-        repeatRows=1,
-        hAlign="CENTER",
-    )
-    table.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.5, BLACK),
-        ("BACKGROUND", (0, 0), (-1, 0), GREY_HEADER),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-    ]))
-    return table
-
-
-def _manpower_metric_text(number: float | None) -> str:
-    if number is None:
-        return "Not supplied"
-    return (
-        str(int(number))
-        if float(number).is_integer()
-        else f"{number:.2f}".rstrip("0").rstrip(".")
-    )
-
-
-def _manpower_metric_flowables(
-    totals: Mapping[str, Any],
-    styles: Mapping[str, ParagraphStyle],
-) -> list[Flowable]:
-    not_supplied_days = _number(totals.get("manpower_not_supplied_day_count"))
-    result: list[Flowable] = []
-    if not_supplied_days is not None and not_supplied_days > 0:
-        result.extend([
-            _paragraph(
-                "Manpower was not supplied for "
-                f"{_manpower_metric_text(not_supplied_days)} covered Daily Report date(s); "
-                "averages and known totals exclude those dates.",
-                styles["placeholder"],
-            ),
-            Spacer(1, 6),
-        ])
-    if int(_number(totals.get("cross_category_duplicate_count")) or 0) > 0:
-        result.extend([
-            _paragraph(
-                "Same-day cross-category duplicate names were reconciled once; "
-                "direct/area assignment takes precedence for category totals.",
-                styles["placeholder"],
-            ),
-            Spacer(1, 6),
-        ])
-    return result
-
-
-def _daily_manpower_table(
-    daily: list[Mapping[str, Any]],
-    styles: Mapping[str, ParagraphStyle],
-) -> LongTable:
-    rows: list[list[Any]] = [[
-        "Date", "Direct HC", "Indirect HC", "Total HC", "Regular MH", "OT MH", "Total MH",
-    ]]
-    for row in daily:
-        if row.get("supplied") is False:
-            rows.append([
-                row.get("date", ""),
-                "Not supplied",
-                "Not supplied",
-                "Not supplied",
-                "Not supplied",
-                row.get("overtime_man_hours", "Not supplied"),
-                "Not supplied",
-            ])
-            continue
-        regular = row.get("regular_man_hours")
-        if regular is None:
-            regular = row.get("total_man_hours")
-        if regular is None:
-            direct_value = _number(row.get("direct_man_hours")) or 0
-            indirect_value = _number(row.get("indirect_man_hours")) or 0
-            regular = direct_value + indirect_value
-        rows.append([
-            row.get("date", ""),
-            row.get("direct_headcount", 0),
-            row.get("indirect_headcount", 0),
-            row.get("total_headcount", 0),
-            regular,
-            row.get("overtime_man_hours", "Not supplied"),
-            row.get("total_man_hours", regular),
-        ])
-    table = LongTable(
-        [
-            [_paragraph(cell, styles["table_header"] if row_index == 0 else styles["table_center"]) for cell in row]
-            for row_index, row in enumerate(rows)
-        ],
-        colWidths=[74, 61, 66, 61, 70, 65, 72],
-        repeatRows=1,
-        splitByRow=1,
-    )
-    table.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.45, BLACK),
-        ("BACKGROUND", (0, 0), (-1, 0), CYAN),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 2),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-        ("TOPPADDING", (0, 0), (-1, -1), 2),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-    ]))
-    return table
-
-
-def _role_manpower_table(
-    roles: list[Mapping[str, Any]],
-    styles: Mapping[str, ParagraphStyle],
-) -> LongTable:
-    rows: list[list[Any]] = [["Role / Position", "Person-days", "Man-hours"]]
-    for row in roles:
-        rows.append([
-            row.get("role", "Unspecified"),
-            _person_days_text(row.get("person_days", row.get("present_person_days", ""))),
-            row.get("man_hours", row.get("physical_manhours", "")),
-        ])
-    table = LongTable(
-        [
-            [
-                _paragraph(
-                    cell,
-                    styles["table_header"]
-                    if row_index == 0
-                    else (styles["table"] if column_index == 0 else styles["table_center"]),
-                )
-                for column_index, cell in enumerate(row)
-            ]
-            for row_index, row in enumerate(rows)
-        ],
-        colWidths=[270, 100, 100],
-        repeatRows=1,
-    )
-    table.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.45, BLACK),
-        ("BACKGROUND", (0, 0), (-1, 0), CYAN),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-        ("TOPPADDING", (0, 0), (-1, -1), 2),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-    ]))
-    return table
-
-
-def _manpower_source_flowables(
-    value: Mapping[str, Any],
-    totals: Mapping[str, Any],
-    styles: Mapping[str, ParagraphStyle],
-) -> list[Flowable]:
-    if totals.get("source"):
-        text = (
-            "Source: reviewed attendance workbook. Regular physical man-hours use "
-            "10 hours per present day; overtime is elapsed clock time only when explicitly applied."
-        )
-    elif value.get("hours_method"):
-        text = (
-            "Source: Daily Reports. Calculation policy: "
-            + _plain(value.get("hours_method"))
-            + "."
-        )
-    else:
-        return []
-    return [Spacer(1, 8), _paragraph(text, styles["placeholder"])]
-
-
-def _manpower_appendix_flowables(
-    manpower: Any,
-    styles: Mapping[str, ParagraphStyle],
-) -> list[Flowable]:
-    """Render deterministic attendance and man-hour details in Appendix 6.5."""
-
-    value = manpower if isinstance(manpower, Mapping) else {}
-    totals = value.get("totals") if isinstance(value.get("totals"), Mapping) else {}
-    daily = [row for row in _as_list(value.get("daily")) if isinstance(row, Mapping)]
-    roles = [row for row in _as_list(value.get("roles")) if isinstance(row, Mapping)]
-    result: list[Flowable] = [
-        _manpower_summary_table(totals, styles),
-        Spacer(1, 10),
-        *_manpower_metric_flowables(totals, styles),
-    ]
-    if daily:
-        result.extend([
-            _heading("Daily Headcount and Man-hours", styles["h2"], 1),
-            _daily_manpower_table(daily, styles),
-            Spacer(1, 10),
-        ])
-    if roles:
-        result.extend([
-            _heading("Role Summary", styles["h2"], 1),
-            _role_manpower_table(roles, styles),
-        ])
-    return result
-
-
-def _report_progress_curve(
-    report: Mapping[str, Any],
-    *,
-    report_type: str,
-) -> tuple[list[dict[str, Any]], tuple[list[str], list[float], list[float], bool] | None]:
-    status = _normalise_status(
-        _value(report, "status", "report_mode", default="draft"),
-        report_type=report_type,
-    )
-    progress = _normalise_progress(
-        report.get("progress", report.get("overall_progress", []))
-    )
-    explicit_curve = (
-        _normalise_s_curve(report.get("s_curve"), [])
-        if isinstance(report.get("s_curve"), Mapping)
-        else None
-    )
-    if "include_s_curve" in report:
-        include_s_curve = _coerce_bool(report.get("include_s_curve"), False)
-    elif explicit_curve is not None:
-        include_s_curve = True
-    else:
-        include_s_curve = bool(progress) and status != "FINAL"
-    curve = _normalise_s_curve(report.get("s_curve"), progress) if include_s_curve else None
-    if status == "FINAL" and curve is not None and curve[3]:
-        raise ValueError(
-            "Final reports cannot render an illustrative/unapproved S-Curve. "
-            "Supply an approved time series or disable the S-Curve."
-        )
-    return progress, curve
-
-
-def _visible_report_appendices(
-    report: Mapping[str, Any],
-    *,
-    curve: tuple[list[str], list[float], list[float], bool] | None,
-    manpower: Mapping[str, Any],
-    photos: list[Mapping[str, Any]],
-    chapter_number: int = 6,
-) -> list[dict[str, Any]]:
-    appendices = _normalise_appendices(
-        report.get("appendices"),
-        has_s_curve=curve is not None,
-    )
-    manpower_totals = (
-        manpower.get("totals") if isinstance(manpower.get("totals"), Mapping) else {}
-    )
-    if manpower.get("daily") or manpower_totals:
-        for item in appendices:
-            if _appendix_source_number(item) == "6.5":
-                item["status"] = "Attached"
-                item["content"] = "__reviewed_manpower__"
-                break
-    if photos:
-        for item in appendices:
-            if _appendix_source_number(item) == "6.6":
-                item["status"] = "Attached"
-                item["content"] = "__reviewed_photos__"
-                break
-    return _renumber_visible_appendices(
-        [item for item in appendices if _appendix_is_visible(item)],
-        chapter_number=chapter_number,
-    )
-
-
-def _toc_story(styles: Mapping[str, ParagraphStyle]) -> list[Flowable]:
-    toc = TableOfContents()
-    toc.dotsMinLevel = 0
-    toc.levelStyles = [
-        ParagraphStyle(
-            "MonthlyTOCLevel0",
-            fontName="Helvetica",
-            fontSize=10.5,
-            leading=11.5,
-            leftIndent=10,
-            firstLineIndent=-10,
-            spaceBefore=1,
-            spaceAfter=0,
-            textColor=BLACK,
-        ),
-        ParagraphStyle(
-            "MonthlyTOCLevel1",
-            fontName="Helvetica",
-            fontSize=9.5,
-            leading=10.5,
-            leftIndent=26,
-            firstLineIndent=-10,
-            spaceBefore=0,
-            spaceAfter=0,
-            textColor=BLACK,
-        ),
-    ]
-    return [
-        Spacer(1, 1),
-        NextPageTemplate("body"),
-        PageBreak(),
-        Paragraph("Table of Contents", styles["toc_title"]),
-        toc,
-        PageBreak(),
-    ]
-
-
-def _executive_section_has_data(
-    report: Mapping[str, Any],
-    progress: list[dict[str, Any]],
-) -> bool:
-    coverage = report.get("coverage") if isinstance(report.get("coverage"), Mapping) else {}
-    has_coverage = any(
-        _has_section_data(coverage.get(key))
-        for key in ("expected_dates", "covered_dates", "found_dates", "missing_dates")
-    )
-    return _has_section_data(report.get("executive_summary")) or bool(progress) or has_coverage
-
-
-def _safety_section_has_data(report: Mapping[str, Any]) -> bool:
-    safety = report.get("safety") if isinstance(report.get("safety"), Mapping) else {}
-    return any(
-        value is not None and value != ""
-        for value in (
-            _value(safety, "peak_daily_headcount", "total_manpower", "manpower", default=None),
-            _value(safety, "total_man_hours", "man_hours", default=None),
-            _value(safety, "total_recordable_cases", "recordable_cases", default=None),
-            safety.get("lost_workdays"),
-            safety.get("lost_time_injuries"),
-            safety.get("severity_rate"),
-            safety.get("average_day_away"),
-        )
-    )
-
-
-def _procurement_parts(report: Mapping[str, Any]) -> dict[str, Any]:
-    procurement = report.get("procurement")
-    summary, po_rows, embedded_equipment, embedded_shipments = _po_rows(procurement)
-    equipment = report.get("equipment_delivery", embedded_equipment)
-    shipments = report.get("shipments", embedded_shipments)
-
-    equipment_rows: list[Mapping[str, Any]] = []
-    equipment_summary: Any = equipment
-    if isinstance(equipment, Mapping):
-        equipment_summary = equipment.get("summary")
-        equipment_rows = [
-            row
-            for row in _as_list(_value(equipment, "rows", "items", default=[]))
-            if isinstance(row, Mapping)
-        ]
-    elif isinstance(equipment, Sequence) and not isinstance(
-        equipment, (str, bytes, bytearray)
-    ):
-        equipment_rows = [row for row in equipment if isinstance(row, Mapping)]
-        if equipment_rows:
-            equipment_summary = None
-
-    shipment_summary: Any = None
-    shipment_rows = [row for row in _as_list(shipments) if isinstance(row, Mapping)]
-    if isinstance(shipments, Mapping):
-        shipment_summary = shipments.get("summary")
-        shipment_rows = [
-            row
-            for row in _as_list(_value(shipments, "rows", "items", default=[]))
-            if isinstance(row, Mapping)
-        ]
-
-    return {
-        "summary": summary,
-        "po_rows": po_rows,
-        "procurement_visible": _has_section_data(summary) or _has_section_data(po_rows),
-        "equipment_summary": equipment_summary,
-        "equipment_rows": equipment_rows,
-        "equipment_visible": _has_section_data(equipment_summary) or _has_section_data(equipment_rows),
-        "shipment_summary": shipment_summary,
-        "shipment_rows": shipment_rows,
-        "shipment_visible": _has_section_data(shipment_summary) or _has_section_data(shipment_rows),
-    }
-
-
-def _site_parts(report: Mapping[str, Any], report_type: str) -> dict[str, Any]:
-    site = report.get("site") if isinstance(report.get("site"), Mapping) else {}
-    current_keys, next_keys, _, _, _, _ = _site_activity_configuration(report_type)
-    current = _value(site, *current_keys, default=_value(report, *current_keys, default=[]))
-    upcoming = _value(site, *next_keys, default=_value(report, *next_keys, default=[]))
-    schedule = _value(site, "schedule_status", "project_schedule_status")
-    concerns = _real_concern_rows(
-        _value(site, "concerns", "constraints", default=report.get("constraints"))
-    )
-    findings = _real_finding_rows(site.get("key_findings"))
-    return {
-        "site": site,
-        "summary": site.get("summary"),
-        "schedule": schedule,
-        "schedule_visible": _has_section_data(schedule),
-        "current": current,
-        "current_visible": _has_section_data(current),
-        "upcoming": upcoming,
-        "upcoming_visible": _has_section_data(upcoming),
-        "concerns": concerns,
-        "findings": findings,
-        "concerns_visible": bool(concerns),
-        "findings_visible": bool(findings),
-    }
-
-
-def _summary_safety_story(
-    report: Mapping[str, Any],
-    styles: Mapping[str, ParagraphStyle],
-    *,
-    report_type: str,
-    progress: list[dict[str, Any]],
-    executive_number: int | None,
-    safety_number: int | None,
-) -> list[Flowable]:
-    story: list[Flowable] = []
-    if executive_number is not None:
-        story.append(_heading(
-            f"{executive_number}. Executive Summary",
-            styles["h1"],
-            0,
-        ))
-        if _has_section_data(report.get("executive_summary")) or progress:
-            story.extend([
-                _paragraph(_executive_summary(report, progress), styles["body"]),
-                Spacer(1, 6),
-            ])
-        if progress:
-            story.extend([
-                _progress_table(
-                    progress,
-                    styles,
-                    report_type=report_type,
-                    period_label=_plain(report.get("progress_period_label")),
-                ),
-                Spacer(1, 18),
-            ])
-    if safety_number is not None:
-        story.extend([
-            _heading(f"{safety_number}. Safety Status", styles["h1"], 0),
-            Paragraph("<b>Status summary:</b>", styles["body"]),
-            _safety_table(report.get("safety"), styles),
-        ])
-    if story:
-        story.append(PageBreak())
-    return story
-
-
-def _engineering_story(
-    report: Mapping[str, Any],
-    styles: Mapping[str, ParagraphStyle],
-    *,
-    chapter_number: int,
-) -> list[Flowable]:
-    story: list[Flowable] = [
-        _heading(f"{chapter_number}. Engineering", styles["h1"], 0),
-        _heading(f"{chapter_number}.1 Status Engineering", styles["h2"], 1),
-    ]
-    story.extend(_content_flowables(
-        _client_facing_missing_summary(report.get("engineering"), section="engineering"),
-        styles,
-        empty_message="No engineering status data was supplied in the available Daily Reports.",
-        bullets=True,
-    ))
-    story.append(PageBreak())
-    return story
-
-
-def _procurement_story(
-    report: Mapping[str, Any],
-    styles: Mapping[str, ParagraphStyle],
-    *,
-    chapter_number: int,
-) -> list[Flowable]:
-    parts = _procurement_parts(report)
-    story: list[Flowable] = [
-        _heading(f"{chapter_number}. Procurement", styles["h1"], 0)
-    ]
-    subsection = 1
-    if parts["procurement_visible"]:
-        story.append(_heading(
-            f"{chapter_number}.{subsection} Procurement Status",
-            styles["h2"],
-            1,
-        ))
-        if _has_section_data(parts["summary"]):
-            story.extend([_paragraph(parts["summary"], styles["body"]), Spacer(1, 3)])
-        if parts["po_rows"]:
-            story.extend([_procurement_table(parts["po_rows"], styles), Spacer(1, 10)])
-        subsection += 1
-
-    if parts["equipment_visible"]:
-        story.append(_heading(
-            f"{chapter_number}.{subsection} Equipment Delivery Status",
-            styles["h2"],
-            1,
-        ))
-        if parts["equipment_rows"]:
-            story.extend([_equipment_table(parts["equipment_rows"], styles), Spacer(1, 10)])
-        elif _has_section_data(parts["equipment_summary"]):
-            story.extend(_content_flowables(
-                parts["equipment_summary"],
-                styles,
-                empty_message="",
-                bullets=True,
-            ))
-        subsection += 1
-
-    if parts["shipment_visible"]:
-        story.append(_heading(
-            f"{chapter_number}.{subsection} Shipment Status",
-            styles["h2"],
-            1,
-        ))
-        if _has_section_data(parts["shipment_summary"]):
-            story.extend([
-                _paragraph(parts["shipment_summary"], styles["body"]),
-                Spacer(1, 3),
-            ])
-        if parts["shipment_rows"]:
-            story.append(_shipment_table(parts["shipment_rows"], styles))
-    story.append(PageBreak())
-    return story
-
-
-def _site_activity_configuration(report_type: str) -> tuple[Any, ...]:
-    if report_type == "weekly":
-        return (
-            (
-                "this_period_activities", "current_period_activities", "this_period",
-                "current_period", "this_week_activities", "this_week",
-                "this_month_activities", "this_month", "activities",
-            ),
-            (
-                "next_period_activities", "planned_next_period_activities",
-                "next_week_activities", "planned_next_week",
-            ),
-            "This Week Activities",
-            "Planned Activities Next Week",
-            "No current-week activities supplied.",
-            "No next-week activities supplied.",
-        )
-    return (
-        (
-            "this_month_activities", "this_month", "this_period_activities",
-            "current_period_activities", "this_period", "current_period", "activities",
-        ),
-        (
-            "next_month_activities", "next_period_activities",
-            "planned_next_period_activities", "planned_next_month",
-        ),
-        "This Month Activities",
-        "Planned Activities Next Month",
-        "No current-month activities supplied.",
-        "No next-month activities supplied.",
-    )
-
-
-def _site_story(
-    report: Mapping[str, Any],
-    styles: Mapping[str, ParagraphStyle],
-    *,
-    report_type: str,
-    chapter_number: int,
-) -> list[Flowable]:
-    parts = _site_parts(report, report_type)
-    (
-        current_keys,
-        next_keys,
-        current_heading,
-        next_heading,
-        current_empty,
-        next_empty,
-    ) = _site_activity_configuration(report_type)
-    story: list[Flowable] = [
-        _heading(f"{chapter_number}. Site Services / Construction", styles["h1"], 0)
-    ]
-    if _has_section_data(parts["summary"]):
-        story.extend([_paragraph(parts["summary"], styles["body"]), Spacer(1, 3)])
-
-    subsection = 1
-    if parts["schedule_visible"]:
-        story.append(_heading(
-            f"{chapter_number}.{subsection} Project Schedule Status",
-            styles["h2"],
-            1,
-        ))
-        story.extend(_content_flowables(parts["schedule"], styles, empty_message=""))
-        subsection += 1
-    if parts["current_visible"]:
-        story.append(_heading(
-            f"{chapter_number}.{subsection} {current_heading}",
-            styles["h2"],
-            1,
-        ))
-        story.extend(_activity_flowables(parts["current"], styles, empty_message=current_empty))
-        subsection += 1
-    if parts["upcoming_visible"]:
-        story.append(_heading(
-            f"{chapter_number}.{subsection} {next_heading}",
-            styles["h2"],
-            1,
-        ))
-        story.extend(_activity_flowables(parts["upcoming"], styles, empty_message=next_empty))
-        subsection += 1
-    if parts["concerns_visible"]:
-        story.append(_heading(
-            f"{chapter_number}.{subsection} Area of Concern and Suggested Corrective Action",
-            styles["h2"],
-            1,
-        ))
-        concerns_table = _concerns_table(parts["concerns"], styles)
-        if concerns_table is not None:
-            story.append(concerns_table)
-        subsection += 1
-    if parts["findings_visible"]:
-        findings_table = _key_findings_table(parts["findings"], styles)
-        if findings_table is not None:
-            story.extend([
-                _heading(
-                    f"{chapter_number}.{subsection} Key Remarks / Findings",
-                    styles["h2"],
-                    1,
-                ),
-                findings_table,
-            ])
-    story.append(PageBreak())
-    return story
-
-
-def _appendices_story(
-    visible_appendices: list[dict[str, Any]],
-    styles: Mapping[str, ParagraphStyle],
-    *,
-    curve: tuple[list[str], list[float], list[float], bool] | None,
-    photos: list[Mapping[str, Any]],
-    manpower: Mapping[str, Any],
-    photo_base_dir: str | os.PathLike[str] | None,
-    chapter_number: int,
-    curve_note: str = "",
-) -> list[Flowable]:
-    story: list[Flowable] = []
-    if visible_appendices:
-        story.append(_heading(f"{chapter_number}. Appendices", styles["h1"], 0))
-    rendered_sections = 0
-    for item in visible_appendices:
-        content = item.get("content")
-        is_curve = curve is not None and _appendix_source_number(item) == "6.2"
-        if not is_curve and content in (None, "", [], {}):
-            continue
-        if rendered_sections:
-            story.append(PageBreak())
-        story.append(_heading(
-            f"Appendix {item['number']} - {item['title']}",
-            styles["h1"],
-            1,
-        ))
-        if is_curve:
-            labels, planned, actual, illustrative = curve
-            story.extend([
-                Spacer(1, 10),
-                _SCurveFlowable(labels, planned, actual, illustrative=illustrative),
-            ])
-            if curve_note:
-                story.extend(_content_flowables(
-                    curve_note, styles,
-                    empty_message="", bullets=False,
-                ))
-        elif content == "__reviewed_photos__":
-            story.extend(_photo_grid_flowables(
-                photos,
-                styles,
-                photo_base_dir=photo_base_dir,
-            ))
-        elif content == "__reviewed_manpower__":
-            story.extend(_manpower_appendix_flowables(manpower, styles))
-        else:
-            story.extend(_content_flowables(
-                content,
-                styles,
-                empty_message="No appendix content supplied.",
-                bullets=True,
-            ))
-        rendered_sections += 1
-
-    # A status-only external attachment has no in-document content page. Keep
-    # it discoverable beneath Chapter 6 without reintroducing a separate list
-    # page for appendices that do have content.
-    if visible_appendices and not rendered_sections:
-        for item in visible_appendices:
-            story.append(_heading(_appendix_label(item), styles["appendix_item"], 1))
-    return story
 
 
 def _build_story(
     report: Mapping[str, Any],
     styles: Mapping[str, ParagraphStyle],
-    *,
-    photo_base_dir: str | os.PathLike[str] | None = None,
 ) -> list[Flowable]:
     report_type = _report_type(report)
-    progress, curve = _report_progress_curve(report, report_type=report_type)
-    manpower = report.get("manpower") if isinstance(report.get("manpower"), Mapping) else {}
-    photos = [item for item in _as_list(report.get("photo_documentation")) if isinstance(item, Mapping)]
-    visible_appendices = _visible_report_appendices(
-        report,
-        curve=curve,
-        manpower=manpower,
-        photos=photos,
-    )
-    procurement_parts = _procurement_parts(report)
-    site_parts = _site_parts(report, report_type)
-    visible = {
-        "executive": _executive_section_has_data(report, progress),
-        "safety": _safety_section_has_data(report),
-        "engineering": _has_section_data(report.get("engineering")),
-        "procurement": any(
-            procurement_parts[key]
-            for key in ("procurement_visible", "equipment_visible", "shipment_visible")
-        ),
-        "site": (
-            _has_section_data(site_parts["summary"])
-            or site_parts["schedule_visible"]
-            or site_parts["current_visible"]
-            or site_parts["upcoming_visible"]
-            or site_parts["concerns_visible"]
-        ),
-        "appendices": bool(visible_appendices),
-    }
-    chapter_numbers: dict[str, int] = {}
-    next_chapter = 1
-    for key in ("executive", "safety", "engineering", "procurement", "site", "appendices"):
-        if visible[key]:
-            chapter_numbers[key] = next_chapter
-            next_chapter += 1
-    if visible["appendices"]:
-        _renumber_visible_appendices(
-            visible_appendices,
-            chapter_number=chapter_numbers["appendices"],
-        )
+    progress = _normalise_progress(report.get("progress", report.get("overall_progress", [])))
+    include_s_curve = _coerce_bool(report.get("include_s_curve"), bool(progress))
+    curve = _normalise_s_curve(report.get("s_curve"), progress) if include_s_curve else None
+    appendices = _normalise_appendices(report.get("appendices"), has_s_curve=curve is not None)
 
-    story = _toc_story(styles)
-    story.extend(_summary_safety_story(
-        report,
-        styles,
-        report_type=report_type,
-        progress=progress,
-        executive_number=chapter_numbers.get("executive"),
-        safety_number=chapter_numbers.get("safety"),
+    story: list[Flowable] = [
+        Spacer(1, 1),
+        NextPageTemplate("body"),
+        PageBreak(),
+        Paragraph("Table of Contents", styles["toc_title"]),
+        Paragraph("Table of Contents", styles["toc_subtitle"]),
+    ]
+    toc = TableOfContents()
+    toc.dotsMinLevel = 0
+    toc.levelStyles = [
+        ParagraphStyle(
+            "MonthlyTOCLevel0", fontName="Helvetica", fontSize=11.5, leading=14,
+            leftIndent=10, firstLineIndent=-10, spaceBefore=3, textColor=BLACK,
+        ),
+        ParagraphStyle(
+            "MonthlyTOCLevel1", fontName="Helvetica", fontSize=10.5, leading=13,
+            leftIndent=30, firstLineIndent=-10, spaceBefore=1, textColor=BLACK,
+        ),
+    ]
+    story.extend([toc, PageBreak()])
+
+    story.extend([
+        _heading("1. Executive Summary", styles["h1"], 0),
+        _paragraph(_executive_summary(report, progress), styles["body"]),
+        Spacer(1, 6),
+        _progress_table(progress, styles, report_type=report_type),
+        Spacer(1, 18),
+        _heading("2. Safety Status", styles["h1"], 0),
+        Paragraph("<b>Status summary:</b>", styles["body"]),
+        _safety_table(report.get("safety"), styles),
+        PageBreak(),
+    ])
+
+    story.append(_heading("3. Engineering", styles["h1"], 0))
+    story.append(_heading("3.1 Status Engineering", styles["h2"], 1))
+    story.extend(_content_flowables(
+        report.get("engineering"), styles,
+        empty_message="No engineering status information supplied.", bullets=True,
     ))
-    if visible["engineering"]:
-        story.extend(_engineering_story(
-            report,
-            styles,
-            chapter_number=chapter_numbers["engineering"],
+    story.append(PageBreak())
+
+    procurement = report.get("procurement")
+    summary, po_rows, embedded_equipment, embedded_shipments = _po_rows(procurement)
+    if _plain(summary):
+        procurement_intro = [_paragraph(summary, styles["body"]), Spacer(1, 3)]
+    else:
+        procurement_intro = []
+    equipment = report.get("equipment_delivery", embedded_equipment)
+    shipments = report.get("shipments", embedded_shipments)
+
+    story.append(_heading("4. Procurement", styles["h1"], 0))
+    story.extend(procurement_intro)
+    story.append(_heading("4.1 Procurement Status", styles["h2"], 1))
+    story.extend([_procurement_table(po_rows, styles), Spacer(1, 10)])
+    story.append(_heading("4.2 Equipment Delivery Status", styles["h2"], 1))
+    equipment_rows = []
+    equipment_summary = equipment
+    if isinstance(equipment, Mapping):
+        equipment_summary = equipment.get("summary")
+        equipment_rows = [
+            row for row in _as_list(_value(equipment, "rows", "items", default=[]))
+            if isinstance(row, Mapping)
+        ]
+    elif isinstance(equipment, Sequence) and not isinstance(equipment, (str, bytes, bytearray)):
+        equipment_rows = [row for row in equipment if isinstance(row, Mapping)]
+        if equipment_rows:
+            equipment_summary = None
+    if equipment_rows:
+        story.extend([_equipment_table(equipment_rows, styles), Spacer(1, 10)])
+    else:
+        story.extend(_content_flowables(
+            equipment_summary, styles,
+            empty_message="No equipment delivery information supplied.", bullets=True,
         ))
-    if visible["procurement"]:
-        story.extend(_procurement_story(
-            report,
-            styles,
-            chapter_number=chapter_numbers["procurement"],
-        ))
-    if visible["site"]:
-        story.extend(_site_story(
-            report,
-            styles,
-            report_type=report_type,
-            chapter_number=chapter_numbers["site"],
-        ))
-    if visible["appendices"]:
-        story.extend(_appendices_story(
-            visible_appendices,
-            styles,
-            curve=curve,
-            curve_note=str((report.get("s_curve") or {}).get("note", ""))
-            if isinstance(report.get("s_curve"), Mapping) else "",
-            photos=photos,
-            manpower=manpower,
-            photo_base_dir=photo_base_dir,
-            chapter_number=chapter_numbers["appendices"],
+    story.append(_heading("4.3 Shipment Status", styles["h2"], 1))
+    shipment_rows = [row for row in _as_list(shipments) if isinstance(row, Mapping)]
+    if isinstance(shipments, Mapping):
+        shipment_rows = [
+            row for row in _as_list(_value(shipments, "rows", "items", default=[]))
+            if isinstance(row, Mapping)
+        ]
+    story.append(_shipment_table(shipment_rows, styles))
+    story.append(PageBreak())
+
+    site = report.get("site") if isinstance(report.get("site"), Mapping) else {}
+    if report_type == "weekly":
+        current_activity_keys = (
+            "this_period_activities",
+            "current_period_activities",
+            "this_period",
+            "current_period",
+            "this_week_activities",
+            "this_week",
+            "this_month_activities",
+            "this_month",
+            "activities",
+        )
+        next_activity_keys = (
+            "next_period_activities",
+            "planned_next_period_activities",
+            "next_period",
+            "next_week_activities",
+            "next_week",
+            "next_month_activities",
+            "next_month",
+            "planned_activities",
+        )
+        current_heading = "5.2 This Week Activities"
+        next_heading = "5.3 Planned Activities Next Week"
+        current_empty = "No current-week activities supplied."
+        next_empty = "No next-week activities supplied."
+    else:
+        current_activity_keys = (
+            "this_month_activities",
+            "this_month",
+            "this_period_activities",
+            "current_period_activities",
+            "this_period",
+            "current_period",
+            "activities",
+        )
+        next_activity_keys = (
+            "next_month_activities",
+            "next_month",
+            "next_period_activities",
+            "planned_next_period_activities",
+            "next_period",
+            "planned_activities",
+        )
+        current_heading = "5.2 This Month Activities"
+        next_heading = "5.3 Planned Activities Next Month"
+        current_empty = "No current-month activities supplied."
+        next_empty = "No next-month activities supplied."
+
+    current_activities = _value(
+        site,
+        *current_activity_keys,
+        default=_value(report, *current_activity_keys, default=[]),
+    )
+    next_activities = _value(
+        site,
+        *next_activity_keys,
+        default=_value(report, *next_activity_keys, default=[]),
+    )
+    story.append(_heading("5. Site Services / Construction", styles["h1"], 0))
+    story.append(_heading("5.1 Project Schedule Status", styles["h2"], 1))
+    story.extend(_content_flowables(
+        _value(site, "schedule_status", "project_schedule_status"), styles,
+        empty_message="See the overall schedule appendix when supplied.",
+    ))
+    story.append(_heading(current_heading, styles["h2"], 1))
+    story.extend(_content_flowables(
+        current_activities,
+        styles, empty_message=current_empty, bullets=True,
+    ))
+    story.append(_heading(next_heading, styles["h2"], 1))
+    story.extend(_content_flowables(
+        next_activities,
+        styles, empty_message=next_empty, bullets=True,
+    ))
+    story.append(_heading(
+        "5.4 Area of Concern and Suggested Corrective Action", styles["h2"], 1
+    ))
+    concern_rows = _as_list(_value(site, "concerns", "constraints", default=report.get("constraints")))
+    concerns_table = _concerns_table(concern_rows, styles)
+    if concerns_table is None:
+        story.append(_paragraph("No concerns supplied.", styles["placeholder"]))
+    else:
+        story.append(concerns_table)
+    story.append(PageBreak())
+
+    story.append(_heading("6. Appendices", styles["h1"], 0))
+    for item in appendices:
+        story.append(_heading(_appendix_label(item), styles["appendix_item"], 1))
+
+    if curve is not None:
+        labels, planned, actual, illustrative = curve
+        story.extend([
+            PageBreak(),
+            Paragraph("Appendix 6.2 - Progress S-Curve", styles["h1"]),
+            Spacer(1, 10),
+            _SCurveFlowable(labels, planned, actual, illustrative=illustrative),
+        ])
+
+    for item in appendices:
+        content = item.get("content")
+        if content in (None, "", [], {}):
+            continue
+        story.extend([
+            PageBreak(),
+            Paragraph(
+                escape(f"Appendix {item['number']} - {item['title']}", quote=False),
+                styles["h1"],
+            ),
+        ])
+        story.extend(_content_flowables(
+            content, styles, empty_message="No appendix content supplied.", bullets=True,
         ))
     return story
 
@@ -2866,7 +1443,6 @@ def render_monthly_report(
     report: Mapping[str, Any],
     *,
     logo_path: str | os.PathLike[str] | None = None,
-    photo_base_dir: str | os.PathLike[str] | None = None,
 ) -> io.BytesIO:
     """Render a Weekly or Monthly Progress Report and return a rewound buffer.
 
@@ -2935,9 +1511,6 @@ def render_monthly_report(
     def canvas_maker(*args, **kwargs):
         return _NumberedCanvas(*args, status=status, **kwargs)
 
-    document.multiBuild(
-        _build_story(report, styles, photo_base_dir=photo_base_dir),
-        canvasmaker=canvas_maker,
-    )
+    document.multiBuild(_build_story(report, styles), canvasmaker=canvas_maker)
     buffer.seek(0)
     return buffer

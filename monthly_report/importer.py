@@ -24,17 +24,9 @@ from datetime import date as date_type
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Mapping, Sequence
 
-from .identity import project_title_match
-
 
 SCHEMA_VERSION = "daily-report-import/1"
-PARSER_VERSION = "monthly-pdf-importer/1.9"
-
-# Supported Daily Report layout families.  These are parser profiles only; they
-# do not change the canonical output shape consumed by weekly/monthly reports.
-LAYOUT_PROFILE_LEGACY_COMBINED = "legacy_combined"
-LAYOUT_PROFILE_CURRENT_SPLIT = "current_split"
-LAYOUT_PROFILE_UNKNOWN = "unknown"
+PARSER_VERSION = "monthly-pdf-importer/1.0"
 
 
 class PDFImportError(Exception):
@@ -57,7 +49,7 @@ class PDFExtractionError(PDFImportError):
 class ImportLimits:
     """Resource bounds applied to every individual PDF import."""
 
-    max_bytes: int = 100 * 1024 * 1024
+    max_bytes: int = 30 * 1024 * 1024
     max_pages: int = 50
     max_text_chars: int = 500_000
 
@@ -86,9 +78,7 @@ _SECTION_LABELS: dict[str, tuple[str, ...]] = {
     "daily_activities": (
         "DAILY ACTIVITIES & MANPOWER BY AREA",
         "DAILY ACTIVITIES AND MANPOWER BY AREA",
-        "DAILY ACTIVITIES BY AREA",
     ),
-    "direct_manpower": ("DIRECT MANPOWER BY AREA",),
     "constraints": ("CONSTRAINTS & ISSUES", "CONSTRAINTS AND ISSUES"),
     "remarks": ("REMARKS",),
     "sign_off": ("SIGN-OFF", "SIGN OFF"),
@@ -377,40 +367,6 @@ def _next_value_line(
     return None
 
 
-_INLINE_FIELD_BOUNDARIES: dict[str, tuple[str, ...]] = {
-    "project_no": ("Project Name", "Project Title", "Customer", "Client", "Location", "Equipment", "Date", "Working Day", "Active Areas"),
-    "project_title": ("Customer", "Client", "Location", "Equipment", "Date", "Working Day", "Active Areas"),
-    "customer": ("Location", "Equipment", "Date", "Working Day", "Active Areas", "Day"),
-    "location": ("Customer", "Client", "Equipment", "Date", "Working Day", "Active Areas", "Day"),
-    "equipment": ("Date", "Working Day", "Active Areas", "Day"),
-    "date": ("Working Day", "Day", "Project No", "Project Number", "Project", "Active Areas"),
-}
-
-
-def _trim_inline_field_tail(value: str, field: str) -> str:
-    """Remove adjacent flattened table/header fields from one labelled value.
-
-    ReportLab/pypdf can flatten two or more visual cells onto one text line, e.g.
-    ``LOCATION: Berau, East Kalimantan CUSTOMER: PT. KERTAS NUSANTARA DAY 309``.
-    The value before the next known field label is still deterministic, so keep it
-    and discard only the adjacent field tail.
-    """
-
-    text = _compact(value)
-    labels = _INLINE_FIELD_BOUNDARIES.get(field, ())
-    if not text or not labels:
-        return text
-    alternatives = "|".join(re.escape(label).replace(r"\ ", r"\s+") for label in labels)
-    match = re.search(
-        rf"\s+(?=(?:{alternatives})\b\s*(?::|\b))",
-        text,
-        re.IGNORECASE,
-    )
-    if match:
-        text = text[: match.start()]
-    return text.strip(" |,;-")
-
-
 def _extract_labeled_value(
     pages: Sequence[str],
     field: str,
@@ -423,13 +379,12 @@ def _extract_labeled_value(
             match = pattern.match(compact_line)
             if not match:
                 continue
-            value = _trim_inline_field_tail(match.group(1), field)
+            value = _compact(match.group(1))
             value_page = page
             if not value:
                 following = _next_value_line(records, index)
                 if following:
                     value, value_page = following
-                    value = _trim_inline_field_tail(value, field)
             if value:
                 return value, {
                     "method": "label_regex",
@@ -490,106 +445,10 @@ def _parse_date_value(value: str) -> tuple[str | None, str | None]:
     return None, "unrecognized_date_format"
 
 
-def _inline_iso_date_candidates(pages: Sequence[str]) -> list[dict[str, Any]]:
-    """Return deterministic report-date candidates from known GPA header/footer forms.
-
-    Both historical and current Daily Report PDFs repeat the report date in more
-    than one location, but the exact text layout differs between templates and
-    pypdf versions.  This helper recognises the stable semantic forms rather than
-    relying on one table extraction shape.
-    """
-
-    candidates: list[dict[str, Any]] = []
-    patterns: tuple[tuple[str, re.Pattern[str]], ...] = (
-        (
-            "date_label_iso",
-            re.compile(r"\b(?:Report\s+)?Date\b\s*:?\s*(\d{4}-\d{2}-\d{2})(?!\d)", re.I),
-        ),
-        (
-            "date_day_header_iso",
-            re.compile(r"\bDate\s*:?\s*(\d{4}-\d{2}-\d{2})\s*(?:\||-)\s*Day\b", re.I),
-        ),
-        (
-            "daily_footer_iso",
-            re.compile(r"\bDaily\s+Activity\s+Report\s*\|[^\n]*?\|\s*(\d{4}-\d{2}-\d{2})\s*\|", re.I),
-        ),
-    )
-    seen: set[tuple[str, int, str]] = set()
-    for page_number, page in enumerate(pages, start=1):
-        for method, pattern in patterns:
-            for match in pattern.finditer(page):
-                parsed, _ = _parse_date_value(match.group(1))
-                if not parsed:
-                    continue
-                identity = (parsed, page_number, method)
-                if identity in seen:
-                    continue
-                seen.add(identity)
-                candidates.append({
-                    "date": parsed,
-                    "page": page_number,
-                    "method": method,
-                    "raw": match.group(1),
-                })
-    return candidates
-
-
-def _detect_layout_profile(
-    sections: Mapping[str, str],
-    section_matches: Sequence[Mapping[str, Any]],
-) -> str:
-    """Identify supported old/new Daily Report structure without changing data shape."""
-
-    if sections.get("direct_manpower"):
-        return LAYOUT_PROFILE_CURRENT_SPLIT
-
-    # Historical reports combine activities and direct manpower in one section.
-    activity_text = str(sections.get("daily_activities") or "")
-    if re.search(r"\bDirect\s+Manpower\b", activity_text, re.I):
-        return LAYOUT_PROFILE_LEGACY_COMBINED
-
-    for match in section_matches:
-        if not isinstance(match, Mapping) or match.get("key") != "daily_activities":
-            continue
-        label = _normalize_section_label(str(match.get("label") or ""))
-        if "MANPOWER BY AREA" in label:
-            return LAYOUT_PROFILE_LEGACY_COMBINED
-        if label in {"DAILY ACTIVITIES BY AREA", "DAILY ACTIVITY BY AREA"}:
-            return LAYOUT_PROFILE_CURRENT_SPLIT
-
-    return LAYOUT_PROFILE_UNKNOWN
-
-
 def _extract_date(
     pages: Sequence[str],
-    *,
-    filename: str = "",
 ) -> tuple[str | None, dict[str, Any] | None, list[dict[str, Any]]]:
-    """Extract the report date with deterministic fallbacks.
-
-    The generated Daily Report layout can be flattened differently by pypdf
-    versions (for example ``Date: ... Day: ...`` may lose the table separator).
-    A failed labelled parse therefore no longer aborts all fallbacks.  Exact ISO
-    dates in the PDF and filename can be used with an explicit review warning.
-    """
-
     warnings: list[dict[str, Any]] = []
-
-    # First recognise the stable date forms used by both old and new GPA Daily
-    # Report templates.  A unique semantic candidate is stronger than a generic
-    # ISO scan and avoids false missing-date gaps when PDF table columns flatten.
-    semantic_candidates = _inline_iso_date_candidates(pages)
-    semantic_dates = sorted({item["date"] for item in semantic_candidates})
-    if len(semantic_dates) == 1:
-        parsed = semantic_dates[0]
-        first = next(item for item in semantic_candidates if item["date"] == parsed)
-        return parsed, {
-            "method": first["method"],
-            "page": first["page"],
-            "raw": first["raw"],
-            "normalized": parsed,
-        }, warnings
-
     raw, provenance = _extract_labeled_value(pages, "date")
     if raw is not None:
         parsed, error = _parse_date_value(raw)
@@ -600,144 +459,37 @@ def _extract_date(
         warnings.append(
             _warning(
                 error or "invalid_date",
-                f"Labeled report date could not be accepted directly: {raw}",
+                f"Labeled report date could not be accepted: {raw}",
+                severity="error",
                 field="date",
                 page=provenance.get("page") if provenance else None,
             )
         )
+        return None, provenance, warnings
 
-    # Layout-mode extraction may join adjacent table cells without the vertical
-    # separator expected by _LABEL_PATTERNS.  Parse the tail after a Date label
-    # and stop at the next known label.
-    for page_number, page in enumerate(pages, start=1):
-        for line in page.splitlines():
-            compact_line = _compact(line)
-            match = re.search(r"\b(?:Report\s+)?Date\b\s*:?\s*(.+)$", compact_line, re.I)
-            if not match:
-                continue
-            tail = match.group(1).strip()
-            tail = re.split(
-                r"\s*(?:\||\bWorking\s+Day\b\s*:|\bDay(?:\s*(?:No\.?|Number))?\b\s*:|"
-                r"\bProject\s*(?:No\.?|Number|Name|Title)\b\s*:)",
-                tail,
-                maxsplit=1,
-                flags=re.I,
-            )[0].strip(" -|,;")
-            parsed, error = _parse_date_value(tail)
-            if parsed:
-                warnings.append(
-                    _warning(
-                        "date_recovered_from_joined_label",
-                        "Date was recovered from a flattened Date/Day row and must be reviewed",
-                        field="date",
-                        page=page_number,
-                    )
-                )
-                return parsed, {
-                    "method": "joined_label_regex",
-                    "page": page_number,
-                    "raw": tail,
-                    "normalized": parsed,
-                }, warnings
-            if tail:
-                warnings.append(
-                    _warning(
-                        error or "invalid_date",
-                        f"Date-like labelled value could not be accepted: {tail}",
-                        field="date",
-                        page=page_number,
-                    )
-                )
-
-    candidate_counts: dict[str, int] = {}
-    candidate_first_page: dict[str, int] = {}
+    candidates: dict[str, tuple[int, str]] = {}
     for page_number, page in enumerate(pages, start=1):
         for match in re.finditer(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)", page):
             parsed, _ = _parse_date_value(match.group(1))
             if parsed:
-                candidate_counts[parsed] = candidate_counts.get(parsed, 0) + 1
-                candidate_first_page.setdefault(parsed, page_number)
-
-    filename_match = re.search(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)", str(filename or ""))
-    filename_date = None
-    if filename_match:
-        filename_date, _ = _parse_date_value(filename_match.group(1))
-
-    # Strong deterministic tie-breaker: the exact date encoded in the generated
-    # filename also appears somewhere in the PDF text.
-    if filename_date and filename_date in candidate_counts:
-        warnings.append(
-            _warning(
-                "date_confirmed_by_filename",
-                "Report date was selected from PDF date candidates using the exact filename date and must be reviewed",
-                field="date",
-                page=candidate_first_page.get(filename_date),
-            )
-        )
-        return filename_date, {
-            "method": "filename_confirmed_iso",
-            "page": candidate_first_page.get(filename_date),
-            "raw": filename_match.group(1) if filename_match else filename_date,
-            "normalized": filename_date,
-        }, warnings
-
-    if len(candidate_counts) == 1:
-        parsed = next(iter(candidate_counts))
+                candidates.setdefault(parsed, (page_number, match.group(1)))
+    if len(candidates) == 1:
+        parsed, (page, raw_value) = next(iter(candidates.items()))
         warnings.append(
             _warning(
                 "date_inferred_without_label",
                 "Date was inferred from the only ISO date in the PDF and must be reviewed",
                 field="date",
-                page=candidate_first_page.get(parsed),
+                page=page,
             )
         )
         return parsed, {
             "method": "unique_iso_regex",
-            "page": candidate_first_page.get(parsed),
-            "raw": parsed,
+            "page": page,
+            "raw": raw_value,
             "normalized": parsed,
         }, warnings
-
-    # If several dates exist, prefer a uniquely dominant repeated date.  Report
-    # headers repeat the report date on multiple pages, while incidental dates
-    # usually occur once.
-    if candidate_counts:
-        ranked = sorted(candidate_counts.items(), key=lambda item: (-item[1], item[0]))
-        best_date, best_count = ranked[0]
-        second_count = ranked[1][1] if len(ranked) > 1 else 0
-        if best_count >= 2 and best_count > second_count:
-            warnings.append(
-                _warning(
-                    "date_inferred_from_repeated_header",
-                    "Date was inferred from the uniquely repeated ISO date in the PDF and must be reviewed",
-                    field="date",
-                    page=candidate_first_page.get(best_date),
-                )
-            )
-            return best_date, {
-                "method": "repeated_iso_regex",
-                "page": candidate_first_page.get(best_date),
-                "raw": best_date,
-                "normalized": best_date,
-            }, warnings
-
-    # Last-resort deterministic filename recovery keeps the file visible in the
-    # review flow instead of silently creating a false missing-date gap.
-    if filename_date:
-        warnings.append(
-            _warning(
-                "date_inferred_from_filename",
-                "Report date was inferred from the exact ISO date in the filename; confirm it during source review",
-                field="date",
-            )
-        )
-        return filename_date, {
-            "method": "filename_iso_regex",
-            "raw": filename_match.group(1) if filename_match else filename_date,
-            "normalized": filename_date,
-        }, warnings
-
-    if len(candidate_counts) > 1:
+    if len(candidates) > 1:
         warnings.append(
             _warning(
                 "ambiguous_date_candidates",
@@ -746,17 +498,7 @@ def _extract_date(
                 field="date",
             )
         )
-    else:
-        warnings.append(
-            _warning(
-                "missing_date",
-                "Report date could not be deterministically extracted",
-                severity="error",
-                field="date",
-            )
-        )
-    return None, provenance, warnings
-
+    return None, None, warnings
 
 
 def _extract_day_number(
@@ -860,46 +602,16 @@ def _fuzzy_section_key(label: str) -> tuple[str, float, float] | None:
     return choices[int(best_index)][0], float(best_score), margin
 
 
-def _document_context_key(value: Any) -> str:
-    return " ".join(
-        re.sub(
-            r"[^a-z0-9]+",
-            " ",
-            unicodedata.normalize("NFKC", _compact(str(value or ""))).casefold(),
-        ).split()
-    )
-
-
 def _collect_sections(
     pages: Sequence[str],
-    *,
-    document_context: Iterable[Any] = (),
-) -> tuple[dict[str, str], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Collect supported sections and discard only proven document chrome.
-
-    Current split-layout PDFs repeat the exact project title at the start of
-    every page.  When a table continues over that page boundary, pypdf may place
-    the repeated title inside the active section and the activity parser can
-    mistake it for wrapped prose.  Exact context matching removes that chrome
-    without hard-coding a project title or changing genuine activity wording.
-    """
-
+) -> tuple[dict[str, str], list[dict[str, Any]]]:
     sections: dict[str, list[str]] = {}
     matches: list[dict[str, Any]] = []
-    ignored_chrome: list[dict[str, Any]] = []
     active_key: str | None = None
-    context_keys = {
-        _document_context_key(value)
-        for value in document_context
-        if _document_context_key(value)
-    }
 
     for page_number, page in enumerate(pages, start=1):
         for line in page.splitlines():
             compact_line = _compact(line)
-            if active_key is not None and not compact_line:
-                # Whitespace is layout noise, not a normalization event.
-                continue
             heading = _SECTION_HEADING.match(compact_line)
             if heading:
                 number, label = heading.groups()
@@ -937,24 +649,6 @@ def _collect_sections(
                     continue
                 # Unknown numbered lines may be activity-list items, so they
                 # do not terminate a recognized section.
-            if active_key is not None and not _AREA_MARKER.match(line) and (
-                _is_document_boilerplate_note(compact_line)
-                or (
-                    _document_context_key(compact_line) in context_keys
-                    and len(_document_context_key(compact_line).split()) >= 2
-                )
-            ):
-                ignored_chrome.append({
-                    "page": page_number,
-                    "section": active_key,
-                    "raw": compact_line[:500],
-                    "reason": (
-                        "known_document_chrome"
-                        if _is_document_boilerplate_note(compact_line)
-                        else "exact_document_context"
-                    ),
-                })
-                continue
             if active_key is not None:
                 sections[active_key].append(line.rstrip())
 
@@ -962,7 +656,7 @@ def _collect_sections(
         key: "\n".join(lines).strip()
         for key, lines in sections.items()
         if any(line.strip() for line in lines)
-    }, matches, ignored_chrome
+    }, matches
 
 
 def _activity_items_from_segment(segment: str) -> tuple[list[str], list[str]]:
@@ -985,34 +679,20 @@ def _activity_items_from_segment(segment: str) -> tuple[list[str], list[str]]:
                 re.IGNORECASE,
             ):
                 break
-            # Repeated page headers/footers can appear between wrapped activity
-            # lines in pypdf output.  They are document chrome, never activity
-            # continuation text, so skip them before column slicing.
-            if _is_document_boilerplate_note(_compact(item_line)):
-                continue
             left = item_line[today_pos:tomorrow_pos]
             right = item_line[tomorrow_pos:]
             left_match = _NUMBERED_ITEM.match(left)
             right_match = _NUMBERED_ITEM.match(right)
             if left_match:
                 today.append(_compact(left_match.group(2)))
-            elif _compact(left).strip("-\u2013\u2014") and today:
-                today[-1] = _compact(f"{today[-1]} {_compact(left)}")
             if right_match:
                 tomorrow.append(_compact(right_match.group(2)))
-            elif _compact(right).strip("-\u2013\u2014") and tomorrow:
-                tomorrow[-1] = _compact(f"{tomorrow[-1]} {_compact(right)}")
         if today or tomorrow:
             return today, tomorrow
 
     mode: str | None = None
     for line in lines:
         compact_line = _compact(line)
-        if _is_document_boilerplate_note(compact_line):
-            # Never concatenate a repeated PDF header/footer to the previous
-            # numbered activity.  Keep parsing because the same area can resume
-            # on the next page without a repeated area marker.
-            continue
         if re.fullmatch(r"Activity\s+Today", compact_line, re.IGNORECASE):
             mode = "today"
             continue
@@ -1031,833 +711,44 @@ def _activity_items_from_segment(segment: str) -> tuple[list[str], list[str]]:
             today.append(_compact(match.group(2)))
         elif match and mode == "tomorrow":
             tomorrow.append(_compact(match.group(2)))
-        elif compact_line.strip("-\u2013\u2014") and mode == "today" and today:
-            today[-1] = _compact(f"{today[-1]} {compact_line}")
-        elif compact_line.strip("-\u2013\u2014") and mode == "tomorrow" and tomorrow:
-            tomorrow[-1] = _compact(f"{tomorrow[-1]} {compact_line}")
     return today, tomorrow
 
 
-_MANPOWER_ROW = re.compile(
-    r"^\s*(?P<number>\d{1,4})\s*[.)]?\s+"
-    r"(?P<body>.+?)\s{2,}"
-    r"(?P<hours>\d{1,2}:\d{2}\s*[-\u2013\u2014]\s*\d{1,2}:\d{2})\s*$"
-)
-
-
-def _area_segments(section: str) -> list[tuple[str, list[str]]]:
-    """Split an area-based section while retaining layout-preserving lines."""
-
-    if not section.strip():
+def _extract_areas(activity_section: str) -> list[dict[str, Any]]:
+    if not activity_section.strip():
         return []
     segments: list[tuple[str, list[str]]] = []
     current_id: str | None = None
     current_lines: list[str] = []
-    for line in section.splitlines():
+    for line in activity_section.splitlines():
         marker = _AREA_MARKER.match(line)
         if marker:
             if current_id is not None or current_lines:
-                segments.append((current_id or "", current_lines))
+                segments.append((current_id or "Imported PDF", current_lines))
             current_id = _compact(marker.group(1))[:120]
             current_lines = []
         else:
             current_lines.append(line)
     if current_id is not None or current_lines:
-        segments.append((current_id or "", current_lines))
-    return segments
-
-
-def _manpower_header(line: str) -> dict[str, Any] | None:
-    normalized = _normalize_section_label(line)
-    if not re.search(r"\bNO\b", normalized) or not re.search(r"\bNAME\b", normalized):
-        return None
-    if not re.search(r"\b(?:WORKING\s+)?HOURS?\b", normalized):
-        return None
-    return {
-        "has_task": bool(re.search(r"\bTASK(?:\s+TODAY)?\b", normalized)),
-        "raw": _compact(line),
-    }
-
-
-def _manpower_kind(line: str) -> str | None:
-    compact_line = _compact(line)
-    if re.search(r"\bDirect\s+Manpower\b", compact_line, re.IGNORECASE):
-        return "direct"
-    if re.search(r"\bIndirect\s+Manpower\b", compact_line, re.IGNORECASE):
-        return "indirect"
-    return None
-
-
-def _parse_manpower_row(
-    line: str,
-    *,
-    has_task: bool,
-) -> tuple[dict[str, str], str] | None:
-    """Parse one layout-text manpower row into the application's row shape.
-
-    PDF table extractors omit empty cells.  Consequently a row containing only
-    ``number, name, hours`` is valid and deliberately retains an empty role.
-    ``Task Today`` is optional in legacy layouts and is always represented in
-    the canonical result so all supported PDF profiles produce the same shape.
-    """
-
-    match = _MANPOWER_ROW.match(line)
-    if not match:
-        return None
-    cells = [
-        _compact(cell)
-        for cell in re.split(r"\s{2,}", match.group("body").strip())
-        if _compact(cell)
-    ]
-    if not cells:
-        return None
-
-    name = cells[0]
-    role = ""
-    task = ""
-    if has_task:
-        if len(cells) >= 2:
-            role = cells[1]
-        if len(cells) >= 3:
-            task = _compact(" ".join(cells[2:]))
-    elif len(cells) >= 2:
-        role = _compact(" ".join(cells[1:]))
-
-    return {
-        "name": name,
-        "role": role,
-        "task": task,
-        "hours": _compact(match.group("hours")),
-    }, match.group("number")
-
-
-def _parse_manpower_lines(
-    lines: Sequence[str],
-    *,
-    default_category: str | None,
-    area_id: str | None,
-    source_section: str,
-) -> tuple[
-    dict[str, list[dict[str, str]]],
-    dict[str, Any],
-    list[dict[str, Any]],
-]:
-    rows: dict[str, list[dict[str, str]]] = {"direct": [], "indirect": []}
-    provenance_rows: list[dict[str, Any]] = []
-    category = default_category
-    header: dict[str, Any] | None = None
-    table_count = 0
-    malformed_count = 0
-
-    for line_index, line in enumerate(lines, start=1):
-        explicit_category = _manpower_kind(line)
-        if explicit_category:
-            category = explicit_category
-            header = None
-            continue
-
-        detected_header = _manpower_header(line)
-        if detected_header:
-            header = detected_header
-            table_count += 1
-            continue
-
-        # Page headers/footers may occur between a legacy table header and its
-        # continuation rows.  They intentionally do not reset table state.
-        compact_line = _compact(line)
-        if re.match(r"^(?:Constraints|Remarks)\s*:", compact_line, re.IGNORECASE):
-            header = None
-            continue
-
-        rowish = bool(
-            re.match(r"^\s*\d{1,4}\s*[.)]?\s+", line)
-            and re.search(
-                r"\d{1,2}:\d{2}\s*[-\u2013\u2014]\s*\d{1,2}:\d{2}\s*$",
-                line,
-            )
-        )
-        if not rowish or category not in rows:
-            continue
-
-        # If a page begins with continuation rows but the PDF extractor did
-        # not retain the preceding header, use the section's known category
-        # and record that the schema had to be inferred.
-        # Some exported Daily tables contain a visually blank filler row where
-        # the PDF text layer preserves only the row number and Working Hours
-        # (for example ``12  07:00 - 17:00``). It is not an employee record and
-        # must not become a false manpower warning. Rows with any name/role text
-        # still go through the strict parser below.
-        if re.fullmatch(
-            r"\s*\d{1,4}\s*[.)]?\s+\d{1,2}:\d{2}\s*[-\u2013\u2014]\s*\d{1,2}:\d{2}\s*",
-            line,
-        ):
-            continue
-
-        inferred_header = header is None
-        parsed = _parse_manpower_row(
-            line,
-            has_task=bool(header and header.get("has_task")),
-        )
-        if not parsed:
-            malformed_count += 1
-            continue
-        row, source_row_number = parsed
-        rows[category].append(row)
-        provenance_rows.append(
-            {
-                "category": category,
-                "area_id": area_id,
-                "source_section": source_section,
-                "source_line": line_index,
-                "source_row_number": source_row_number,
-                "table_schema": "inferred" if inferred_header else "header",
-                "task_column": bool(header and header.get("has_task")),
-            }
-        )
-
-    warnings: list[dict[str, Any]] = []
-    if malformed_count:
-        label = f" for area '{area_id}'" if area_id else ""
-        warnings.append(
-            _warning(
-                "manpower_rows_require_manual_review",
-                f"{malformed_count} manpower row(s){label} could not be mapped safely",
-                field="manpower",
-            )
-        )
-    metadata = {
-        "source_section": source_section,
-        "area_id": area_id,
-        "table_count": table_count,
-        "rows_extracted": len(rows["direct"]) + len(rows["indirect"]),
-        "direct_rows": len(rows["direct"]),
-        "indirect_rows": len(rows["indirect"]),
-        "malformed_rows": malformed_count,
-        "complete": table_count > 0 and malformed_count == 0,
-        "row_provenance": provenance_rows,
-    }
-    return rows, metadata, warnings
-
-
-def _area_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", unicodedata.normalize("NFKC", value).casefold())
-
-
-def _empty_area(area_id: str) -> dict[str, Any]:
-    return {
-        "id": area_id,
-        "activities_today": [],
-        "activities_tomorrow": [],
-        "manpower": [],
-        "indirect_manpower": [],
-        "constraints": "",
-        "remarks": "",
-        "activity_statuses": [],
-        "photos": [],
-    }
-
-
-def _note_text(value: Any) -> str:
-    text = _compact(str(value or "")).strip()
-    if not text or not text.strip("-\u2013\u2014_"):
-        return ""
-    return text
-
-
-def _merge_area_note(area: dict[str, Any], key: str, value: Any) -> None:
-    """Merge a source note without changing the legacy string field shape."""
-
-    text = _note_text(value)
-    if not text:
-        return
-    current = _note_text(area.get(key))
-    if current.casefold() == text.casefold():
-        return
-    if not current:
-        area[key] = text
-        return
-    existing = [item.strip() for item in current.split("; ") if item.strip()]
-    if text.casefold() not in {item.casefold() for item in existing}:
-        area[key] = "; ".join([*existing, text])
-
-
-def _inline_area_notes(lines: Sequence[str]) -> tuple[list[str], list[str]]:
-    """Extract inline Constraints/Remarks including wrapped continuation text."""
-
-    constraints: list[str] = []
-    remarks: list[str] = []
-    index = 0
-    while index < len(lines):
-        raw = str(lines[index] or "")
-        text = _compact(raw)
-        match = re.match(r"^(Constraints?|Remarks?)\s*:\s*(.*?)\s*$", text, re.IGNORECASE)
-        if not match:
-            index += 1
-            continue
-        label = match.group(1).casefold()
-        parts: list[str] = []
-        initial = _note_text(match.group(2))
-        if initial:
-            parts.append(initial)
-        continuation_index = index + 1
-        while continuation_index < len(lines):
-            continuation_raw = str(lines[continuation_index] or "")
-            continuation = _note_text(continuation_raw)
-            if not continuation:
-                break
-            folded = continuation.casefold()
-            if (
-                _AREA_MARKER.match(_compact(continuation_raw))
-                or _SECTION_HEADING.match(_compact(continuation_raw))
-                or re.match(r"^(?:Constraints?|Remarks?)\s*:", continuation, re.IGNORECASE)
-                or re.match(r"^(?:Activity\s+Today|Activity\s+Tomorrow)\b", continuation, re.IGNORECASE)
-                or re.match(r"^No\.\s+Name\b", continuation, re.IGNORECASE)
-                or _NUMBERED_ITEM.match(continuation)
-                or _is_document_boilerplate_note(continuation)
-                or "working hours" in folded and "role" in folded
-            ):
-                break
-            # Wrapped table-cell text is indented in the generated PDF. Requiring
-            # leading whitespace prevents unrelated left-aligned prose from being
-            # swallowed into the note.
-            if not continuation_raw[:1].isspace():
-                break
-            parts.append(continuation)
-            continuation_index += 1
-        note = _note_text(" ".join(parts))
-        if note:
-            (constraints if label.startswith("constraint") else remarks).append(note)
-        index = max(index + 1, continuation_index)
-    return constraints, remarks
-
-
-def _is_document_boilerplate_note(value: str) -> bool:
-    text = _note_text(value)
-    if not text:
-        return True
-    folded = text.casefold()
-    patterns = (
-        r"^pt\.\s*garuda prima aksara\b",
-        r"^daily activity report\b",
-        r"^location\s*:",
-        r"^customer\s*:",
-        r"^date\s*:",
-        r"^day\s+\d+\b",
-        r"^page\s+\d+\s+of\s+\d+\b",
-    )
-    if any(re.search(pattern, folded, re.IGNORECASE) for pattern in patterns):
-        return True
-    if "confidential daily activity report" in folded:
-        return True
-    if "daily activity report |" in folded:
-        return True
-    return False
-
-
-def _global_section_notes(section: str, *, kind: str) -> str:
-    notes: list[str] = []
-    for raw in str(section or "").splitlines():
-        text = _note_text(raw)
-        if not text or _is_document_boilerplate_note(text):
-            continue
-        folded = text.casefold()
-        if kind == "remarks" and folded in {"remarks", "remark"}:
-            continue
-        if kind == "constraints" and (
-            folded.startswith("no constraints reported")
-            or folded.startswith("no constraint reported")
-            or folded in {"area constraint / issue", "area constraint issue"}
-        ):
-            continue
-        notes.append(text)
-    return "; ".join(dict.fromkeys(notes))
-
-
-def _section_area_notes(
-    section: str,
-    *,
-    area_ids: Sequence[str],
-    kind: str,
-) -> list[tuple[str, str]]:
-    """Map a Constraints/Remarks section back to known area labels conservatively."""
-
-    if not section.strip():
-        return []
-    # Layout extraction preserves the gap between table columns, including
-    # area names wrapped in the middle of a word. Reassemble cells before
-    # normalising whitespace; otherwise area fragments become global issues.
-    if kind == "constraints" and re.search(r"Area\s+Constraint\s*/\s*Issue", section, re.I):
-        key = lambda value: re.sub(r"[^\w]", "", value.casefold())
-        known_by_key = {key(value): value for value in area_ids if value}
-        table_rows: list[tuple[str, str]] = []
-        left: list[str] = []
-        right: list[str] = []
-        valid = True
-
-        def flush_row() -> None:
-            nonlocal valid
-            if not left and not right:
-                return
-            area = known_by_key.get(key("".join(left)))
-            if not area or not right:
-                valid = False
-                return
-            table_rows.append((area, _note_text(" ".join(right))))
-
-        for raw in section.splitlines():
-            if not raw.strip() or _is_document_boilerplate_note(raw):
-                continue
-            if re.search(r"Area\s+Constraint\s*/\s*Issue", raw, re.I):
-                continue
-            parts = re.split(r"\s{2,}", raw.strip(), maxsplit=1)
-            if len(parts) == 2:
-                if key("".join(left)) in known_by_key and right:
-                    flush_row()
-                    left, right = [], []
-                left.append(parts[0])
-                right.append(parts[1])
-            elif key("".join(left)) in known_by_key:
-                right.append(raw.strip())
-            else:
-                left.append(raw.strip())
-        flush_row()
-        if valid and table_rows:
-            return list(dict.fromkeys(table_rows))
-    result: list[tuple[str, str]] = []
-    known = sorted((_note_text(value) for value in area_ids if _note_text(value)), key=len, reverse=True)
-    for raw in section.splitlines():
-        text = _note_text(raw)
-        if not text or _is_document_boilerplate_note(text):
-            continue
-        folded = text.casefold()
-        if kind == "constraints":
-            if folded in {"area constraint / issue", "area constraint issue", "constraint / issue", "constraint issue"}:
-                continue
-            if folded.startswith("no constraints reported") or folded.startswith("no constraint reported"):
-                continue
-        elif kind == "remarks" and folded in {"remarks", "remark"}:
-            continue
-
-        matched_area = ""
-        note = text
-        for area in known:
-            if folded == area.casefold():
-                matched_area = area
-                note = ""
-                break
-            prefix = area.casefold() + " "
-            if folded.startswith(prefix):
-                matched_area = area
-                note = text[len(area):].lstrip(" :|-\u2013\u2014")
-                break
-        note = _note_text(note)
-        if not note:
-            continue
-        result.append((matched_area, note))
-    return result
-
-
-def _extract_weather(section: str) -> dict[str, str]:
-    """Parse the compact Daily Report weather table without inventing blank cells.
-
-    Generated GPA PDFs use fixed-width columns.  Slicing by the header positions
-    preserves an intentionally blank Temperature cell, which would otherwise be
-    lost by whitespace splitting.
-    """
-
-    if not str(section or "").strip():
-        return {}
-    lines = [line.rstrip("\n") for line in str(section).splitlines() if line.strip()]
-    labels = ("Morning", "Afternoon", "Evening", "Wind", "Temperature", "Impact")
-    for index, line in enumerate(lines):
-        folded = line.casefold()
-        if not all(label.casefold() in folded for label in labels):
-            continue
-        if index + 1 >= len(lines):
-            return {}
-        value_line = lines[index + 1]
-        starts: list[int] = []
-        for label in labels:
-            position = line.casefold().find(label.casefold())
-            if position < 0:
-                return {}
-            starts.append(position)
-        result: dict[str, str] = {}
-        keys = ("morning", "afternoon", "evening", "wind", "temperature", "impact")
-        for pos, key in enumerate(keys):
-            start = starts[pos]
-            end = starts[pos + 1] if pos + 1 < len(starts) else None
-            value = _note_text(value_line[start:end] if end is not None else value_line[start:])
-            if value:
-                result[key] = value
-        return result
-    return {}
-
-
-
-_PROGRESS_ROW_RE = re.compile(
-    r"^\s*(?P<item>\d{1,3})\s+"
-    r"(?P<description>.+?)\s+"
-    r"(?P<duration>\d+(?:\.\d+)?)\s+"
-    r"(?P<weight>[-+]?\d+(?:\.\d+)?%)\s+"
-    r"(?P<start>\d{1,2}-[A-Za-z]{3}-\d{2,4})\s+"
-    r"(?P<finish>\d{1,2}-[A-Za-z]{3}-\d{2,4})\s+"
-    r"(?P<previous_plan>[-+]?\d+(?:\.\d+)?%)\s+"
-    r"(?P<previous_actual>[-+]?\d+(?:\.\d+)?%)\s+"
-    r"(?P<this_plan>[-+]?\d+(?:\.\d+)?%)\s+"
-    r"(?P<this_actual>[-+]?\d+(?:\.\d+)?%)\s+"
-    r"(?P<cumulative_plan>[-+]?\d+(?:\.\d+)?%)\s+"
-    r"(?P<cumulative_actual>[-+]?\d+(?:\.\d+)?%)\s+"
-    r"(?P<deviation>[-+]?\d+(?:\.\d+)?%)\s*$",
-    re.IGNORECASE,
-)
-_PROGRESS_PERCENT_RE = re.compile(r"[-+]?\d+(?:\.\d+)?%")
-
-
-def _progress_percent(value: Any) -> float | None:
-    text = _compact(str(value or "")).replace("%", "")
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def _extract_overall_progress(section: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Parse the exact Daily Report Overall Progress table without recomputing it.
-
-    Source percentages are preserved exactly as reported.  In particular, the
-    source ``This Period`` values are never replaced by a derived cumulative
-    difference.  This keeps Weekly/Monthly progress traceable even when a Daily
-    template contains a source-side arithmetic inconsistency that requires human
-    review rather than silent correction.
-    """
-
-    if not _compact(section):
-        return [], []
-    rows: list[dict[str, Any]] = []
-    warnings: list[dict[str, Any]] = []
-    total_row: dict[str, Any] | None = None
-    for raw_line in section.splitlines():
-        line = _compact(raw_line)
-        if not line:
-            continue
-        match = _PROGRESS_ROW_RE.match(line)
-        if match:
-            groups = match.groupdict()
-            rows.append({
-                "item_id": groups["item"],
-                "description": groups["description"].strip(),
-                "duration": groups["duration"],
-                "weight_factor": _progress_percent(groups["weight"]),
-                "start": groups["start"],
-                "finish": groups["finish"],
-                "cumulative_previous_plan": _progress_percent(groups["previous_plan"]),
-                "cumulative_previous_actual": _progress_percent(groups["previous_actual"]),
-                "this_period_plan": _progress_percent(groups["this_plan"]),
-                "this_period_actual": _progress_percent(groups["this_actual"]),
-                "cumulative_to_date_plan": _progress_percent(groups["cumulative_plan"]),
-                "cumulative_to_date_actual": _progress_percent(groups["cumulative_actual"]),
-                "deviation": _progress_percent(groups["deviation"]),
-                "is_total": False,
-                "source_period_label": "This Period",
-            })
-            continue
-        if "overall progress" in line.casefold():
-            percentages = _PROGRESS_PERCENT_RE.findall(line)
-            # The total row contains exactly the seven source progress values:
-            # previous plan/actual, this-period plan/actual, cumulative plan/actual,
-            # and deviation.  Do not infer a weight factor from this row.
-            if len(percentages) >= 7:
-                values = [_progress_percent(value) for value in percentages[-7:]]
-                total_row = {
-                    "item_id": "TOTAL",
-                    "description": "OVERALL PROGRESS",
-                    "duration": "",
-                    "weight_factor": None,
-                    "start": "",
-                    "finish": "",
-                    "cumulative_previous_plan": values[0],
-                    "cumulative_previous_actual": values[1],
-                    "this_period_plan": values[2],
-                    "this_period_actual": values[3],
-                    "cumulative_to_date_plan": values[4],
-                    "cumulative_to_date_actual": values[5],
-                    "deviation": values[6],
-                    "is_total": True,
-                    "source_period_label": "This Period",
-                }
-    if total_row is not None:
-        rows.append(total_row)
-    if not rows:
-        warnings.append(_warning(
-            "overall_progress_requires_manual_review",
-            "Overall Progress section was found but its table could not be mapped safely",
-            field="overall_progress",
-        ))
-    elif total_row is None:
-        warnings.append(_warning(
-            "overall_progress_total_missing",
-            "Overall Progress detail rows were extracted but the source total row was not mapped",
-            field="overall_progress",
-        ))
-    return rows, warnings
-
-
-def _constraint_section_status(section: str) -> str:
-    """Return whether the Daily Report explicitly reported constraints."""
-
-    text = _note_text(section)
-    if not text:
-        return "not_supplied"
-    folded = " ".join(text.casefold().split())
-    if re.search(r"\bno\s+constraints?\s+reported\b", folded):
-        return "none_reported"
-    return "reported"
-
-
-def _activity_match_key(value: Any) -> str:
-    text = unicodedata.normalize("NFKC", _note_text(value)).casefold()
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
-
-
-def _apply_photo_activity_statuses(
-    areas: Sequence[dict[str, Any]],
-    photo_section: str,
-) -> None:
-    """Attach explicit status labels found in Photo Documentation captions.
-
-    The Daily Report activity table itself often omits completion state while the
-    photo caption contains ``(FINISH)``.  We only attach a status when the full
-    normalized activity description is present immediately before an explicit
-    status token; no completion is inferred from the existence of a photograph.
-    """
-
-    normalized = _activity_match_key(photo_section)
-    if not normalized:
-        return
-    status_patterns = (
-        (r"finish(?:ed)?", "Finished"),
-        (r"complete(?:d)?", "Completed"),
-        (r"in\s+progress", "In progress"),
-        (r"ongoing", "Ongoing"),
-        (r"on\s+hold", "On hold"),
-        (r"pending", "Pending"),
-    )
-    for area in areas:
-        statuses = area.get("activity_statuses")
-        if not isinstance(statuses, list):
-            statuses = []
-            area["activity_statuses"] = statuses
-        seen = {
-            (_activity_match_key(item.get("description")), str(item.get("status") or "").casefold())
-            for item in statuses
-            if isinstance(item, Mapping)
-        }
-        for description in area.get("activities_today", []):
-            key = _activity_match_key(description)
-            if not key:
-                continue
-            # Multi-column PDF text can interleave identical caption prefixes.
-            # Prefer the full description; if that is broken by column order, a
-            # distinctive equipment tag (for example 81-HCV-231) is a safe
-            # deterministic fallback for the explicit status token.
-            search_keys = [key]
-            identifiers = re.findall(
-                r"(?<![A-Za-z0-9])(?:\d{1,4}\s*[- ]\s*)?[A-Za-z]{2,}(?:\s*[- ]\s*[A-Za-z0-9]+){1,4}(?![A-Za-z0-9])",
-                _note_text(description),
-            )
-            for identifier in identifiers:
-                identifier_key = _activity_match_key(identifier)
-                if identifier_key and any(char.isdigit() for char in identifier_key):
-                    if identifier_key not in search_keys:
-                        search_keys.append(identifier_key)
-            matched = False
-            for candidate_key in search_keys:
-                for pattern, canonical in status_patterns:
-                    if re.search(
-                        rf"(?:^|\s){re.escape(candidate_key)}(?:\s+\w+){{0,2}}\s+{pattern}(?:\s|$)",
-                        normalized,
-                    ):
-                        identity = (key, canonical.casefold())
-                        if identity not in seen:
-                            statuses.append({
-                                "description": _note_text(description),
-                                "status": canonical,
-                                "source": "photo_documentation",
-                            })
-                            seen.add(identity)
-                        matched = True
-                        break
-                if matched:
-                    break
-
-
-def _extract_daily_content(
-    sections: Mapping[str, str],
-) -> tuple[
-    list[dict[str, Any]],
-    list[dict[str, str]],
-    dict[str, Any],
-    list[dict[str, Any]],
-]:
-    """Normalize legacy-combined and current-split daily report layouts."""
+        segments.append((current_id or "Imported PDF", current_lines))
 
     areas: list[dict[str, Any]] = []
-    areas_by_key: dict[str, dict[str, Any]] = {}
-    manpower_metadata: list[dict[str, Any]] = []
-    provenance_rows: list[dict[str, Any]] = []
-    warnings: list[dict[str, Any]] = []
-
-    def ensure_area(area_id: str) -> dict[str, Any]:
-        key = _area_key(area_id)
-        area = areas_by_key.get(key)
-        if area is None:
-            area = _empty_area(area_id)
-            areas_by_key[key] = area
-            areas.append(area)
-        return area
-
-    activity_section = sections.get("daily_activities", "")
-    for area_id, lines in _area_segments(activity_section):
+    for area_id, lines in segments:
         today, tomorrow = _activity_items_from_segment("\n".join(lines))
-        parsed_rows, metadata, row_warnings = _parse_manpower_lines(
-            lines,
-            default_category=None,
-            area_id=area_id,
-            source_section="daily_activities",
+        if not today and not tomorrow:
+            continue
+        areas.append(
+            {
+                "id": area_id,
+                "activities_today": today,
+                "activities_tomorrow": tomorrow,
+                "manpower": [],
+                "indirect_manpower": [],
+                "constraints": "",
+                "remarks": "",
+                "photos": [],
+            }
         )
-        inline_constraints, inline_remarks = _inline_area_notes(lines)
-        if today or tomorrow or metadata["rows_extracted"] or inline_constraints or inline_remarks:
-            area = ensure_area(area_id)
-            area["activities_today"].extend(today)
-            area["activities_tomorrow"].extend(tomorrow)
-            area["manpower"].extend(parsed_rows["direct"])
-            area["indirect_manpower"].extend(parsed_rows["indirect"])
-            for note in inline_constraints:
-                _merge_area_note(area, "constraints", note)
-            for note in inline_remarks:
-                _merge_area_note(area, "remarks", note)
-        manpower_metadata.append(metadata)
-        provenance_rows.extend(metadata.pop("row_provenance"))
-        warnings.extend(row_warnings)
-
-    direct_section = sections.get("direct_manpower", "")
-    for area_id, lines in _area_segments(direct_section):
-        parsed_rows, metadata, row_warnings = _parse_manpower_lines(
-            lines,
-            default_category="direct",
-            area_id=area_id,
-            source_section="direct_manpower",
-        )
-        inline_constraints, inline_remarks = _inline_area_notes(lines)
-        if metadata["rows_extracted"] or inline_constraints or inline_remarks:
-            area = ensure_area(area_id)
-            area["manpower"].extend(parsed_rows["direct"])
-            area["indirect_manpower"].extend(parsed_rows["indirect"])
-            for note in inline_constraints:
-                _merge_area_note(area, "constraints", note)
-            for note in inline_remarks:
-                _merge_area_note(area, "remarks", note)
-        manpower_metadata.append(metadata)
-        provenance_rows.extend(metadata.pop("row_provenance"))
-        warnings.extend(row_warnings)
-
-    unmapped_notes: list[dict[str, str]] = []
-
-    # Some Daily Report templates repeat area constraints in a dedicated section.
-    # Map only exact known area prefixes. Global notes remain top-level source
-    # facts; they must never create a synthetic ``Imported PDF`` work area.
-    for area_id, note in _section_area_notes(
-        sections.get("constraints", ""),
-        area_ids=[area.get("id", "") for area in areas],
-        kind="constraints",
-    ):
-        if area_id:
-            _merge_area_note(ensure_area(area_id), "constraints", note)
-        else:
-            unmapped_notes.append({"kind": "constraint", "text": note})
-
-    # Dedicated Remarks sections use the same conservative area mapping.
-    for area_id, note in _section_area_notes(
-        sections.get("remarks", ""),
-        area_ids=[area.get("id", "") for area in areas],
-        kind="remarks",
-    ):
-        if area_id:
-            _merge_area_note(ensure_area(area_id), "remarks", note)
-        else:
-            unmapped_notes.append({"kind": "remark", "text": note})
-
-    global_section = sections.get("indirect_manpower", "")
-    global_rows, global_metadata, global_warnings = _parse_manpower_lines(
-        global_section.splitlines(),
-        default_category="indirect",
-        area_id=None,
-        source_section="indirect_manpower",
-    )
-    provenance_rows.extend(global_metadata.pop("row_provenance"))
-    manpower_metadata.append(global_metadata)
-    warnings.extend(global_warnings)
-
-    direct_sources = [
-        item
-        for item in manpower_metadata
-        if item["source_section"] in {"daily_activities", "direct_manpower"}
-    ]
-    direct_tables = sum(item["table_count"] for item in direct_sources)
-    direct_malformed = sum(item["malformed_rows"] for item in direct_sources)
-    direct_rows = sum(item["direct_rows"] for item in direct_sources)
-    if direct_section and direct_tables == 0:
-        warnings.append(
-            _warning(
-                "direct_manpower_table_unrecognized",
-                "Direct manpower section was found but no supported table header was recognized",
-                field="manpower",
-            )
-        )
-    if global_section and global_metadata["table_count"] == 0:
-        warnings.append(
-            _warning(
-                "indirect_manpower_table_unrecognized",
-                "Indirect manpower section was found but no supported table header was recognized",
-                field="indirect_manpower",
-            )
-        )
-
-    profile = "split_sections" if direct_section else "combined_activities_manpower"
-    extraction = {
-        "profile": profile,
-        "rows": provenance_rows,
-        "tables": manpower_metadata,
-        "unmapped_notes": unmapped_notes,
-        "completeness": {
-            "global_indirect": {
-                "section_found": bool(global_section),
-                "table_found": global_metadata["table_count"] > 0,
-                "rows_extracted": global_metadata["indirect_rows"],
-                "malformed_rows": global_metadata["malformed_rows"],
-                "complete": bool(global_section)
-                and global_metadata["table_count"] > 0
-                and global_metadata["malformed_rows"] == 0,
-            },
-            "direct_by_area": {
-                "section_found": bool(activity_section or direct_section),
-                "table_found": direct_tables > 0,
-                "rows_extracted": direct_rows,
-                "malformed_rows": direct_malformed,
-                "complete": direct_tables > 0 and direct_malformed == 0,
-            },
-        },
-    }
-    return areas, global_rows["indirect"], extraction, warnings
-
-
-def _extract_areas(activity_section: str) -> list[dict[str, Any]]:
-    """Backward-compatible activity-only wrapper used by older callers."""
-
-    areas, _, _, _ = _extract_daily_content({"daily_activities": activity_section})
     return areas
 
 
@@ -1870,18 +761,11 @@ def _project_candidates(known_projects: Iterable[Mapping[str, Any]]) -> list[dic
         project_no = _compact(str(project.get("project_no") or ""))
         if not title and not project_no:
             continue
-        raw_aliases = project.get("title_aliases", project.get("aliases", []))
-        aliases = [
-            _compact(str(alias))[:300]
-            for alias in (raw_aliases if isinstance(raw_aliases, (list, tuple)) else [])
-            if _compact(str(alias))
-        ]
         candidates.append(
             {
                 "project_id": project.get("project_id", project.get("id")),
                 "title": title,
                 "project_no": project_no,
-                "title_aliases": aliases,
             }
         )
     return candidates
@@ -1911,24 +795,11 @@ def _match_project(
         ]
         if len(exact) == 1:
             candidate = exact[0]
-            title_match = (
-                project_title_match(
-                    project_title,
-                    candidate.get("title"),
-                    approved_aliases=candidate.get("title_aliases", []),
-                )
-                if project_title and candidate.get("title")
-                else None
-            )
             return candidate["project_id"], {
                 "method": "exact_project_no",
                 "score": 100.0,
                 "accepted": True,
                 "candidate": candidate,
-                # Keep the title decision nested so exact-number provenance is
-                # not overwritten.  In particular, retain the configured alias
-                # text when an arbitrary legacy title was explicitly approved.
-                "title_match": title_match,
             }, warnings
         if len(exact) > 1:
             warnings.append(
@@ -1942,67 +813,6 @@ def _match_project(
             return None, None, warnings
 
     if not project_title:
-        return None, None, warnings
-
-    deterministic_title_matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    structural_title_suggestions: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for candidate in candidates:
-        if not candidate.get("title"):
-            continue
-        match = project_title_match(
-            project_title,
-            candidate["title"],
-            approved_aliases=candidate.get("title_aliases", []),
-        )
-        if match.get("matched"):
-            deterministic_title_matches.append((candidate, match))
-        elif match.get("suggested"):
-            structural_title_suggestions.append((candidate, match))
-    if len(deterministic_title_matches) == 1:
-        candidate, match = deterministic_title_matches[0]
-        return candidate["project_id"], {
-            "method": str(match.get("method") or "deterministic_title_alias"),
-            "score": float(match.get("score") or 0),
-            "accepted": True,
-            "canonical_title_match": True,
-            "candidate": candidate,
-            "title_match": match,
-        }, []
-    if len(deterministic_title_matches) > 1:
-        warnings.append(
-            _warning(
-                "ambiguous_project_title_alias",
-                "Project title matches more than one configured project alias",
-                field="project_title",
-            )
-        )
-        return None, None, warnings
-    if len(structural_title_suggestions) == 1:
-        candidate, match = structural_title_suggestions[0]
-        return None, {
-            "method": str(match.get("method") or "project_title_subset_suggestion"),
-            "score": float(match.get("score") or 0),
-            "accepted": False,
-            "suggestion_only": True,
-            "high_confidence_suggestion": False,
-            "candidate": candidate,
-            "title_match": match,
-        }, [
-            _warning(
-                "project_title_subset_suggestion",
-                "A project title is a subset of a project master; confirmation or an approved alias is required",
-                severity="info",
-                field="project_title",
-            )
-        ]
-    if len(structural_title_suggestions) > 1:
-        warnings.append(
-            _warning(
-                "ambiguous_project_title_subset",
-                "Project title is a subset of more than one project master",
-                field="project_title",
-            )
-        )
         return None, None, warnings
     dependency = _load_rapidfuzz()
     if dependency is None:
@@ -2061,20 +871,11 @@ def _field_confidence(
     method = provenance.get("method")
     if method == "label_regex":
         return 1.0
-    if method in {"date_label_iso", "date_day_header_iso"}:
-        return 1.0
-    if method == "daily_footer_iso":
-        return 0.95
-    if method == "joined_label_regex":
-        return 0.95
-    if method in {"unique_iso_regex", "repeated_iso_regex", "filename_confirmed_iso", "unique_day_regex"}:
+    if method in {"unique_iso_regex", "unique_day_regex"}:
         return 0.8
-    if method == "filename_iso_regex":
-        return 0.7
     if method == "master_data_from_exact_project_no":
         return 1.0
     return 0.7
-
 
 
 def _deduplicate_warnings(warnings: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2093,241 +894,6 @@ def _deduplicate_warnings(warnings: Sequence[dict[str, Any]]) -> list[dict[str, 
     return result
 
 
-def _normalise_extracted_pages(pages: Sequence[str]) -> list[str]:
-    if isinstance(pages, (str, bytes, bytearray)) or not isinstance(pages, Sequence):
-        raise PDFValidationError("pages must be a sequence of page text strings")
-    normalized: list[str] = []
-    for page in pages:
-        if not isinstance(page, str):
-            raise PDFValidationError("every extracted page must be text")
-        normalized.append(_normalize_page_text(page))
-    return normalized
-
-
-def _extract_report_identity(
-    pages: Sequence[str],
-    *,
-    filename: str,
-    known_projects: Iterable[Mapping[str, Any]],
-) -> dict[str, Any]:
-    """Extract identity fields and their deterministic provenance."""
-    warnings: list[dict[str, Any]] = []
-    provenance: dict[str, dict[str, Any]] = {}
-    report_date, date_provenance, date_warnings = _extract_date(
-        pages,
-        filename=filename,
-    )
-    warnings.extend(date_warnings)
-    if date_provenance:
-        provenance["date"] = date_provenance
-
-    day_no, day_provenance, day_warnings = _extract_day_number(pages)
-    warnings.extend(day_warnings)
-    if day_provenance:
-        provenance["day_no"] = day_provenance
-
-    extracted: dict[str, str] = {}
-    for field in ("project_no", "project_title", "customer", "location", "equipment"):
-        value, field_provenance = _extract_labeled_value(pages, field)
-        extracted[field] = value or ""
-        if field_provenance:
-            provenance[field] = field_provenance
-
-    # Retain the raw value for audit; a stacked PDF correction must never be
-    # silently repaired by guessing which year digit the author intended.
-    number = extracted["project_no"]
-    if re.search(r"/\s*\d{5,}\s*$", number):
-        warnings.append(_warning(
-            "invalid_document_number_year",
-            f"Document number has an invalid year ({number}); check overlapping text in the source PDF.",
-            severity="error",
-            field="project_no",
-        ))
-
-    project_id, project_match, project_warnings = _match_project(
-        extracted["project_no"],
-        extracted["project_title"],
-        known_projects,
-    )
-    warnings.extend(project_warnings)
-    if project_match and project_match.get("method") == "exact_project_no":
-        candidate = project_match["candidate"]
-        title_match = (
-            project_match.get("title_match")
-            if isinstance(project_match.get("title_match"), Mapping)
-            else {}
-        )
-        if not extracted["project_title"] and candidate.get("title"):
-            extracted["project_title"] = candidate["title"]
-            provenance["project_title"] = {
-                "method": "master_data_from_exact_project_no",
-                "raw": candidate["title"],
-            }
-        elif (
-            extracted["project_title"]
-            and candidate.get("title")
-            and not title_match.get("matched")
-        ):
-            warnings.append(
-                _warning(
-                    "project_title_master_mismatch",
-                    "Extracted project title differs from the exact project-number master record",
-                    field="project_title",
-                )
-            )
-    return {
-        "report_date": report_date,
-        "day_no": day_no,
-        "extracted": extracted,
-        "project_id": project_id,
-        "project_match": project_match,
-        "provenance": provenance,
-        "warnings": warnings,
-    }
-
-
-def _extract_report_content(
-    pages: Sequence[str],
-    *,
-    document_context: Sequence[Any],
-) -> dict[str, Any]:
-    """Extract normalized sections and content while preserving warning order."""
-    warnings: list[dict[str, Any]] = []
-    sections, section_matches, ignored_chrome = _collect_sections(
-        pages,
-        document_context=document_context,
-    )
-    layout_profile = _detect_layout_profile(sections, section_matches)
-    areas, indirect_manpower, manpower_extraction, manpower_warnings = (
-        _extract_daily_content(sections)
-    )
-    # Keep the table-shape profile distinct from the overall layout profile.
-    manpower_extraction["manpower_profile"] = manpower_extraction.get("profile")
-    manpower_extraction["layout_profile"] = layout_profile
-    if layout_profile == LAYOUT_PROFILE_UNKNOWN:
-        warnings.append(
-            _warning(
-                "unknown_daily_report_layout",
-                "Daily Report layout did not match a known legacy/current profile; parsed data requires review",
-                field="layout",
-            )
-        )
-
-    _apply_photo_activity_statuses(areas, sections.get("photo_documentation", ""))
-    weather = _extract_weather(sections.get("weather", ""))
-    overall_progress, progress_warnings = _extract_overall_progress(
-        sections.get("overall_progress", "")
-    )
-    constraint_status = _constraint_section_status(sections.get("constraints", ""))
-    warnings.extend(manpower_warnings)
-    warnings.extend(progress_warnings)
-    if ignored_chrome:
-        warnings.append(
-            _warning(
-                "document_chrome_removed",
-                f"{len(ignored_chrome)} repeated header/footer line(s) were removed from parsed sections",
-                severity="info",
-                field="layout",
-            )
-        )
-    if sections.get("daily_activities") and not areas:
-        warnings.append(
-            _warning(
-                "activities_require_manual_review",
-                "Daily activity section was found but its table could not be mapped safely",
-                field="areas",
-            )
-        )
-    return {
-        "sections": sections,
-        "section_matches": section_matches,
-        "ignored_chrome": ignored_chrome,
-        "layout_profile": layout_profile,
-        "areas": areas,
-        "indirect_manpower": indirect_manpower,
-        "manpower_extraction": manpower_extraction,
-        "weather": weather,
-        "overall_progress": overall_progress,
-        "constraint_status": constraint_status,
-        "warnings": warnings,
-    }
-
-
-def _import_confidence(
-    *,
-    report_date: str | None,
-    day_no: str | None,
-    extracted: Mapping[str, str],
-    provenance: Mapping[str, Mapping[str, Any]],
-    warnings: list[dict[str, Any]],
-) -> tuple[bool, dict[str, float], float]:
-    critical_values = {
-        "date": report_date or "",
-        "day_no": day_no or "",
-        "project_no": extracted["project_no"],
-    }
-    for field, value in critical_values.items():
-        if value:
-            continue
-        warnings.append(
-            _warning(
-                f"missing_{field}",
-                f"Critical field '{field}' was not deterministically extracted",
-                severity="error",
-                field=field,
-            )
-        )
-
-    field_scores = {
-        "date": _field_confidence(report_date or "", provenance.get("date")),
-        "day_no": _field_confidence(day_no or "", provenance.get("day_no")),
-        "project_no": _field_confidence(
-            extracted["project_no"], provenance.get("project_no")
-        ),
-        "project_title": _field_confidence(
-            extracted["project_title"], provenance.get("project_title")
-        ),
-    }
-    weights = {"date": 2, "day_no": 2, "project_no": 2, "project_title": 1}
-    overall = sum(
-        field_scores[key] * weights[key] for key in weights
-    ) / sum(weights.values())
-    critical_complete = all(critical_values.values())
-    if not critical_complete:
-        overall = min(overall, 0.69)
-    return critical_complete, field_scores, overall
-
-
-def _manpower_report_status(
-    areas: Sequence[Mapping[str, Any]],
-    indirect_manpower: Sequence[Mapping[str, Any]],
-    extraction: Mapping[str, Any],
-) -> str:
-    completeness = extraction.get("completeness", {})
-    direct_meta = completeness.get("direct_by_area", {})
-    indirect_meta = completeness.get("global_indirect", {})
-    row_count = sum(
-        len(area.get("manpower", [])) + len(area.get("indirect_manpower", []))
-        for area in areas
-        if isinstance(area, Mapping)
-    ) + len(indirect_manpower)
-    table_found = bool(direct_meta.get("table_found") or indirect_meta.get("table_found"))
-    if row_count:
-        return "reported"
-    return "none_reported" if table_found else "not_supplied"
-
-
-def _unmapped_note_text(extraction: Mapping[str, Any], *, kind: str) -> str:
-    unmapped_notes = extraction.get("unmapped_notes", [])
-    return "; ".join(dict.fromkeys(
-        _note_text(item.get("text"))
-        for item in unmapped_notes
-        if isinstance(item, Mapping)
-        and item.get("kind") == kind
-        and _note_text(item.get("text"))
-    ))
-
-
 def parse_daily_report_pages(
     pages: Sequence[str],
     *,
@@ -2341,48 +907,109 @@ def parse_daily_report_pages(
     does not accept a combined list of PDF byte payloads.
     """
 
-    normalized_pages = _normalise_extracted_pages(pages)
-    identity = _extract_report_identity(
-        normalized_pages,
-        filename=str((source_metadata or {}).get("filename") or ""),
-        known_projects=known_projects,
+    if isinstance(pages, (str, bytes, bytearray)) or not isinstance(pages, Sequence):
+        raise PDFValidationError("pages must be a sequence of page text strings")
+    normalized_pages: list[str] = []
+    for page in pages:
+        if not isinstance(page, str):
+            raise PDFValidationError("every extracted page must be text")
+        normalized_pages.append(_normalize_page_text(page))
+
+    warnings: list[dict[str, Any]] = []
+    provenance: dict[str, dict[str, Any]] = {}
+
+    report_date, date_provenance, date_warnings = _extract_date(normalized_pages)
+    warnings.extend(date_warnings)
+    if date_provenance:
+        provenance["date"] = date_provenance
+
+    day_no, day_provenance, day_warnings = _extract_day_number(normalized_pages)
+    warnings.extend(day_warnings)
+    if day_provenance:
+        provenance["day_no"] = day_provenance
+
+    extracted: dict[str, str] = {}
+    for field in ("project_no", "project_title", "customer", "location", "equipment"):
+        value, field_provenance = _extract_labeled_value(normalized_pages, field)
+        extracted[field] = value or ""
+        if field_provenance:
+            provenance[field] = field_provenance
+
+    project_id, project_match, project_warnings = _match_project(
+        extracted["project_no"],
+        extracted["project_title"],
+        known_projects,
     )
-    report_date = identity["report_date"]
-    day_no = identity["day_no"]
-    extracted = identity["extracted"]
-    provenance = identity["provenance"]
-    warnings = list(identity["warnings"])
-    content = _extract_report_content(
-        normalized_pages,
-        document_context=(
-            extracted.get("project_title"),
-            extracted.get("project_no"),
-            extracted.get("customer"),
+    warnings.extend(project_warnings)
+
+    if project_match and project_match.get("method") == "exact_project_no":
+        candidate = project_match["candidate"]
+        if not extracted["project_title"] and candidate.get("title"):
+            extracted["project_title"] = candidate["title"]
+            provenance["project_title"] = {
+                "method": "master_data_from_exact_project_no",
+                "raw": candidate["title"],
+            }
+        elif (
+            extracted["project_title"]
+            and candidate.get("title")
+            and _normalized_identifier(extracted["project_title"])
+            != _normalized_identifier(candidate["title"])
+        ):
+            warnings.append(
+                _warning(
+                    "project_title_master_mismatch",
+                    "Extracted project title differs from the exact project-number master record",
+                    field="project_title",
+                )
+            )
+
+    sections, section_matches = _collect_sections(normalized_pages)
+    areas = _extract_areas(sections.get("daily_activities", ""))
+    if sections.get("daily_activities") and not areas:
+        warnings.append(
+            _warning(
+                "activities_require_manual_review",
+                "Daily activity section was found but its table could not be mapped safely",
+                field="areas",
+            )
+        )
+
+    critical_values = {
+        "date": report_date or "",
+        "day_no": day_no or "",
+        "project_no": extracted["project_no"],
+    }
+    for field, value in critical_values.items():
+        if not value:
+            warnings.append(
+                _warning(
+                    f"missing_{field}",
+                    f"Critical field '{field}' was not deterministically extracted",
+                    severity="error",
+                    field=field,
+                )
+            )
+
+    field_scores = {
+        "date": _field_confidence(report_date or "", provenance.get("date")),
+        "day_no": _field_confidence(day_no or "", provenance.get("day_no")),
+        "project_no": _field_confidence(extracted["project_no"], provenance.get("project_no")),
+        "project_title": _field_confidence(
+            extracted["project_title"], provenance.get("project_title")
         ),
-    )
-    warnings.extend(content["warnings"])
-    critical_complete, field_scores, overall = _import_confidence(
-        report_date=report_date,
-        day_no=day_no,
-        extracted=extracted,
-        provenance=provenance,
-        warnings=warnings,
-    )
+    }
+    weights = {"date": 2, "day_no": 2, "project_no": 2, "project_title": 1}
+    overall = sum(field_scores[key] * weights[key] for key in weights) / sum(weights.values())
+    critical_complete = all(critical_values.values())
+    if not critical_complete:
+        overall = min(overall, 0.69)
 
     warnings = _deduplicate_warnings(warnings)
     has_error = any(warning.get("severity") == "error" for warning in warnings)
-    areas = content["areas"]
-    indirect_manpower = content["indirect_manpower"]
-    manpower_extraction = content["manpower_extraction"]
-    manpower_status = _manpower_report_status(
-        areas,
-        indirect_manpower,
-        manpower_extraction,
-    )
     data = {
         "date": report_date or "",
         "day_no": day_no or "",
-        "layout_profile": content["layout_profile"],
         "project_no": extracted["project_no"],
         "project_title": extracted["project_title"],
         "location": extracted["location"],
@@ -2392,17 +1019,11 @@ def parse_daily_report_pages(
         "prepared_by": "",
         "checked_by": "",
         "approved_by": "",
-        "global_remarks": _unmapped_note_text(manpower_extraction, kind="remark"),
-        "global_constraints": _unmapped_note_text(
-            manpower_extraction,
-            kind="constraint",
-        ),
-        "weather": content["weather"],
-        "constraint_status": content["constraint_status"],
-        "indirect_manpower": indirect_manpower,
-        "manpower_status": manpower_status,
-        "show_overall_progress": bool(content["overall_progress"]),
-        "overall_progress": content["overall_progress"],
+        "global_remarks": _compact(sections.get("remarks", "")),
+        "weather": {},
+        "indirect_manpower": [],
+        "show_overall_progress": False,
+        "overall_progress": [],
         "areas": areas,
         "sign_offs": [],
     }
@@ -2415,7 +1036,7 @@ def parse_daily_report_pages(
         # approved for monthly aggregation.
         "status": "ready" if critical_complete and not has_error else "needs_review",
         "review_required": True,
-        "project_id": identity["project_id"],
+        "project_id": project_id,
         "report_date": report_date,
         "day_no": day_no,
         "data": data,
@@ -2427,19 +1048,10 @@ def parse_daily_report_pages(
         },
         "warnings": warnings,
         "extraction": {
-            "layout_profile": content["layout_profile"],
             "field_provenance": provenance,
-            "sections": content["sections"],
-            "section_matches": content["section_matches"],
-            "normalization": {
-                "ignored_document_chrome": content["ignored_chrome"],
-                "unmapped_notes": manpower_extraction.get("unmapped_notes", []),
-            },
-            "project_match": identity["project_match"],
-            "manpower": manpower_extraction,
-            "completeness": {
-                "manpower": manpower_extraction["completeness"],
-            },
+            "sections": sections,
+            "section_matches": section_matches,
+            "project_match": project_match,
         },
     }
 
@@ -2497,9 +1109,6 @@ __all__ = [
     "DEFAULT_LIMITS",
     "ImportLimits",
     "PARSER_VERSION",
-    "LAYOUT_PROFILE_LEGACY_COMBINED",
-    "LAYOUT_PROFILE_CURRENT_SPLIT",
-    "LAYOUT_PROFILE_UNKNOWN",
     "PDFDependencyError",
     "PDFExtractionError",
     "PDFImportError",

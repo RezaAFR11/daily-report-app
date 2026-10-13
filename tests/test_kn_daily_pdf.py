@@ -80,6 +80,29 @@ class KNLayoutTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unavailable'):
             self.render(report)
 
+    def test_legacy_format_flag_cannot_select_a_different_layout(self):
+        report = self.report(1)
+        report['pdf_layout'] = 'standard'
+        doc = self.render(report)
+        self.assertIn('DAILY ACTIVITY REPORT', doc[0].get_text())
+        page = doc[-1]
+        headings = [span for block in page.get_text('dict')['blocks']
+                    for line in block.get('lines', []) for span in line['spans']
+                    if span['text'] == 'DOCUMENTATION PHOTO']
+        self.assertEqual(len(headings), 1)
+        heading = headings[0]
+        self.assertAlmostEqual(heading['size'], 16)
+        self.assertAlmostEqual((heading['bbox'][0] + heading['bbox'][2]) / 2,
+                               page.rect.width / 2, delta=1)
+        expected = (214 / 255, 227 / 255, 188 / 255)
+        self.assertTrue(any(d.get('fill') and all(abs(a-b) < .001 for a,b in zip(d['fill'], expected))
+                            for d in page.get_drawings()))
+
+    def test_no_layout_selector_or_special_format_label_in_form(self):
+        html = Path(app.__file__).with_name('templates').joinpath('index.html').read_text(encoding='utf-8')
+        for label in ('PDF Format', 'Report layout', 'KN format', 'id="pdf_layout"', 'Existing GPA format'):
+            self.assertNotIn(label, html)
+
     def test_kn_fields_survive_draft_save_and_load(self):
         report = self.report()
         report['kn_weather_hourly'] = ['Rain'] + [''] * 10

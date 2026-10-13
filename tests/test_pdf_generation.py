@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from copy import deepcopy
 from unittest.mock import patch
-from urllib.parse import quote, unquote
 
 import daily_report_app
 from reportlab.lib.pagesizes import A4
@@ -65,19 +64,11 @@ class PDFGenerationTests(unittest.TestCase):
             with (
                 patch('daily_report_app.get_reports_dir', return_value=reports_dir),
                 patch('daily_report_app.archive_final_daily_record', return_value=canonical) as archive_json,
-                patch('daily_report_app.google_drive_is_configured', return_value=False),
             ):
                 response = self.client.post('/generate', json=MINIMAL_REPORT)
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers['X-Report-Archive-Status'], 'saved')
-            self.assertEqual(response.headers['X-Report-ID'], canonical['report_id'])
-            self.assertRegex(response.headers['X-Report-Archive-ID'], r'^[a-f0-9]{32}$')
-            self.assertEqual(response.headers['X-GDrive-Configured'], 'false')
-            self.assertEqual(
-                unquote(response.headers['X-Report-Filename']),
-                'Daily Report - PT GPA - KN - 2026-07-28 (Day 47).pdf',
-            )
             self.assertTrue(response.data.startswith(b'%PDF'))
 
             with open(os.path.join(reports_dir, 'index.json'), encoding='utf-8') as index_file:
@@ -85,14 +76,7 @@ class PDFGenerationTests(unittest.TestCase):
             self.assertEqual(len(index), 1)
             self.assertEqual(index[0]['date'], '2026-07-28')
             self.assertEqual(index[0]['canonical_report_id'], canonical['report_id'])
-            self.assertEqual(index[0]['project_title'], MINIMAL_REPORT['project_title'])
-            self.assertEqual(
-                index[0]['archive_id'],
-                response.headers['X-Report-Archive-ID'],
-            )
-            self.assertTrue(
-                os.path.isfile(os.path.join(reports_dir, index[0]['storage_filename']))
-            )
+            self.assertTrue(os.path.isfile(os.path.join(reports_dir, index[0]['filename'])))
             self.assertEqual(archive_json.call_args.args[2], MINIMAL_REPORT)
 
     def test_archive_failure_does_not_block_pdf_download(self):
@@ -112,34 +96,7 @@ class PDFGenerationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers['X-Report-Archive-Status'], 'failed')
-        self.assertEqual(response.headers['X-Report-Pdf-Archive-Status'], 'failed')
-        self.assertEqual(response.headers['X-Report-Json-Archive-Status'], 'saved')
-        self.assertEqual(response.headers['X-Report-ID'], 'test-r1')
-        self.assertEqual(response.headers['X-Report-Archive-ID'], '')
         self.assertTrue(response.data.startswith(b'%PDF'))
-
-    def test_canonical_archive_failure_does_not_block_pdf_archive_or_download(self):
-        fake_pdf = io.BytesIO(b'%PDF-1.4\nvalid test pdf\n%%EOF')
-        with (
-            patch('daily_report_app.generate_pdf', return_value=fake_pdf),
-            patch(
-                'daily_report_app.archive_final_daily_record',
-                side_effect=OSError('canonical storage unavailable'),
-            ),
-            patch('daily_report_app.archive_generated_report') as archive_pdf,
-            patch('daily_report_app.app.logger.exception'),
-        ):
-            response = self.client.post('/generate', json=MINIMAL_REPORT)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.headers['X-Report-Archive-Status'], 'failed')
-        self.assertEqual(response.headers['X-Report-Pdf-Archive-Status'], 'saved')
-        self.assertEqual(response.headers['X-Report-Json-Archive-Status'], 'failed')
-        self.assertEqual(response.headers['X-Report-ID'], '')
-        self.assertRegex(response.headers['X-Report-Archive-ID'], r'^[a-f0-9]{32}$')
-        self.assertTrue(response.data.startswith(b'%PDF'))
-        archive_entry = archive_pdf.call_args.args[3]
-        self.assertNotIn('canonical_report_id', archive_entry)
 
     def test_generate_rejects_invalid_json(self):
         response = self.client.post(
@@ -176,125 +133,6 @@ class PDFGenerationTests(unittest.TestCase):
             self.assertEqual(traversal.status_code, 404)
             self.assertEqual(deletion.status_code, 404)
             self.assertTrue(os.path.isfile(outside_path))
-
-    def test_same_display_name_uses_archive_id_for_download_and_delete(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            reports_dir = os.path.join(temp_dir, 'reports')
-            os.makedirs(reports_dir)
-            filename = 'Daily Report - Same Date.pdf'
-            old_archive_id = 'a' * 32
-            new_archive_id = 'b' * 32
-            old_storage = f'report-{old_archive_id}.pdf'
-            new_storage = f'report-{new_archive_id}.pdf'
-            old_pdf = b'%PDF-1.4\nold report'
-            new_pdf = b'%PDF-1.4\nnew report'
-            for storage_name, pdf_bytes in (
-                (old_storage, old_pdf),
-                (new_storage, new_pdf),
-            ):
-                with open(os.path.join(reports_dir, storage_name), 'wb') as output:
-                    output.write(pdf_bytes)
-            rows = [
-                {
-                    'filename': filename,
-                    'archive_id': new_archive_id,
-                    'storage_filename': new_storage,
-                    'canonical_report_id': 'new-report',
-                },
-                {
-                    'filename': filename,
-                    'archive_id': old_archive_id,
-                    'storage_filename': old_storage,
-                    'canonical_report_id': 'old-report',
-                },
-            ]
-            with open(os.path.join(reports_dir, 'index.json'), 'w', encoding='utf-8') as index:
-                json.dump(rows, index)
-
-            with patch('daily_report_app.get_reports_dir', return_value=reports_dir):
-                download = self.client.get(
-                    f'/reports/download/{quote(filename)}?archive_id={old_archive_id}'
-                )
-                downloaded_pdf = download.get_data()
-                download.close()
-                deletion = self.client.post('/reports/delete', json={
-                    'filename': filename,
-                    'archive_id': old_archive_id,
-                    'report_id': 'old-report',
-                })
-
-            self.assertEqual(download.status_code, 200)
-            self.assertEqual(downloaded_pdf, old_pdf)
-            self.assertEqual(deletion.status_code, 200)
-            self.assertFalse(os.path.exists(os.path.join(reports_dir, old_storage)))
-            self.assertTrue(os.path.isfile(os.path.join(reports_dir, new_storage)))
-            with open(os.path.join(reports_dir, 'index.json'), encoding='utf-8') as index:
-                remaining_rows = json.load(index)
-            self.assertEqual(
-                [row['archive_id'] for row in remaining_rows],
-                [new_archive_id],
-            )
-
-    def test_indexed_storage_filename_cannot_escape_reports_directory(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            reports_dir = os.path.join(temp_dir, 'reports')
-            os.makedirs(reports_dir)
-            filename = 'Indexed Report.pdf'
-            outside_path = os.path.join(temp_dir, 'secret.pdf')
-            with open(outside_path, 'wb') as output:
-                output.write(b'%PDF secret')
-            with open(os.path.join(reports_dir, 'index.json'), 'w', encoding='utf-8') as index:
-                json.dump([{
-                    'filename': filename,
-                    'storage_filename': '../secret.pdf',
-                }], index)
-
-            with patch('daily_report_app.get_reports_dir', return_value=reports_dir):
-                download = self.client.get(f'/reports/download/{quote(filename)}')
-                deletion = self.client.post(
-                    '/reports/delete',
-                    json={'filename': filename},
-                )
-
-            self.assertEqual(download.status_code, 404)
-            self.assertEqual(deletion.status_code, 404)
-            self.assertTrue(os.path.isfile(outside_path))
-
-    def test_admin_delete_report_uses_owned_archive_identity(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            reports_dir = os.path.join(temp_dir, 'reports')
-            os.makedirs(reports_dir)
-            filename = 'Worker Daily Report.pdf'
-            archive_id = 'c' * 32
-            storage_filename = f'report-{archive_id}.pdf'
-            report_path = os.path.join(reports_dir, storage_filename)
-            with open(report_path, 'wb') as output:
-                output.write(b'%PDF worker report')
-            with open(os.path.join(reports_dir, 'index.json'), 'w', encoding='utf-8') as index:
-                json.dump([{
-                    'filename': filename,
-                    'archive_id': archive_id,
-                    'storage_filename': storage_filename,
-                }], index)
-            users = {
-                'pdf-test': {'is_admin': True},
-                'worker': {'is_admin': False},
-            }
-
-            with (
-                patch('daily_report_app.load_users', return_value=users),
-                patch('daily_report_app.get_reports_dir', return_value=reports_dir),
-            ):
-                response = self.client.post('/admin/delete_report', json={
-                    'username': 'worker',
-                    'filename': filename,
-                    'archive_id': archive_id,
-                })
-
-            self.assertEqual(response.status_code, 200)
-            self.assertFalse(os.path.exists(report_path))
-            with open(os.path.join(reports_dir, 'index.json'), encoding='utf-8') as index:
-                self.assertEqual(json.load(index), [])
 
     def test_very_long_photo_caption_does_not_break_pdf_layout(self):
         report = deepcopy(MINIMAL_REPORT)
@@ -410,40 +248,6 @@ class PDFGenerationTests(unittest.TestCase):
 
         self.assertEqual(page_count, 1)
 
-    def test_optional_output_file_matches_returned_pdf_buffer(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output_path = os.path.join(temp_dir, 'nested', 'daily-report.pdf')
-
-            pdf = generate_pdf(
-                deepcopy(MINIMAL_REPORT),
-                output_path,
-                deepcopy(DEFAULT_CONFIG),
-            )
-
-            with open(output_path, 'rb') as output:
-                saved_pdf = output.read()
-
-        self.assertEqual(saved_pdf, pdf.getvalue())
-        self.assertTrue(saved_pdf.startswith(b'%PDF'))
-
-    def test_generate_pdf_preserves_canvas_metadata_contract(self):
-        report = deepcopy(MINIMAL_REPORT)
-        report['project_title'] = ''
-        config = deepcopy(DEFAULT_CONFIG)
-        config['project_title'] = 'Configured PDF Project'
-
-        generate_pdf(report, None, config)
-
-        self.assertEqual(_NC._meta['date'], report['date'])
-        self.assertEqual(_NC._meta['day'], report['day_no'])
-        self.assertEqual(_NC._meta['proj'], report['project_no'])
-        self.assertEqual(_NC._meta['loc'], report['location'])
-        self.assertEqual(_NC._meta['cust'], report['customer'])
-        self.assertEqual(_NC._meta['project_title'], 'Configured PDF Project')
-        self.assertEqual(_NC._meta['theme'], config['theme'])
-        self.assertIn('logo_gpa_card', _NC._meta)
-        self.assertIn('logo_kn_card', _NC._meta)
-
     def test_overall_progress_weighted_totals_match_reference(self):
         rows = []
         for description, weight, previous_actual, period, cumulative in [
@@ -521,9 +325,8 @@ class PDFGenerationTests(unittest.TestCase):
             for text in paragraph_texts
             if re.match(r'^\d+\.&#160;&#160;', text)
         ]
-        self.assertEqual(heading_numbers, list(range(1, 10)))
-        self.assertEqual(headings[3], 'DAILY ACTIVITIES BY AREA')
-        self.assertEqual(headings[4], 'DIRECT MANPOWER BY AREA')
+        self.assertEqual(heading_numbers, list(range(1, 9)))
+        self.assertEqual(headings[3], 'DAILY ACTIVITIES &amp; MANPOWER BY AREA')
         self.assertEqual(headings[-1], 'PHOTO DOCUMENTATION')
         self.assertNotIn('OVERALL PROGRESS', headings)
         self.assertFalse(any('PROGRESS-SENTINEL' in text for text in paragraph_texts))
@@ -544,7 +347,7 @@ class PDFGenerationTests(unittest.TestCase):
         ]
         self.assertEqual(
             [int(re.match(r'^(\d+)\.', text).group(1)) for text in headings],
-            list(range(1, 10)),
+            list(range(1, 9)),
         )
         self.assertFalse(any('OVERALL PROGRESS' in text for text in headings))
 
@@ -581,7 +384,7 @@ class PDFGenerationTests(unittest.TestCase):
             for text in paragraph_texts
             if re.match(r'^\d+\.&#160;&#160;', text)
         ]
-        self.assertEqual(heading_numbers, list(range(1, 10)))
+        self.assertEqual(heading_numbers, list(range(1, 9)))
         self.assertEqual(headings[:3], [
             'REPORT INFORMATION',
             'INDIRECT MANPOWER',
@@ -600,8 +403,7 @@ class PDFGenerationTests(unittest.TestCase):
                 'weather',
                 'indirect_manpower',
                 'overall_progress',
-                'area_activities',
-                'area_manpower',
+                'daily_activities',
                 'constraints',
                 'remarks',
                 'sign_off',
@@ -618,29 +420,29 @@ class PDFGenerationTests(unittest.TestCase):
             _normalise_pdf_section_order([
                 'report_information', 'indirect_manpower', 'daily_activities',
                 'weather', 'sign_off',
-            ])[:8],
+            ])[:7],
             [
-                'report_information', 'indirect_manpower', 'area_activities',
-                'area_manpower', 'constraints', 'remarks', 'weather', 'sign_off',
+                'report_information', 'indirect_manpower', 'daily_activities',
+                'constraints', 'remarks', 'weather', 'sign_off',
             ],
         )
         self.assertEqual(
             _normalise_pdf_section_order([
                 'report_information', 'constraints', 'sign_off',
                 'daily_activities', 'remarks', 'weather',
-            ])[:7],
+            ])[:6],
             [
                 'report_information', 'constraints', 'sign_off',
-                'area_activities', 'area_manpower', 'remarks', 'weather',
+                'daily_activities', 'remarks', 'weather',
             ],
         )
         self.assertEqual(
             _normalise_pdf_section_order([
                 'report_information', 'sign_off', 'areas', 'weather',
-            ])[:7],
+            ])[:6],
             [
-                'report_information', 'sign_off', 'area_activities',
-                'area_manpower', 'constraints', 'remarks', 'weather',
+                'report_information', 'sign_off', 'daily_activities',
+                'constraints', 'remarks', 'weather',
             ],
         )
 
@@ -650,10 +452,9 @@ class PDFGenerationTests(unittest.TestCase):
             'report_information',
             'photo_documentation',
             'remarks',
-            'area_manpower',
             'constraints',
             'sign_off',
-            'area_activities',
+            'daily_activities',
             'indirect_manpower',
             'weather',
             'overall_progress',
@@ -677,10 +478,9 @@ class PDFGenerationTests(unittest.TestCase):
             'REPORT INFORMATION',
             'PHOTO DOCUMENTATION',
             'REMARKS',
-            'DIRECT MANPOWER BY AREA',
             'CONSTRAINTS &amp; ISSUES',
             'SIGN-OFF',
-            'DAILY ACTIVITIES BY AREA',
+            'DAILY ACTIVITIES &amp; MANPOWER BY AREA',
             'INDIRECT MANPOWER',
             'WEATHER REPORT',
         ])
@@ -754,7 +554,7 @@ class PDFGenerationTests(unittest.TestCase):
         ]
         self.assertEqual(
             [int(re.match(r'^(\d+)\.', text).group(1)) for text in headings],
-            list(range(1, 11)),
+            list(range(1, 10)),
         )
         self.assertTrue(any('OVERALL PROGRESS' in text for text in headings))
 
@@ -810,12 +610,7 @@ class PDFGenerationTests(unittest.TestCase):
         self.assertIn('id="resetPDFSectionOrderBtn"', page)
         self.assertIn('id="confirmPDFSectionOrderBtn"', page)
         self.assertIn("report_information: { label:'Report Information'", page)
-        self.assertIn("area_activities:     { label:'Daily Activities'", page)
-        self.assertIn("area_manpower:       { label:'Direct Manpower'", page)
-        self.assertIn("daily_activities: ['area_activities', 'area_manpower']", page)
         self.assertIn("photo_documentation: { label:'Photo Documentation'", page)
-        self.assertIn('class="form-control form-control-sm mp-task"', page)
-        self.assertIn("task:  row.querySelector('.mp-task').value", page)
         self.assertIn('function openPDFSectionOrderModal()', page)
         self.assertIn('function confirmPDFSectionOrder()', page)
         self.assertIn('function renderPDFPreview()', page)

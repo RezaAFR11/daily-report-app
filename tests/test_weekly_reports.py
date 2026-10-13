@@ -12,7 +12,6 @@ from monthly_report.renderer import _normalise_progress, render_monthly_report
 from monthly_report.web import (
     _parse_period,
     _prepare_draft,
-    _rolling_week_period,
     get_monthly_reports_index,
     register_monthly_routes,
 )
@@ -77,32 +76,35 @@ def _canonical_record(report_date: str, report_id: str) -> dict:
 
 
 class WeeklyPeriodTests(unittest.TestCase):
-    def test_week_to_date_accepts_arbitrary_start_and_may_cross_month(self):
+    def test_week_to_date_accepts_monday_cutoff_and_may_cross_month(self):
         start, end = _parse_period(
-            "2026-08-26",
-            "2026-09-01",
+            "2026-08-31",
+            "2026-09-02",
             report_type="weekly",
             report_mode="wtd",
         )
 
-        self.assertEqual(start.strftime("%Y-%m-%d"), "2026-08-26")
-        self.assertEqual(end.strftime("%Y-%m-%d"), "2026-09-01")
+        self.assertEqual(start.strftime("%Y-%m-%d"), "2026-08-31")
+        self.assertEqual(end.strftime("%Y-%m-%d"), "2026-09-02")
 
-    def test_full_week_accepts_any_exact_seven_day_period_across_year(self):
+    def test_full_week_accepts_exact_monday_to_sunday_across_year(self):
         start, end = _parse_period(
-            "2026-12-30",
-            "2027-01-05",
+            "2026-12-28",
+            "2027-01-03",
             report_type="weekly",
             report_mode="final",
         )
 
+        self.assertEqual(start.weekday(), 0)
+        self.assertEqual(end.weekday(), 6)
         self.assertEqual((end - start).days, 6)
 
     def test_invalid_weekly_periods_are_rejected(self):
         invalid_periods = (
+            ("2026-08-04", "2026-08-07", "wtd", "start on Monday"),
             ("2026-08-03", "2026-08-10", "wtd", "longer than 7 days"),
-            ("2026-08-03", "2026-08-08", "draft", "exactly 7 consecutive days"),
-            ("2026-08-03", "2026-08-06", "final", "exactly 7 consecutive days"),
+            ("2026-08-03", "2026-08-08", "draft", "Monday through Sunday"),
+            ("2026-08-03", "2026-08-06", "final", "Monday through Sunday"),
         )
 
         for date_from, date_to, mode, message in invalid_periods:
@@ -114,16 +116,6 @@ class WeeklyPeriodTests(unittest.TestCase):
                         report_type="weekly",
                         report_mode=mode,
                     )
-
-    def test_uploaded_week_is_anchored_to_earliest_valid_record_not_list_order(self):
-        start, end = _rolling_week_period([
-            _canonical_record("2026-08-14", "later"),
-            _canonical_record("2026-08-10", "earliest"),
-            _canonical_record("2026-08-12", "middle"),
-        ])
-
-        self.assertEqual(start.strftime("%Y-%m-%d"), "2026-08-10")
-        self.assertEqual(end.strftime("%Y-%m-%d"), "2026-08-16")
 
     def test_existing_monthly_same_month_rule_is_unchanged(self):
         with self.assertRaisesRegex(ValueError, "one calendar month"):
@@ -176,66 +168,11 @@ class WeeklyDraftTests(unittest.TestCase):
         self.assertEqual(draft["report_title"], "Weekly Progress Report")
         self.assertEqual(draft["report_mode"], "wtd")
         self.assertEqual(draft["status"], "wtd")
-        current = draft["site"]["current_period_activities"]
-        self.assertEqual(len(current), 1)
-        self.assertEqual(current[0]["area"], "Unit 2")
-        self.assertEqual(current[0]["workstream"], "Testing & Commissioning")
-        self.assertEqual(current[0]["source_dates"], ["2026-08-03"])
-        self.assertTrue(current[0]["stable_id"].startswith("activity-"))
-        self.assertEqual(draft["site"]["this_week_activities"], current)
-        lookahead = draft["site"]["next_period_activities"]
-        self.assertEqual(len(lookahead), 1)
-        self.assertEqual(lookahead[0]["area"], "Unit 2")
-        self.assertEqual(lookahead[0]["description"], "Continue loop test")
-        self.assertEqual(lookahead[0]["source_date"], "2026-08-04")
-        self.assertEqual(lookahead[0]["source_type"], "period_end_activity_tomorrow")
-        self.assertEqual(draft["site"]["next_week_activities"], lookahead)
-        self.assertIn("reporting week (03 to 04 August 2026)", draft["executive_summary"])
-        self.assertIn("Unit 2", draft["executive_summary"])
-
-    def test_weekly_lookahead_keeps_same_activity_for_each_source_area(self):
-        draft = _prepare_draft(
-            {
-                "activities": [],
-                "tomorrow_activities": [
-                    {
-                        "source_date": "2026-08-09",
-                        "area": "Turbine 1",
-                        "description": "Continue painting endclosure",
-                    },
-                    {
-                        "source_date": "2026-08-09",
-                        "area": "Turbine 2",
-                        "description": "Continue painting endclosure",
-                    },
-                ],
-                "coverage": {
-                    "expected_dates": ["2026-08-03", "2026-08-09"],
-                    "covered_dates": ["2026-08-03", "2026-08-09"],
-                    "missing_dates": [],
-                    "selected_record_count": 2,
-                    "last_report_date": "2026-08-09",
-                },
-            },
-            project_no=PROJECT_NO,
-            project_title=PROJECT_TITLE,
-            date_from="2026-08-03",
-            date_to="2026-08-09",
-            report_mode="final",
-            source_method="uploaded_excel",
-            source_manifest=[
-                {"report_id": "day-1", "report_date": "2026-08-03"},
-                {"report_id": "day-7", "report_date": "2026-08-09"},
-            ],
-            report_type="weekly",
-        )
-
-        lookahead = draft["site"]["next_week_activities"]
-        self.assertEqual(len(lookahead), 2)
-        self.assertEqual(
-            {row["area"] for row in lookahead},
-            {"Turbine 1", "Turbine 2"},
-        )
+        self.assertEqual(draft["site"]["current_period_activities"], activities)
+        self.assertEqual(draft["site"]["this_week_activities"], activities)
+        self.assertEqual(draft["site"]["next_period_activities"], plans)
+        self.assertEqual(draft["site"]["next_week_activities"], plans)
+        self.assertIn("week-to-date draft", draft["executive_summary"])
 
 
 class WeeklyRouteTests(unittest.TestCase):
@@ -284,37 +221,11 @@ class WeeklyRouteTests(unittest.TestCase):
         loader.assert_called_once_with(
             str(self.data_dir),
             username="reza",
+            project_no=PROJECT_NO,
             date_from="2026-08-03",
             date_to="2026-08-04",
         )
         return response
-
-    def _apply_source_validation(self, compiled_body):
-        validation = compiled_body["draft"]["source_validation"]
-        groups = validation["project_groups"]
-        response = self.client.post(
-            f"/monthly/validate/{compiled_body['draft_id']}",
-            json={
-                "source_validation": {
-                    "confirmed": True,
-                    "project_no": PROJECT_NO,
-                    "project_title": PROJECT_TITLE,
-                    "project_resolutions": [
-                        {"group_key": group["key"], "decision": "merge"}
-                        for group in groups
-                    ],
-                    "duplicate_resolutions": [
-                        {
-                            "group_key": group["key"],
-                            "selected_record_id": group["candidates"][0]["record_id"],
-                        }
-                        for group in validation.get("duplicate_groups", [])
-                    ],
-                }
-            },
-        )
-        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
-        return response.get_json()
 
     def test_stored_weekly_compile_returns_and_persists_typed_draft(self):
         response = self._compile_weekly()
@@ -341,7 +252,7 @@ class WeeklyRouteTests(unittest.TestCase):
         self.assertEqual(saved["report_type"], "weekly")
         self.assertEqual(saved["schema_version"], "weekly-report/1")
 
-    def test_incomplete_full_week_is_rejected_before_loading_records(self):
+    def test_invalid_full_week_is_rejected_before_loading_records(self):
         with patch("monthly_report.web.list_canonical_records") as loader:
             response = self.client.post(
                 "/monthly/compile/stored",
@@ -353,10 +264,10 @@ class WeeklyRouteTests(unittest.TestCase):
                     "date_to": "2026-08-06",
                     "report_mode": "final",
                 },
-        )
+            )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("exactly 7 consecutive days", response.get_json()["error"])
+        self.assertIn("Monday through Sunday", response.get_json()["error"])
         loader.assert_not_called()
 
     def test_changing_partial_draft_to_full_week_returns_validation_error(self):
@@ -370,20 +281,19 @@ class WeeklyRouteTests(unittest.TestCase):
         )
 
         self.assertEqual(preview.status_code, 400, preview.get_data(as_text=True))
-        self.assertIn("exactly 7 consecutive days", preview.get_json()["error"])
+        self.assertIn("Monday through Sunday", preview.get_json()["error"])
 
         generated = self.client.post(
             f"/monthly/generate/{draft_id}",
             json={"report_mode": "final", "confirm_final": True},
         )
         self.assertEqual(generated.status_code, 400, generated.get_data(as_text=True))
-        self.assertIn("exactly 7 consecutive days", generated.get_json()["error"])
+        self.assertIn("Monday through Sunday", generated.get_json()["error"])
 
     def test_weekly_generation_uses_weekly_filename_and_separate_revision_series(self):
         compiled = self._compile_weekly()
         self.assertEqual(compiled.status_code, 200, compiled.get_data(as_text=True))
-        validated = self._apply_source_validation(compiled.get_json())
-        draft_id = validated["draft_id"]
+        draft_id = compiled.get_json()["draft_id"]
 
         report_dir = self.data_dir / "monthly_reports" / "reza"
         legacy_monthly_row = {
@@ -456,8 +366,8 @@ class WeeklyRendererTests(unittest.TestCase):
         self.assertIn("Weekly Progress Report", text)
         self.assertIn("WTD", text)
         self.assertIn("This Week", text)
-        self.assertIn("2.1 This Week Activities", text)
-        self.assertIn("2.2 Planned Activities Next Week", text)
+        self.assertIn("5.2 This Week Activities", text)
+        self.assertIn("5.3 Planned Activities Next Week", text)
         self.assertIn("Weekly loop test", text)
         self.assertIn("Weekly commissioning plan", text)
         self.assertNotIn("Monthly Progress Report", text)
@@ -477,8 +387,8 @@ class WeeklyRendererTests(unittest.TestCase):
         text = _pdf_text(result.getvalue())
         self.assertIn("Monthly Progress Report", text)
         self.assertIn("MTD", text)
-        self.assertIn("1.1 This Month Activities", text)
-        self.assertIn("1.2 Planned Activities Next Month", text)
+        self.assertIn("5.2 This Month Activities", text)
+        self.assertIn("5.3 Planned Activities Next Month", text)
         self.assertIn("Legacy monthly activity", text)
         self.assertNotIn("Weekly Progress Report", text)
 

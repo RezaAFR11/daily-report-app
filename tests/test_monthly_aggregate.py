@@ -142,37 +142,6 @@ class CanonicalDailyStorageTests(unittest.TestCase):
                     },
                 )
 
-    def test_archive_hashes_filename_based_signature_media(self):
-        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as media_dir:
-            signature_bytes = b'stable-signature-test-bytes'
-            signature_path = Path(media_dir, 'prepared-signature.jpg')
-            signature_path.write_bytes(signature_bytes)
-            payload = {
-                'date': '2026-07-31',
-                'project_no': 'P-001',
-                'project_title': 'Reactivation',
-                'areas': [],
-                'sign_offs': [{
-                    'label': 'Prepared By',
-                    'sig': '',
-                    'sig_filename': signature_path.name,
-                }],
-            }
-
-            record = archive_final_daily_record(
-                temp_dir,
-                'nafis',
-                payload,
-                photo_paths={signature_path.name: signature_path},
-            )
-
-        sign_off = record['payload']['sign_offs'][0]
-        self.assertEqual(sign_off['sig_filename'], signature_path.name)
-        self.assertEqual(
-            sign_off['asset']['sha256'],
-            hashlib.sha256(signature_bytes).hexdigest(),
-        )
-
     def test_revisions_are_automatic_and_records_remain_immutable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             payload = {
@@ -247,12 +216,10 @@ class MonthlyAggregationTests(unittest.TestCase):
         self.assertEqual(result["coverage"]["superseded_report_ids"], ["day-2-r1"])
         descriptions = [entry["description"] for entry in result["activities"]]
         self.assertEqual(descriptions, ["Old activity", "Function test"])
-        tomorrow = result["tomorrow_activities"][0]
-        self.assertEqual(tomorrow["source_date"], "2026-07-02")
-        self.assertEqual(tomorrow["source_area"], "Turbine 2")
-        self.assertEqual(tomorrow["reporting_area"], "Turbine 2")
-        self.assertEqual(tomorrow["description"], "Stroking test")
-        self.assertEqual(tomorrow["source_report_id"], "day-2-r2")
+        self.assertEqual(
+            result["tomorrow_activities"],
+            [{"source_date": "2026-07-02", "area": "Turbine 2", "description": "Stroking test"}],
+        )
         self.assertEqual(result["constraints"][0]["text"], "Oil seepage")
 
     def test_daily_headcount_and_hours_are_unique_across_area_assignments(self):
@@ -294,142 +261,14 @@ class MonthlyAggregationTests(unittest.TestCase):
 
         day = result["manpower"]["daily"][0]
         self.assertEqual(day["direct_headcount"], 3)
-        self.assertEqual(day["indirect_headcount"], 1)
+        self.assertEqual(day["indirect_headcount"], 2)
         self.assertEqual(day["total_headcount"], 4)
         self.assertEqual(day["direct_man_hours"], 32.0)
-        self.assertEqual(day["indirect_man_hours"], 10.0)
+        self.assertEqual(day["indirect_man_hours"], 20.0)
         self.assertEqual(day["total_man_hours"], 42.0)
         self.assertEqual(result["manpower"]["totals"]["total_person_days"], 4)
 
-    def test_manpower_normalises_legacy_role_and_hours_aliases(self):
-        payload = {
-            "date": "2026-08-10",
-            "project_no": "P-001",
-            "project_title": "Reactivation",
-            "indirect_manpower": [
-                {
-                    "name": "Admin",
-                    "position": "Project Admin",
-                    "working_hours": "07:00-17:00",
-                },
-            ],
-            "areas": [
-                {
-                    "id": "Unit 1",
-                    "manpower": [
-                        {
-                            "name": "Engineer",
-                            "role_position": "Woodward Engineer",
-                            "work_hours": "07:00 – 17:00",
-                        },
-                        {
-                            "name": "Specialist",
-                            "position": "Specialist",
-                            "hours": "07:00-17:00",
-                            "man_hours": 8,
-                        },
-                        {
-                            "name": "Standby",
-                            "role": "Helper",
-                            "hours": "07:00-17:00",
-                            "man_hours": 0,
-                        },
-                    ],
-                },
-            ],
-        }
-
-        result = aggregate_monthly_records(
-            [canonical_record(payload, report_id="legacy-aliases")],
-            project_no="P-001",
-            date_from="2026-08-10",
-            date_to="2026-08-10",
-        )
-
-        day = result["manpower"]["daily"][0]
-        self.assertEqual(day["direct_headcount"], 3)
-        self.assertEqual(day["indirect_headcount"], 1)
-        self.assertEqual(day["total_man_hours"], 28.0)
-        self.assertEqual(day["parsed_hours_count"], 4)
-        self.assertEqual(day["zero_hours_count"], 1)
-        roles = {row["role"]: row for row in result["manpower"]["roles"]}
-        self.assertEqual(roles["Project Admin"]["man_hours"], 10.0)
-        self.assertEqual(roles["Woodward Engineer"]["man_hours"], 10.0)
-        self.assertEqual(roles["Specialist"]["man_hours"], 8.0)
-
-    def test_explicit_man_hours_remains_authoritative_when_person_is_duplicated(self):
-        payload = {
-            "date": "2026-08-11",
-            "project_no": "P-001",
-            "project_title": "Reactivation",
-            "areas": [
-                {
-                    "id": "Unit 1",
-                    "manpower": [
-                        {"name": "Same Person", "position": "Technician", "hours": "07:00-17:00"},
-                    ],
-                },
-                {
-                    "id": "Unit 2",
-                    "manpower": [
-                        {"name": " same  person ", "role": "Technician", "man_hours": "8"},
-                    ],
-                },
-            ],
-        }
-
-        result = aggregate_monthly_records(
-            [canonical_record(payload, report_id="explicit-hours")],
-            project_no="P-001",
-            date_from="2026-08-11",
-            date_to="2026-08-11",
-        )
-
-        day = result["manpower"]["daily"][0]
-        self.assertEqual(day["direct_headcount"], 1)
-        self.assertEqual(day["direct_man_hours"], 8.0)
-        self.assertEqual(result["manpower"]["totals"]["total_person_days"], 1)
-
-    def test_hours_completeness_distinguishes_zero_missing_and_invalid(self):
-        payload = {
-            "date": "2026-08-12",
-            "project_no": "P-001",
-            "project_title": "Reactivation",
-            "areas": [
-                {
-                    "id": "Unit 1",
-                    "manpower": [
-                        {"name": "Valid", "role": "Foreman", "hours": "07:00-17:00"},
-                        {"name": "Zero", "role": "Standby", "man_hours": 0},
-                        {"name": "Invalid", "role": "Helper", "working_hours": "unknown"},
-                        {"name": "Missing", "role": "Technician"},
-                    ],
-                },
-            ],
-        }
-
-        result = aggregate_monthly_records(
-            [canonical_record(payload, report_id="completeness")],
-            project_no="P-001",
-            date_from="2026-08-12",
-            date_to="2026-08-12",
-        )
-
-        day = result["manpower"]["daily"][0]
-        self.assertEqual(day["total_man_hours"], 10.0)
-        self.assertEqual(day["parsed_hours_count"], 2)
-        self.assertEqual(day["zero_hours_count"], 1)
-        self.assertEqual(day["missing_hours_count"], 1)
-        self.assertEqual(day["invalid_hours_count"], 1)
-        self.assertEqual(day["unparsed_hours_count"], 2)
-        self.assertFalse(day["hours_complete"])
-        totals = result["manpower"]["totals"]
-        self.assertEqual(totals["zero_hours_count"], 1)
-        self.assertEqual(totals["missing_hours_count"], 1)
-        self.assertEqual(totals["invalid_hours_count"], 1)
-        self.assertFalse(totals["hours_complete"])
-
-    def test_progress_preserves_latest_daily_snapshot_without_recalculating_fields(self):
+    def test_progress_uses_deltas_and_never_sums_cumulative_values(self):
         first = canonical_record(
             {
                 "date": "2026-07-01",
@@ -480,111 +319,12 @@ class MonthlyAggregationTests(unittest.TestCase):
 
         self.assertTrue(progress["available"])
         commissioning = progress["rows"][0]
-        self.assertEqual(commissioning["this_period_plan"], 999.0)
-        self.assertEqual(commissioning["this_period_actual"], 999.0)
-        self.assertIsNone(commissioning["deviation"])
+        self.assertEqual(commissioning["this_period_plan"], 20.5)
+        self.assertEqual(commissioning["this_period_actual"], 20.0)
+        self.assertEqual(commissioning["deviation"], -2.5)
         self.assertAlmostEqual(progress["totals"]["cumulative_to_date_plan"], 12.2)
         self.assertAlmostEqual(progress["totals"]["cumulative_to_date_actual"], 11.2)
         self.assertAlmostEqual(progress["totals"]["deviation"], -1.0)
-
-    def test_work_hours_policy_is_opt_in_and_explicit_man_hours_stays_authoritative(self):
-        payload = {
-            "date": "2026-08-13",
-            "project_no": "P-001",
-            "project_title": "Reactivation",
-            "manpower_status": "reported",
-            "areas": [{
-                "id": "MA-42",
-                "manpower": [
-                    {"name": "Shift Worker", "hours": "07:00-17:00"},
-                    {"name": "Explicit Worker", "hours": "07:00-17:00", "man_hours": 8},
-                ],
-            }],
-        }
-        record = canonical_record(payload, report_id="hours-policy")
-
-        legacy = aggregate_monthly_records(
-            [record],
-            project_no="P-001",
-            date_from="2026-08-13",
-            date_to="2026-08-13",
-        )
-        configured = aggregate_monthly_records(
-            [record],
-            project_no="P-001",
-            date_from="2026-08-13",
-            date_to="2026-08-13",
-            work_hours_policy={
-                "mode": "elapsed_less_break",
-                "break_minutes": 60,
-                "deduct_when_elapsed_gte_minutes": 360,
-                "allow_overnight": True,
-            },
-        )
-
-        self.assertEqual(legacy["manpower"]["daily"][0]["total_man_hours"], 18.0)
-        self.assertEqual(configured["manpower"]["daily"][0]["total_man_hours"], 17.0)
-        self.assertEqual(
-            configured["manpower"]["work_hours_policy"]["mode"],
-            "elapsed_less_break",
-        )
-
-    def test_missing_manpower_is_not_silently_reported_as_zero(self):
-        payload = {
-            "date": "2026-08-14",
-            "project_no": "P-001",
-            "project_title": "Reactivation",
-            "manpower_status": "not_supplied",
-            "areas": [],
-        }
-        result = aggregate_monthly_records(
-            [canonical_record(payload, report_id="missing-manpower")],
-            project_no="P-001",
-            date_from="2026-08-14",
-            date_to="2026-08-14",
-        )
-
-        day = result["manpower"]["daily"][0]
-        self.assertFalse(day["supplied"])
-        self.assertIsNone(day["total_headcount"])
-        self.assertIsNone(day["total_man_hours"])
-        self.assertIsNone(result["manpower"]["totals"]["peak_headcount"])
-        self.assertFalse(result["manpower"]["totals"]["headcount_complete"])
-
-    def test_area_provenance_and_constraint_register_are_exact_and_source_backed(self):
-        records = []
-        for index, report_date in enumerate(("2026-08-15", "2026-08-16"), start=1):
-            records.append(canonical_record(
-                {
-                    "date": report_date,
-                    "project_no": "P-001",
-                    "project_title": "Reactivation",
-                    "areas": [{
-                        "id": "MA 42/59/67",
-                        "activities_today": ["MA-59 install cable support"],
-                        "constraints": [{"text": "Access permit pending"}],
-                    }],
-                    "global_remarks": "Coordination meeting recorded",
-                },
-                report_id=f"provenance-{index}",
-            ))
-
-        result = aggregate_monthly_records(
-            records,
-            project_no="P-001",
-            date_from="2026-08-15",
-            date_to="2026-08-16",
-        )
-
-        activity = result["activities"][0]
-        self.assertEqual(activity["source_area"], "MA 42/59/67")
-        self.assertEqual(activity["reporting_area"], "MA-59")
-        register = result["constraint_register"][0]
-        self.assertEqual(register["occurrence_count"], 2)
-        self.assertEqual(register["status"], "reported")
-        self.assertEqual(register["corrective_action"], "")
-        self.assertEqual(register["reported_dates"], ["2026-08-15", "2026-08-16"])
-        self.assertEqual(len([row for row in result["remarks"] if row["area"] == "General"]), 2)
 
     def test_progress_explicitly_disabled_in_daily_report_is_not_aggregated(self):
         hidden = canonical_record(

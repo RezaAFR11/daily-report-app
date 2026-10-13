@@ -16,14 +16,6 @@
   .topbar h6 { margin:0; font-size:1rem; white-space:nowrap; }
   .top-actions { display:flex; gap:.45rem; flex-wrap:wrap; }
   .page-shell { max-width:1180px; }
-  #delete-periodic-modal .modal-dialog { max-width:480px; }
-  #delete-periodic-modal .modal-content { border:0; border-radius:20px; overflow:hidden; color:#183049; }
-  #delete-periodic-modal .modal-header { padding:24px 28px; }
-  #delete-periodic-modal .modal-body { padding:26px 28px; color:#485b73; }
-  #delete-periodic-modal .modal-footer { padding:20px 28px; background:#f8f9f9; }
-  #delete-periodic-modal .btn { border-radius:10px; padding:10px 20px; font-weight:600; }
-  #delete-periodic-modal .btn-danger { background:#e52227; border-color:#e52227; }
-  #delete-periodic-modal .btn-danger:hover { background:#c91b20; border-color:#c91b20; }
   .report-card {
     background:#fff; border:1px solid #e3e8ef; border-radius:9px;
     box-shadow:0 1px 6px rgba(0,0,0,.06); padding:1rem 1.1rem;
@@ -32,10 +24,6 @@
   .report-meta { flex:1; min-width:220px; }
   .report-meta .fname { font-weight:650; font-size:.88rem; word-break:break-word; }
   .report-meta .info { font-size:.78rem; color:#667085; margin-top:.25rem; }
-  .report-type-icon {
-    width:34px; height:34px; flex:0 0 34px; border-radius:8px; display:grid;
-    place-items:center; background:#eaf1f8; color:var(--primary); font-size:.7rem; font-weight:800;
-  }
   .empty { text-align:center; color:#98a2b3; padding:3.5rem 0; }
   .badge-day, .badge-status {
     background:var(--accent); color:#fff; border-radius:4px;
@@ -45,76 +33,11 @@
   .badge-report-type.weekly { background:#0f766e; }
   .badge-report-type.monthly { background:#52606d; }
   .report-tabs { border-bottom:1px solid #d9e1ea; }
-  .report-tabs .nav-link {
-    color:#52606d; font-weight:650; border:0; border-bottom:3px solid transparent;
-    display:inline-flex; align-items:center; gap:.42rem;
-  }
+  .report-tabs .nav-link { color:#52606d; font-weight:650; border:0; border-bottom:3px solid transparent; }
   .report-tabs .nav-link.active { color:var(--primary); background:transparent; border-bottom-color:var(--accent); }
-  .tab-icon { width:17px; height:17px; display:inline-flex; flex:0 0 17px; }
-  .tab-icon svg { width:100%; height:100%; }
   .panel {
     background:#fff; border:1px solid #dfe6ee; border-radius:10px;
     box-shadow:0 1px 5px rgba(0,0,0,.05); padding:1.15rem;
-  }
-  .builder-panel { padding:1.25rem; }
-  .builder-heading { padding-bottom:1rem; border-bottom:1px solid #e6ebf1; }
-  .workflow-kicker {
-    display:block; color:#667085; font-size:.68rem; font-weight:750;
-    letter-spacing:.08em; text-transform:uppercase; margin-bottom:.2rem;
-  }
-  .workflow-stack { display:grid; gap:1rem; margin-top:1.1rem; }
-  .workflow-stage {
-    position:relative; border:1px solid #dfe6ee; border-radius:10px;
-    background:#fff; padding:1rem 1.05rem 1rem 3.65rem;
-    box-shadow:0 1px 3px rgba(16,24,40,.035);
-  }
-  .workflow-stage:not(:last-child)::after {
-    content:""; position:absolute; left:1.64rem; top:2.85rem; bottom:-1.1rem;
-    width:1px; background:#d7e0ea;
-  }
-  .workflow-marker {
-    position:absolute; top:.95rem; left:.62rem; width:34px; height:34px;
-    border-radius:50%; display:grid; place-items:center; z-index:1;
-    background:#eaf1f8; color:var(--primary); border:1px solid #cbd8e6;
-    font-size:.78rem; font-weight:800;
-  }
-  .workflow-stage-title { color:var(--primary); font-size:.92rem; font-weight:750; margin-bottom:.75rem; }
-  .workflow-stage .row:last-child { margin-bottom:0 !important; }
-  .review-workflow-panel { padding:1.2rem; }
-  .review-overview { border-bottom:1px solid #e6ebf1; margin-bottom:1rem; padding-bottom:.2rem; }
-  .workflow-review-stage {
-    border:1px solid #dfe6ee !important; border-left:3px solid #8ca4bb !important;
-    border-radius:10px !important; background:#fff; padding:1rem 1.05rem !important;
-    box-shadow:0 1px 4px rgba(16,24,40,.04);
-  }
-  .stage-source { border-left-color:#2e8b57 !important; }
-  .stage-workforce { border-left-color:#2563eb !important; background:#fbfdff !important; }
-  .stage-ai { border-left-color:#7357d8 !important; background:#fcfbff !important; }
-  .stage-photo { border-left-color:#0f8f8f !important; background:#fbfefe !important; }
-  .stage-final { border-left-color:var(--accent) !important; background:#fffdf8 !important; }
-  .review-stage-heading { display:flex; align-items:flex-start; gap:.72rem; min-width:0; }
-  .review-stage-icon {
-    width:32px; height:32px; flex:0 0 32px; border-radius:8px;
-    display:grid; place-items:center; color:var(--primary); background:#eaf1f8;
-  }
-  .review-stage-icon svg { width:17px; height:17px; }
-  .stage-source .review-stage-icon { color:#217a45; background:#e8f6ed; }
-  .stage-workforce .review-stage-icon { color:#1f5fc5; background:#eaf2ff; }
-  .stage-ai .review-stage-icon { color:#6545cf; background:#eee9ff; }
-  .stage-photo .review-stage-icon { color:#087f7f; background:#e7f7f7; }
-  .stage-final .review-stage-icon { color:#956b05; background:#fff2cf; }
-  .review-stage-title { color:var(--primary); font-size:.92rem; font-weight:750; line-height:1.25; }
-  .stage-ai .review-stage-title { color:#5037a7; }
-  .stage-photo .review-stage-title { color:#087272; }
-  .compact-icon-btn { display:inline-flex; align-items:center; justify-content:center; gap:.38rem; }
-  .compact-icon-btn svg { width:15px; height:15px; flex:0 0 15px; }
-  .btn-ai { color:#5d3fc0; border-color:#8d78d8; }
-  .btn-ai:hover { color:#fff; background:#6545cf; border-color:#6545cf; }
-  .btn-photo { color:#087777; border-color:#48a9a9; }
-  .btn-photo:hover { color:#fff; background:#087f7f; border-color:#087f7f; }
-  .monthly-history {
-    border:1px solid #dfe6ee; border-radius:10px; background:#fff;
-    padding:1rem 1.1rem; box-shadow:0 1px 4px rgba(16,24,40,.04);
   }
   .source-card {
     border:1px solid #cfd8e3; border-radius:8px; padding:.85rem 1rem;
@@ -144,68 +67,16 @@
   .type-card input { margin-right:.4rem; }
   .type-card .title { font-weight:700; color:var(--primary); }
   .type-card .hint { color:#667085; font-size:.8rem; margin-top:.25rem; }
-  .report-toast {
-    position:fixed; right:1.15rem; bottom:1.15rem; z-index:1090;
-    width:min(420px, calc(100vw - 2rem)); display:flex; align-items:flex-start;
-    gap:.7rem; padding:.78rem .85rem; border:1px solid transparent;
-    border-radius:10px; background:#fff; color:#24303d;
-    box-shadow:0 12px 32px rgba(16,24,40,.2);
-    opacity:0; visibility:hidden; transform:translateY(12px);
-    pointer-events:none; transition:opacity .18s ease, transform .18s ease, visibility .18s;
-  }
-  .report-toast.is-visible { opacity:1; visibility:visible; transform:translateY(0); pointer-events:auto; }
-  .report-toast-success { border-color:#8fd3aa; background:#f1fbf5; }
-  .report-toast-info { border-color:#9cc5e7; background:#f3f8fd; }
-  .report-toast-warning { border-color:#e5c46d; background:#fff9e9; }
-  .report-toast-danger { border-color:#e6a4a4; background:#fff5f5; }
-  .report-toast-icon {
-    width:25px; height:25px; flex:0 0 25px; border-radius:50%; display:grid;
-    place-items:center; font-size:.76rem; font-weight:800; color:#fff; margin-top:.05rem;
-  }
-  .report-toast-success .report-toast-icon { background:#24804a; }
-  .report-toast-info .report-toast-icon { background:#23689b; }
-  .report-toast-warning .report-toast-icon { background:#9a6d00; }
-  .report-toast-danger .report-toast-icon { background:#b42318; }
-  .report-toast-content { flex:1; min-width:0; }
-  .report-toast-title { font-size:.79rem; font-weight:750; color:#172b3f; }
-  .report-toast-message { margin-top:.12rem; font-size:.78rem; line-height:1.42; white-space:pre-line; overflow-wrap:anywhere; }
-  .report-toast-action { display:inline-flex; margin-top:.45rem; font-size:.75rem; font-weight:700; }
-  .report-toast-close {
-    border:0; background:transparent; color:#667085; padding:0 .1rem; line-height:1;
-    font-size:1rem; opacity:.8;
-  }
-  .report-toast-close:hover { color:#17202a; opacity:1; }
-  .upload-progress-panel { border:1px solid #d9e2ec; border-radius:8px; background:#f8fafc; padding:.8rem; }
-  .upload-file-list { display:grid; gap:.45rem; margin-top:.65rem; }
-  .upload-file-row {
-    display:flex; align-items:center; gap:.65rem; background:#fff; border:1px solid #e1e7ef;
-    border-radius:7px; padding:.55rem .65rem;
-  }
-  .upload-file-row .upload-file-info { flex:1; min-width:0; }
-  .upload-file-row .upload-file-name { font-size:.8rem; font-weight:650; overflow-wrap:anywhere; }
-  .upload-file-row .upload-file-detail { color:#667085; font-size:.72rem; overflow-wrap:anywhere; }
-  .upload-state { min-width:5.2rem; text-align:center; font-size:.7rem; font-weight:700; border-radius:999px; padding:.2rem .45rem; }
-  .upload-state.pending { background:#eef2f6; color:#52606d; }
-  .upload-state.uploading { background:#e7f1ff; color:#0756a3; }
-  .upload-state.uploaded { background:#e8f7ee; color:#18794e; }
-  .upload-state.skipped { background:#fff3cd; color:#7a5b00; }
-  .upload-state.error { background:#fdecec; color:#b42318; }
+  #monthly-alert { white-space:pre-line; }
   .spinner-border-sm { width:.9rem; height:.9rem; }
   @media (max-width:768px) {
     .topbar { align-items:flex-start; }
     .top-actions { width:100%; }
     .top-actions .btn { flex:1 1 auto; }
-    .builder-panel, .review-workflow-panel { padding:.85rem; }
-    .workflow-stage { padding:.9rem .85rem .9rem 3.25rem; }
-    .workflow-marker { left:.5rem; width:31px; height:31px; }
-    .workflow-stage:not(:last-child)::after { left:1.45rem; }
-    .workflow-review-stage { padding:.9rem !important; }
-    .report-toast { right:1rem; bottom:1rem; width:calc(100vw - 2rem); }
   }
 </style>
 </head>
 <body>
-<div id="monthly-alert" class="report-toast" role="status" aria-live="polite" aria-atomic="true"></div>
 <div class="topbar">
   <h6>📄 Reports <span style="font-size:.78rem;opacity:.72;">{{ username }}</span></h6>
   <div class="top-actions">
@@ -222,17 +93,11 @@
   <ul class="nav report-tabs mb-4" role="tablist">
     <li class="nav-item" role="presentation">
       <button class="nav-link active" id="daily-tab" data-bs-toggle="tab"
-        data-bs-target="#daily-pane" type="button" role="tab">
-        <span class="tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5M9.5 12h5M9.5 16h5"/></svg></span>
-        Daily Reports
-      </button>
+        data-bs-target="#daily-pane" type="button" role="tab">Daily Reports</button>
     </li>
     <li class="nav-item" role="presentation">
       <button class="nav-link" id="monthly-tab" data-bs-toggle="tab"
-        data-bs-target="#monthly-pane" type="button" role="tab">
-        <span class="tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18M8 14h3M13 14h3M8 17h3"/></svg></span>
-        Weekly / Monthly Reports
-      </button>
+        data-bs-target="#monthly-pane" type="button" role="tab">Weekly / Monthly Reports</button>
     </li>
   </ul>
 
@@ -262,33 +127,13 @@
               &nbsp;·&nbsp;Generated {{ r.generated_at }}
               &nbsp;·&nbsp;{{ r.size_kb }} KB
               {% if r.json_filename %}&nbsp;·&nbsp;<span class="text-success">JSON archived</span>{% endif %}
-              {% if r.drive_web_url %}
-                &nbsp;·&nbsp;<span class="text-success">Google Drive</span>
-              {% elif r.drive_status == 'failed' %}
-                &nbsp;·&nbsp;<span class="text-danger">Drive upload failed</span>
-              {% elif r.drive_status == 'needs_review' %}
-                &nbsp;·&nbsp;<span class="text-warning">Drive mapping review</span>
-              {% elif r.drive_status == 'reauth_required' %}
-                &nbsp;·&nbsp;<span class="text-danger">Drive reconnect required</span>
-              {% elif r.drive_status == 'permission_denied' %}
-                &nbsp;·&nbsp;<span class="text-danger">Drive permission denied</span>
-              {% endif %}
             </div>
           </div>
           <div class="d-flex gap-2 flex-shrink-0">
-            {% if r.drive_web_url %}
-            <a href="{{ r.drive_web_url }}" target="_blank" rel="noopener"
-              class="btn btn-sm btn-outline-success">☁ Open Drive</a>
-            {% elif google_drive_configured %}
-            <button class="btn btn-sm btn-outline-success"
-              onclick='uploadDailyReportToDrive({{ r.filename|tojson }}, {{ (r.archive_id or "")|tojson }}, {{ (r.canonical_report_id or "")|tojson }}, this)'>
-              ☁ {% if r.drive_status == 'needs_review' %}Choose Drive Folder{% elif r.drive_status in ['failed', 'reauth_required', 'permission_denied'] %}Retry Drive{% else %}Upload to Drive{% endif %}
-            </button>
-            {% endif %}
-            <a href="{{ url_for('download_report', filename=r.filename, archive_id=(r.archive_id or ''), report_id=(r.canonical_report_id or '')) }}"
+            <a href="{{ url_for('download_report', filename=r.filename) }}"
               class="btn btn-sm btn-outline-primary">⬇ Download</a>
             <button class="btn btn-sm btn-outline-danger"
-              onclick='deleteReport({{ r.filename|tojson }}, {{ (r.archive_id or "")|tojson }}, {{ (r.canonical_report_id or "")|tojson }}, this)'>🗑</button>
+              onclick='deleteReport({{ r.filename|tojson }}, this)'>🗑</button>
           </div>
         </div>
         {% endfor %}
@@ -302,26 +147,24 @@
     </section>
 
     <section class="tab-pane fade" id="monthly-pane" role="tabpanel">
-      <div class="panel builder-panel mb-4">
-        <div class="builder-heading d-flex justify-content-between align-items-start gap-3 flex-wrap">
+      <div class="panel mb-4">
+        <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap mb-3">
           <div>
-            <span class="workflow-kicker">Periodic report workflow</span>
             <h5 class="mb-1" id="create-report-title" style="color:var(--primary);">Create Monthly Report</h5>
             <div class="muted-note" id="create-report-hint">Compile a full month or Month-to-Date report from final JSON or uploaded legacy PDFs.</div>
           </div>
           <span class="badge text-bg-warning">Draft workflow</span>
         </div>
 
-        <div class="workflow-stack">
-        <div class="workflow-stage">
-        <span class="workflow-marker" aria-hidden="true">1</span>
-        <div class="workflow-stage-title">Choose report type</div>
-        <div class="row g-3 mb-0">
+        <div id="monthly-alert" class="alert d-none" role="alert"></div>
+
+        <div class="section-label">1. Choose report type</div>
+        <div class="row g-3 mb-4">
           <div class="col-md-6">
             <label class="type-card d-block" id="type-weekly-card">
               <input type="radio" name="report-type" value="weekly" onchange="setReportType(this.value)">
               <span class="title">Weekly Report</span>
-              <div class="hint">Create a partial or full rolling 7-day report from any start date.</div>
+              <div class="hint">Create a Week-to-Date report or a complete Monday-Sunday report, including historical weeks.</div>
             </label>
           </div>
           <div class="col-md-6">
@@ -332,39 +175,26 @@
             </label>
           </div>
         </div>
-        </div>
 
-        <div class="workflow-stage">
-        <span class="workflow-marker" aria-hidden="true">2</span>
-        <div class="workflow-stage-title">Choose data source</div>
-        <div class="row g-3 mb-0">
-          <div class="col-lg-4">
+        <div class="section-label">2. Choose data source</div>
+        <div class="row g-3 mb-4">
+          <div class="col-md-6">
             <label class="source-card active d-block" id="source-json-card">
               <input type="radio" name="monthly-source" value="stored_json" checked onchange="setMonthlySource(this.value)">
               <span class="title">Stored JSON — Recommended</span>
               <div class="hint">Uses final Daily Report JSON saved by the application. Fastest and most accurate.</div>
             </label>
           </div>
-          <div class="col-lg-4">
+          <div class="col-md-6">
             <label class="source-card d-block" id="source-pdf-card">
               <input type="radio" name="monthly-source" value="uploaded_pdf" onchange="setMonthlySource(this.value)">
               <span class="title">Upload Daily Report PDF</span>
               <div class="hint">For older reports. Uses template parsing, regex, RapidFuzz, and manual review.</div>
             </label>
           </div>
-          <div class="col-lg-4">
-            <label class="source-card d-block" id="source-excel-card">
-              <input type="radio" name="monthly-source" value="uploaded_excel" onchange="setMonthlySource(this.value)">
-              <span class="title">Upload Legacy Daily Report Excel</span>
-              <div class="hint">Reads one date-named worksheet as one Daily Report and lets you choose the dates to compile.</div>
-            </label>
-          </div>
-        </div>
         </div>
 
-        <div class="workflow-stage">
-        <span class="workflow-marker" aria-hidden="true">3</span>
-        <div class="workflow-stage-title">Project and reporting period</div>
+        <div class="section-label">3. Project and reporting period</div>
         <div class="row g-3 mb-3">
           <div class="col-lg-5">
             <label class="form-label small">Project</label>
@@ -395,52 +225,13 @@
           </div>
         </div>
         <div class="muted-note mb-3 d-none" id="weekly-period-help">
-          Uploaded PDFs use the earliest valid report date as Day 1. A full period ends automatically on Day 7; partial reports may cover 1-7 days.
+          Week-to-Date starts on Monday and may use any cutoff within 7 days. Full Week is automatically aligned to Monday-Sunday.
         </div>
 
         <div id="pdf-upload-panel" class="mb-3 d-none">
           <label class="form-label small">Daily Report PDFs</label>
           <input type="file" class="form-control" id="monthly-pdf-files" accept="application/pdf,.pdf" multiple>
-          <div class="muted-note mt-1" id="pdf-period-hint" role="status">
-            The start date is filled from the earliest date in the selected PDF filenames. Check it against the report contents.
-          </div>
-          <div class="muted-note mt-1">
-            Select all files at once. They will be uploaded automatically one by one; scanned files require OCR/manual input.
-          </div>
-          <div class="upload-progress-panel mt-3 d-none" id="monthly-upload-progress">
-            <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
-              <span class="small fw-semibold" id="monthly-upload-summary">Waiting to upload</span>
-              <span class="muted-note" id="monthly-upload-count">0 / 0</span>
-            </div>
-            <div class="progress" role="progressbar" aria-label="PDF upload progress" style="height:7px;">
-              <div class="progress-bar" id="monthly-upload-bar" style="width:0%"></div>
-            </div>
-            <div class="upload-file-list" id="monthly-upload-file-list"></div>
-          </div>
-        </div>
-
-        <div id="excel-upload-panel" class="mb-3 d-none">
-          <label class="form-label small">Legacy Daily Report workbook (.xlsx)</label>
-          <input type="file" class="form-control" id="monthly-excel-file"
-            accept="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx">
-          <div class="muted-note mt-1">
-            Choose one workbook. The application will analyze date-named sheets first without decoding all photos.
-          </div>
-          <div class="border rounded bg-light p-3 mt-3 d-none" id="excel-analysis-panel">
-            <div class="d-flex justify-content-between align-items-center gap-2 flex-wrap">
-              <span class="small fw-semibold" id="excel-analysis-summary">Waiting for workbook analysis</span>
-              <span class="badge text-bg-secondary" id="excel-analysis-badge">Not analyzed</span>
-            </div>
-            <div class="muted-note mt-2" id="excel-analysis-project"></div>
-            <div class="alert alert-warning py-2 small mt-3 mb-0 d-none" id="excel-analysis-warnings"></div>
-          </div>
-          <div class="border rounded p-3 mt-3 d-none" id="excel-date-selection-panel">
-            <div class="d-flex justify-content-between align-items-center gap-2 flex-wrap mb-2">
-              <span class="small fw-semibold">Workbook dates included in this report</span>
-              <span class="muted-note" id="excel-selected-date-count">0 selected</span>
-            </div>
-            <div class="row g-2" id="excel-date-checkboxes"></div>
-          </div>
+          <div class="muted-note mt-1">Upload machine-generated PDFs. Scanned files will be marked as requiring OCR/manual input.</div>
         </div>
 
         {% if is_admin %}
@@ -450,17 +241,14 @@
         </div>
         {% endif %}
 
-        <button type="button" class="btn btn-primary" id="compile-monthly-btn" onclick="compileMonthly()">
+        <button class="btn btn-primary" id="compile-monthly-btn" onclick="compileMonthly()">
           Compile Monthly & Review
         </button>
-        </div>
-        </div>
       </div>
 
-      <div class="panel review-workflow-panel mb-4 d-none" id="monthly-review-panel">
-        <div class="review-overview d-flex align-items-center justify-content-between gap-2 flex-wrap mb-3">
+      <div class="panel mb-4 d-none" id="monthly-review-panel">
+        <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap mb-3">
           <div>
-            <span class="workflow-kicker">Compiled report review</span>
             <h5 class="mb-1" id="review-report-title" style="color:var(--primary);">Review Monthly Draft</h5>
             <div class="muted-note" id="review-report-hint">Check missing dates and edit monthly-only fields before generating the PDF.</div>
           </div>
@@ -473,82 +261,7 @@
           <div class="col-6 col-md-3"><div class="coverage-card"><div class="value" id="coverage-duplicates">0</div><div class="label">Duplicates resolved</div></div></div>
           <div class="col-6 col-md-3"><div class="coverage-card"><div class="value" id="coverage-warnings">0</div><div class="label">Warnings</div></div></div>
         </div>
-        <div class="coverage-card mb-3 small" id="source-coverage-summary" role="status"></div>
         <div class="alert alert-warning py-2 small d-none" id="coverage-detail"></div>
-
-        <div class="workflow-review-stage stage-source mb-4" id="source-validation-panel">
-          <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap mb-3">
-            <div class="review-stage-heading">
-              <span class="review-stage-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 3 5 6v5c0 4.5 2.9 8.3 7 10 4.1-1.7 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/></svg></span>
-              <div>
-                <span class="workflow-kicker">Stage 4</span>
-                <div class="review-stage-title mb-1">Source Data Validation</div>
-                <div class="muted-note">
-                  Draft Preview remains available while you review warnings. Resolve only material project identity,
-                  duplicate-source, workforce arithmetic, or progress conflicts before Final issue.
-                </div>
-              </div>
-            </div>
-            <span class="badge text-bg-secondary" id="validation-status-badge">Pending review</span>
-          </div>
-
-          <div class="row g-3 mb-3">
-            <div class="col-md-6">
-              <label class="form-label small">Report Project Title</label>
-              <input type="text" class="form-control" id="review-project-title" maxlength="500">
-            </div>
-            <div class="col-md-4">
-              <label class="form-label small">Report Project No.</label>
-              <input type="text" class="form-control" id="review-project-no" maxlength="250">
-            </div>
-            <div class="col-md-2">
-              <label class="form-label small">Final Period</label>
-              <div class="form-control bg-light small" id="review-period-display">-</div>
-            </div>
-          </div>
-
-          <div class="alert alert-info py-2 small d-none" id="project-resolution-help">
-            Different source project identities were detected. Choose <strong>Merge</strong> to include a group in this report,
-            or <strong>Keep separate</strong> to exclude it and compile that group in another report later.
-          </div>
-          <div class="table-responsive d-none mb-3" id="project-resolution-panel">
-            <table class="table table-sm table-bordered align-middle mb-0">
-              <thead class="table-light"><tr>
-                <th>Source Project Title</th><th>Source Project No.</th><th>Files / Dates</th>
-                <th>Title Match</th><th style="min-width:180px;">Decision</th>
-              </tr></thead>
-              <tbody id="project-resolution-body"></tbody>
-            </table>
-          </div>
-
-          <div class="alert alert-info py-2 small d-none" id="duplicate-resolution-help">
-            More than one Daily Report was found for the same date. Select the source that should be used;
-            the other candidate(s) will remain stored but will be excluded from this report.
-          </div>
-          <div class="table-responsive d-none mb-3" id="duplicate-resolution-panel">
-            <table class="table table-sm table-bordered align-middle mb-0">
-              <thead class="table-light"><tr>
-                <th>Date</th><th style="min-width:360px;">Daily Report source to use</th>
-              </tr></thead>
-              <tbody id="duplicate-resolution-body"></tbody>
-            </table>
-          </div>
-
-          <div class="alert alert-warning py-2 small d-none mb-3" id="source-validation-issues"></div>
-          <div class="mb-3">
-            <label class="form-label small">Validation / correction notes</label>
-            <textarea class="form-control" id="review-validation-notes" rows="2" maxlength="4000"
-              placeholder="Optional notes about project mapping or manual corrections"></textarea>
-          </div>
-          <div class="form-check">
-            <input class="form-check-input" type="checkbox" id="review-confirm-validation">
-            <label class="form-check-label small" for="review-confirm-validation">
-              I have checked the source identities, period, warnings, manpower, man-hours, and all manual corrections.
-            </label>
-          </div>
-          <button type="button" class="btn btn-sm btn-primary mt-3" id="apply-source-validation-btn"
-            onclick="applySourceValidation()">Apply Validation &amp; Recompile</button>
-        </div>
 
         <div class="mb-4 d-none" id="source-manifest-panel">
           <div class="section-label">Included Daily Reports</div>
@@ -560,201 +273,6 @@
               <tbody id="source-manifest-body"></tbody>
             </table>
           </div>
-        </div>
-
-        <div class="workflow-review-stage stage-workforce mb-4 d-none" id="workforce-review-card">
-          <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap mb-3">
-            <div class="review-stage-heading">
-              <span class="review-stage-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 18.5V20"/><circle cx="10" cy="8" r="3"/><circle cx="17.5" cy="15.5" r="3.5"/><path d="M17.5 13.5v2.2l1.4.8"/></svg></span>
-              <div>
-                <span class="workflow-kicker">Stage 5</span>
-                <div class="review-stage-title mb-1">Manpower &amp; Man-hour Review</div>
-                <div class="muted-note">
-                  Daily Report totals remain the baseline until you explicitly apply a reviewed Excel result.
-                  Regular man-hours use 10 hours per present day; overtime uses the confirmed elapsed clock range.
-                </div>
-              </div>
-            </div>
-            <span class="badge text-bg-secondary" id="workforce-status-badge">Daily Report baseline</span>
-          </div>
-
-          <div class="row g-3">
-            <div class="col-lg-6">
-              <div class="coverage-card h-100">
-                <div class="section-label mb-2">1. Attendance Timesheet</div>
-                <label class="form-label small" for="timesheet-files">KN attendance workbooks (.xlsx, up to 31 files)</label>
-                <input class="form-control form-control-sm mb-2" type="file" id="timesheet-files"
-                  accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple>
-                <div class="row g-2 mb-2">
-                  <div class="col-sm-7">
-                    <label class="form-label small" for="timesheet-cutoff">Data cutoff / as-of date</label>
-                    <input class="form-control form-control-sm" type="date" id="timesheet-cutoff">
-                    <div class="form-text">Defaults to the report end date and adjusts to the workbook period after analysis. You can choose an earlier cutoff.</div>
-                  </div>
-                  <div class="col-sm-5 d-flex align-items-end">
-                    <button type="button" class="btn btn-sm btn-outline-primary w-100" id="analyze-timesheet-btn"
-                      onclick="analyzeTimesheet()">Analyze Timesheet</button>
-                  </div>
-                </div>
-                <div class="small text-muted mb-2" id="timesheet-summary">No attendance workbook reviewed.</div>
-                <div id="timesheet-source-panel" class="d-none mb-3">
-                  <label for="timesheet-source-mode" class="form-label small">Manpower and regular man-hours source</label>
-                  <select id="timesheet-source-mode" class="form-select form-select-sm" onchange="changeWorkforceSource()">
-                    <option value="timesheet_only">Timesheet only</option>
-                    <option value="combined">Timesheet + Daily fallback</option>
-                    <option value="daily_only">Daily PDF only</option>
-                  </select>
-                  <div id="timesheet-source-help" class="form-text"></div>
-                </div>
-                <div class="alert alert-warning py-2 d-none" id="timesheet-pending-notice" tabindex="-1" role="status">
-                  <strong>Source selection not applied.</strong> Review the results, then click Apply Source.
-                </div>
-                <div class="form-check d-none mb-2" id="timesheet-confirm-panel">
-                  <input class="form-check-input" type="checkbox" id="timesheet-confirm-exceptions">
-                  <label class="form-check-label small" for="timesheet-confirm-exceptions">
-                    I reviewed missing roles, status conflicts, blank cells, and incomplete attendance dates.
-                  </label>
-                </div>
-                <div class="d-flex gap-2 flex-wrap d-none mb-3" id="timesheet-actions">
-                  <button type="button" id="apply-workforce-source-btn" class="btn btn-sm btn-primary" onclick="applyWorkforceSource()">Apply Source</button>
-                </div>
-                <div class="alert alert-warning py-2 small d-none" id="timesheet-warnings"></div>
-                <div class="table-responsive d-none mb-2" id="timesheet-daily-panel">
-                  <table class="table table-sm table-bordered mb-0">
-                    <thead class="table-light"><tr><th>Date</th><th>Direct</th><th>Indirect</th><th>HC</th><th>Regular MH</th></tr></thead>
-                    <tbody id="timesheet-daily-body"></tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-
-            <div class="col-lg-6">
-              <div class="coverage-card h-100">
-                <div class="section-label mb-2">2. Overtime Workbook</div>
-                <label class="form-label small" for="overtime-files">Daily overtime workbook (.xlsx)</label>
-                <input class="form-control form-control-sm mb-2" type="file" id="overtime-files"
-                  accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple>
-                <button type="button" class="btn btn-sm btn-outline-primary mb-2" id="analyze-overtime-btn"
-                  onclick="analyzeOvertime()">Analyze Overtime</button>
-                <div class="small text-muted mb-2" id="overtime-summary">No overtime workbook reviewed.</div>
-                <div class="alert alert-warning py-2 small d-none" id="overtime-warnings"></div>
-                <div class="table-responsive d-none mb-2" id="overtime-daily-panel">
-                  <table class="table table-sm table-bordered mb-0">
-                    <thead class="table-light"><tr><th>Date</th><th>People</th><th>OT MH</th><th>Coverage</th></tr></thead>
-                    <tbody id="overtime-daily-body"></tbody>
-                  </table>
-                </div>
-                <div class="table-responsive d-none mb-2" id="overtime-mapping-panel">
-                  <table class="table table-sm table-bordered mb-0">
-                    <thead class="table-light"><tr><th>Employee</th><th>Match / Category</th></tr></thead>
-                    <tbody id="overtime-mapping-body"></tbody>
-                  </table>
-                </div>
-                <div class="table-responsive d-none mb-2" id="overtime-record-panel">
-                  <table class="table table-sm table-bordered align-middle mb-0">
-                    <thead class="table-light"><tr><th>Date / Employee</th><th>Interval / Note</th><th>Decision</th><th>Hours</th></tr></thead>
-                    <tbody id="overtime-record-body"></tbody>
-                  </table>
-                </div>
-                <div class="form-check d-none mb-2" id="overtime-confirm-panel">
-                  <input class="form-check-input" type="checkbox" id="overtime-confirm-exceptions">
-                  <label class="form-check-label small" for="overtime-confirm-exceptions">
-                    I reviewed employees not marked present, notes, interval warnings, and dates marked Not supplied.
-                  </label>
-                </div>
-                <div class="d-flex gap-2 flex-wrap d-none" id="overtime-actions">
-                  <button type="button" class="btn btn-sm btn-primary" onclick="decideOvertime('apply')">Apply Confirmed OT</button>
-                  <button type="button" class="btn btn-sm btn-outline-secondary" onclick="decideOvertime('keep')">Keep Without OT</button>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="d-flex justify-content-between align-items-center gap-2 flex-wrap mt-3">
-            <div class="small" id="workforce-effective-summary"></div>
-            <button type="button" class="btn btn-sm btn-outline-danger" onclick="resetWorkforceValidation()">
-              Reset Timesheet &amp; Overtime
-            </button>
-          </div>
-        </div>
-
-        <div class="workflow-review-stage stage-ai mb-4 d-none" id="ai-summary-card">
-          <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap">
-            <div class="review-stage-heading">
-              <span class="review-stage-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 3 .8 2.2L11 6l-2.2.8L8 9l-.8-2.2L5 6l2.2-.8zM17 4l.6 1.4L19 6l-1.4.6L17 9l-.6-1.4L15 7l1.4-.6z"/><path d="M5 11h14v8H9l-4 2z"/><path d="M9 15h6"/></svg></span>
-              <div>
-                <span class="workflow-kicker">Stage 6</span>
-                <div class="review-stage-title mb-1">Claude AI Summary</div>
-                <div class="muted-note">
-                  Group activities and improve narrative wording using verified Daily Report facts. Numbers and source facts stay locked.
-                </div>
-              </div>
-            </div>
-            <button type="button" class="btn btn-sm btn-ai compact-icon-btn" id="generate-ai-summary-btn"
-              onclick="generateAiSummary()"
-              {% if not anthropic_configured or not ai_summary_allowed %}disabled
-              title="{% if not anthropic_configured %}Configure ANTHROPIC_API_KEY in Railway first.{% else %}AI summaries are restricted to administrators.{% endif %}"{% endif %}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m8 3 .8 2.2L11 6l-2.2.8L8 9l-.8-2.2L5 6l2.2-.8zM17 8l1.1 2.9L21 12l-2.9 1.1L17 16l-1.1-2.9L13 12l2.9-1.1z"/></svg>
-              Generate AI Summary
-            </button>
-          </div>
-          <div class="alert alert-info py-2 small d-none mt-3" id="ai-summary-status"></div>
-          <div class="d-none mt-3" id="ai-summary-review">
-            <div class="row g-3">
-              <div class="col-12"><label class="form-label small">Executive Summary</label><textarea class="form-control" rows="4" id="ai-executive-summary"></textarea></div>
-              <div class="col-md-6"><label class="form-label small">Engineering</label><textarea class="form-control" rows="3" id="ai-engineering-summary"></textarea></div>
-              <div class="col-md-6"><label class="form-label small">Procurement</label><textarea class="form-control" rows="3" id="ai-procurement-summary"></textarea></div>
-              <div class="col-12"><label class="form-label small">Site Summary</label><textarea class="form-control" rows="4" id="ai-site-summary"></textarea></div>
-              <div class="col-md-6"><label class="form-label small">Concerns / Actions</label><textarea class="form-control" rows="4" id="ai-concerns-summary"></textarea></div>
-              <div class="col-md-6"><label class="form-label small">Look-ahead</label><textarea class="form-control" rows="4" id="ai-lookahead-summary"></textarea></div>
-            </div>
-            <div class="border rounded p-3 mt-3 d-none bg-light" id="ai-evidence-panel">
-              <div class="section-label mb-2">AI Source References</div>
-              <ul class="small mb-0 ps-3 d-none" id="ai-citations-list"></ul>
-              <div class="mt-3 d-none" id="ai-missing-data-panel">
-                <div class="fw-semibold small mb-1">Missing data reported by AI</div>
-                <ul class="small mb-0 ps-3" id="ai-missing-data-list"></ul>
-              </div>
-            </div>
-            <div class="d-flex gap-2 mt-3">
-              <button type="button" class="btn btn-sm btn-primary" onclick="decideAiSummary('accept')">Accept / Apply Edited Suggestions</button>
-              <button type="button" class="btn btn-sm btn-outline-secondary" onclick="decideAiSummary('reject')">Reject Suggestions</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="workflow-review-stage stage-photo mb-4 d-none" id="photo-review-card">
-          <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
-            <div class="review-stage-heading">
-              <span class="review-stage-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m5 17 4.5-4 3 2.5 2.5-2 4 3.5"/></svg></span>
-              <div>
-                <span class="workflow-kicker">Stage 7</span>
-                <div class="review-stage-title mb-1">Photos (Optional)</div>
-                <div class="muted-note">
-                  Photos are included automatically. Edit areas, captions, or photo order only if needed.
-                </div>
-              </div>
-            </div>
-            <div class="d-flex align-items-center gap-2">
-              <span class="badge text-bg-secondary" id="photo-count-badge">0 photos</span>
-              <button type="button" class="btn btn-sm btn-photo compact-icon-btn" onclick="openPhotoReview()">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m5 17 4.5-4 3 2.5 2.5-2 4 3.5"/></svg>
-                Edit Photos &amp; Captions
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div class="workflow-review-stage stage-final mb-0" id="final-review-stage">
-        <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap mb-3">
-        <div class="review-stage-heading">
-          <span class="review-stage-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg></span>
-          <div>
-            <span class="workflow-kicker">Stage 8</span>
-            <div class="review-stage-title mb-1">Final Review &amp; Generate</div>
-            <div class="muted-note">Review the compiled narrative, progress, safety, and site information before previewing or saving the final PDF.</div>
-          </div>
-        </div>
-        <span class="badge text-bg-secondary d-none" id="final-generate-status"></span>
         </div>
 
         <div class="section-label">Executive Summary</div>
@@ -772,23 +290,6 @@
             </tr></thead>
             <tbody></tbody>
           </table>
-        </div>
-
-        <div class="border rounded p-3 mb-4 d-none" id="scurve-selection-panel">
-          <div class="form-check">
-            <input class="form-check-input" type="checkbox" id="include-history-scurve" onchange="updateSCurveSelection()">
-            <label class="form-check-label fw-bold" for="include-history-scurve">Include S-Curve</label>
-          </div>
-          <div class="small text-muted mt-1" id="scurve-selection-help">Select saved Final reports from this project. Cumulative percentages are compared, never added. The current period is included when progress data is available.</div>
-          <div id="scurve-selection-details" class="d-none mt-3">
-            <div class="table-responsive"><table class="table table-sm table-bordered">
-              <thead><tr><th>Use</th><th>Reporting period</th><th>Revision</th><th>Progress source date</th><th>Plan %</th><th>Actual %</th><th>Status</th></tr></thead>
-              <tbody id="scurve-source-rows"></tbody>
-            </table></div>
-            <div class="small mb-2" id="scurve-current-point"></div>
-            <div class="small mb-2" id="scurve-selection-message" role="status"></div>
-            <button type="button" class="btn btn-sm btn-outline-primary" id="scurve-preview-button" onclick="previewMonthly()">Preview S-Curve in Report</button>
-          </div>
         </div>
 
         <div class="section-label">Safety Status</div>
@@ -833,10 +334,9 @@
         </div>
 
         <div class="d-flex gap-2 mt-4 flex-wrap">
-          <button type="button" class="btn btn-outline-primary" id="preview-monthly-btn" onclick="previewMonthly()">👁 Preview Monthly PDF</button>
-          <button type="button" class="btn btn-success" id="generate-monthly-btn" onclick="generateMonthly()">Generate & Save Monthly PDF</button>
-          <button type="button" class="btn btn-outline-secondary" onclick="document.getElementById('monthly-review-panel').classList.add('d-none')">Close Review</button>
-        </div>
+          <button class="btn btn-outline-primary" id="preview-monthly-btn" onclick="previewMonthly()">👁 Preview Monthly PDF</button>
+          <button class="btn btn-success" id="generate-monthly-btn" onclick="generateMonthly()">Generate & Save Monthly PDF</button>
+          <button class="btn btn-outline-secondary" onclick="document.getElementById('monthly-review-panel').classList.add('d-none')">Close Review</button>
         </div>
       </div>
 
@@ -877,289 +377,11 @@
   </div>
 </div>
 
-<div class="modal fade" id="delete-periodic-modal" tabindex="-1" aria-labelledby="delete-periodic-title" aria-describedby="delete-periodic-description" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content shadow">
-      <div class="modal-header">
-        <h5 class="modal-title fw-semibold" id="delete-periodic-title">Delete Record</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close" id="delete-periodic-close"></button>
-      </div>
-      <div class="modal-body">
-        <p class="mb-0 text-break" id="delete-periodic-description">Delete <span id="delete-periodic-filename"></span>? This cannot be undone.</p>
-        <div class="alert alert-danger mt-3 mb-0 d-none" id="delete-periodic-error" role="alert"></div>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" id="delete-periodic-cancel">Cancel</button>
-        <button type="button" class="btn btn-danger" id="delete-periodic-confirm" onclick="confirmDeleteReport()">Delete</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-<div class="modal fade" id="photo-review-modal" tabindex="-1" aria-labelledby="photo-review-title" aria-hidden="true">
-  <div class="modal-dialog modal-xl modal-dialog-scrollable">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title" id="photo-review-title">Review Photo Documentation</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <p class="text-muted small">
-          Remove irrelevant images, edit captions, or change their order. Only this reviewed list is rendered in Appendix 6.6.
-        </p>
-        <div class="row g-3" id="photo-review-grid"></div>
-      </div>
-      <div class="modal-footer">
-        <span class="small text-muted me-auto" id="photo-review-status"></span>
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button type="button" class="btn btn-primary" id="save-photo-review-btn" onclick="savePhotoReview()">Save Photo Review</button>
-      </div>
-    </div>
-  </div>
-</div>
-
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 let monthlySource = 'stored_json';
 let monthlyDraftId = '';
 let reportType = 'monthly';
-let monthlyUploadSessionId = '';
-let monthlyUploadSessionReady = false;
-let monthlyUploadQueue = [];
-let monthlyUploadGeneration = 0;
-let monthlyUploadBusy = false;
-let monthlyUploadController = null;
-let legacyExcelSessionId = '';
-let legacyExcelAnalysis = null;
-let legacyExcelBusy = false;
-let legacyExcelController = null;
-let legacyExcelGeneration = 0;
-let monthlyProjectValidationGroups = [];
-let monthlyDuplicateValidationGroups = [];
-let monthlySourceValidationApplied = false;
-let monthlyPhotos = [];
-let monthlyWorkforce = {};
-let monthlyAiSuggestion = null;
-let monthlyAlertTimer = null;
-const MAX_MONTHLY_UPLOAD_FILES = 35;
-const MAX_MONTHLY_PDF_BYTES = {{ pdf_upload_max_bytes|default(104857600)|int }};
-const MAX_LEGACY_EXCEL_BYTES = {{ legacy_excel_upload_max_bytes|default(134217728)|int }};
-const MONTHLY_UPLOAD_CLEANUP_KEY = 'gpa-report-upload-cleanup';
-
-function createUploadFileId() {
-  if (window.crypto?.randomUUID) return window.crypto.randomUUID().replaceAll('-', '');
-  const bytes = new Uint8Array(16);
-  window.crypto.getRandomValues(bytes);
-  return Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
-}
-
-function formatBytes(value) {
-  const bytes = Number(value || 0);
-  if (bytes < 1024 * 1024) return `${Math.max(0, bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-async function responsePayload(response, fallback) {
-  const contentType = response.headers.get('content-type') || '';
-  let data = null;
-  if (contentType.includes('application/json')) {
-    try { data = await response.json(); }
-    catch (_) { data = null; }
-  } else {
-    const text = await response.text();
-    data = text ? {error:text} : null;
-  }
-  if (!response.ok) {
-    const error = new Error(data?.error || fallback || `Request failed (${response.status}).`);
-    error.status = response.status;
-    throw error;
-  }
-  return data || {};
-}
-
-function uploadStateLabel(status) {
-  return {
-    pending:'Waiting', uploading:'Uploading', uploaded:'Included',
-    skipped:'Excluded', error:'Failed',
-  }[status] || status;
-}
-
-function rememberedUploadSessions() {
-  try {
-    const value = JSON.parse(sessionStorage.getItem(MONTHLY_UPLOAD_CLEANUP_KEY) || '[]');
-    return Array.isArray(value) ? value.filter(id => /^[a-f0-9]{32}$/.test(id)) : [];
-  } catch (_) {
-    return [];
-  }
-}
-
-function rememberUploadSession(uploadSessionId) {
-  if (!/^[a-f0-9]{32}$/.test(uploadSessionId || '')) return;
-  const ids = new Set(rememberedUploadSessions());
-  ids.add(uploadSessionId);
-  sessionStorage.setItem(MONTHLY_UPLOAD_CLEANUP_KEY, JSON.stringify(Array.from(ids)));
-}
-
-function forgetUploadSession(uploadSessionId) {
-  const ids = rememberedUploadSessions().filter(id => id !== uploadSessionId);
-  if (ids.length) sessionStorage.setItem(MONTHLY_UPLOAD_CLEANUP_KEY, JSON.stringify(ids));
-  else sessionStorage.removeItem(MONTHLY_UPLOAD_CLEANUP_KEY);
-}
-
-function requestUploadSessionCleanup(uploadSessionId, attempt=0) {
-  if (!/^[a-f0-9]{32}$/.test(uploadSessionId || '')) return;
-  fetch(`/monthly/upload-session/${encodeURIComponent(uploadSessionId)}`, {
-    method:'DELETE', keepalive:true,
-  }).then(response => {
-    if (response.ok || response.status === 404) {
-      forgetUploadSession(uploadSessionId);
-    } else if (response.status === 409 && attempt < 2) {
-      setTimeout(() => requestUploadSessionCleanup(uploadSessionId, attempt + 1), (attempt + 1) * 5000);
-    }
-  }).catch(() => {});
-}
-
-function monthlyUploadProgress() {
-  const included = monthlyUploadQueue.filter(item => item.status === 'uploaded').length;
-  const excluded = monthlyUploadQueue.filter(item => item.status === 'skipped').length;
-  const completed = included + excluded;
-  const failed = monthlyUploadQueue.filter(item => item.status === 'error').length;
-  const attempted = completed + failed;
-  return {included, excluded, completed, failed, attempted};
-}
-
-function monthlyUploadSummary(progress) {
-  return progress.failed
-    ? `${progress.failed} file(s) failed. Retry only the failed file(s).`
-    : progress.completed === monthlyUploadQueue.length
-      ? `${progress.included} included${progress.excluded ? `, ${progress.excluded} excluded` : ''}. Preparing report review.`
-      : `Uploading files one by one (${progress.completed} completed)`;
-}
-
-function createMonthlyUploadRow(item) {
-  const row = document.createElement('div');
-  row.className = 'upload-file-row';
-  const info = document.createElement('div');
-  info.className = 'upload-file-info';
-  const name = document.createElement('div');
-  name.className = 'upload-file-name';
-  name.textContent = item.file.name;
-  const detail = document.createElement('div');
-  detail.className = 'upload-file-detail';
-  const details = [formatBytes(item.file.size)];
-  if (item.reportDate) details.push(item.reportDate);
-  if (item.message) details.push(item.message);
-  detail.textContent = details.join(' · ');
-  info.append(name, detail);
-
-  const state = document.createElement('span');
-  state.className = `upload-state ${item.status}`;
-  state.textContent = uploadStateLabel(item.status);
-  row.append(info, state);
-  if (item.status === 'error') {
-    const retry = document.createElement('button');
-    retry.type = 'button';
-    retry.className = 'btn btn-sm btn-outline-primary';
-    retry.textContent = 'Retry';
-    retry.disabled = monthlyUploadBusy;
-    retry.addEventListener('click', () => retryMonthlyUpload(item.fileId));
-    row.appendChild(retry);
-  }
-  return row;
-}
-
-function renderMonthlyUploadQueue() {
-  const panel = document.getElementById('monthly-upload-progress');
-  const list = document.getElementById('monthly-upload-file-list');
-  if (!panel || !list) return;
-  const visible = monthlySource === 'uploaded_pdf' && monthlyUploadQueue.length > 0;
-  panel.classList.toggle('d-none', !visible);
-  list.replaceChildren();
-  if (!visible) return;
-
-  const progress = monthlyUploadProgress();
-  const percent = Math.round((progress.attempted / monthlyUploadQueue.length) * 100);
-  document.getElementById('monthly-upload-count').textContent = `${progress.attempted} / ${monthlyUploadQueue.length}`;
-  document.getElementById('monthly-upload-bar').style.width = `${percent}%`;
-  document.getElementById('monthly-upload-summary').textContent = monthlyUploadSummary(progress);
-  monthlyUploadQueue.forEach(item => list.appendChild(createMonthlyUploadRow(item)));
-}
-
-function discardMonthlyUploadSession({keepQueue=false} = {}) {
-  const wasUploadBusy = monthlyUploadBusy;
-  monthlyUploadGeneration += 1;
-  monthlyUploadController?.abort();
-  monthlyUploadController = null;
-  const staleSessionId = monthlyUploadSessionId;
-  monthlyUploadSessionId = '';
-  monthlyUploadSessionReady = false;
-  monthlyUploadBusy = false;
-  const compileButton = document.getElementById('compile-monthly-btn');
-  if (wasUploadBusy && compileButton?.disabled) setLoading('compile-monthly-btn', false);
-  if (staleSessionId) {
-    rememberUploadSession(staleSessionId);
-    requestUploadSessionCleanup(staleSessionId);
-  }
-  if (keepQueue) {
-    monthlyUploadQueue.forEach(item => {
-      item.status = 'pending';
-      item.message = '';
-      item.reportDate = '';
-    });
-  } else {
-    monthlyUploadQueue = [];
-  }
-  renderMonthlyUploadQueue();
-}
-
-function setMonthlyUploadFiles(fileList) {
-  discardMonthlyUploadSession();
-  monthlyUploadQueue = Array.from(fileList || []).map(file => ({
-    fileId:createUploadFileId(), file, status:'pending', message:'', reportDate:'',
-  }));
-  setPdfPeriodDefaults();
-  renderMonthlyUploadQueue();
-}
-
-function pdfFilenameDate(filename) {
-  const matches = Array.from(String(filename || '').matchAll(/(?:^|[^\d])(\d{4}-\d{2}-\d{2})(?!\d)/g), match => match[1]);
-  const dates = [...new Set(matches)];
-  if (dates.length !== 1) return '';
-  const parsed = parseIsoDate(dates[0]);
-  return parsed && isoDate(parsed) === dates[0] ? dates[0] : '';
-}
-
-function setPdfPeriodDefaults() {
-  if (monthlySource !== 'uploaded_pdf') return;
-  const hint = document.getElementById('pdf-period-hint');
-  const dates = monthlyUploadQueue.map(item => pdfFilenameDate(item.file.name)).sort();
-  if (!dates.length) {
-    hint.textContent = 'Select PDFs to fill the start date from their filenames.';
-    return;
-  }
-  if (dates.some(value => !value)) {
-    hint.textContent = 'Some filenames have no clear YYYY-MM-DD date. Check and set the reporting dates manually.';
-    return;
-  }
-  const from = document.getElementById('monthly-date-from');
-  const to = document.getElementById('monthly-date-to');
-  from.removeAttribute('min');
-  from.removeAttribute('max');
-  from.value = dates[0];
-  const maximum = reportType === 'weekly'
-    ? isoDate(addDays(parseIsoDate(from.value), 6))
-    : isoDate(new Date(Number(from.value.slice(0, 4)), Number(from.value.slice(5, 7)), 0));
-  to.value = reportType === 'weekly'
-    ? maximum
-    : dates.filter(value => value <= maximum).at(-1);
-  updatePeriodLimits();
-  hint.textContent = `Start set to ${from.value} from the selected filenames. Check it against the report contents.`;
-  if (dates.some(value => value > maximum)) {
-    hint.textContent += reportType === 'weekly'
-      ? ' Files after Day 7 fall outside this weekly period.'
-      : ' Files in later months fall outside this monthly period; compile those months separately.';
-  }
-}
 
 function parseIsoDate(value) {
   if (!value) return null;
@@ -1181,214 +403,15 @@ function addDays(value, amount) {
   return result;
 }
 
+function mondayFor(value) {
+  const day = value.getDay();
+  return addDays(value, -(day === 0 ? 6 : day - 1));
+}
+
 function inclusiveDays(fromValue, toValue) {
   const fromUtc = Date.UTC(fromValue.getFullYear(), fromValue.getMonth(), fromValue.getDate());
   const toUtc = Date.UTC(toValue.getFullYear(), toValue.getMonth(), toValue.getDate());
   return Math.floor((toUtc - fromUtc) / 86400000) + 1;
-}
-
-function legacyExcelWarningText(value) {
-  if (typeof value === 'string') return value;
-  return value?.message || value?.code || 'Workbook review warning';
-}
-
-function resetLegacyExcelAnalysis({removeSession=true} = {}) {
-  legacyExcelGeneration += 1;
-  legacyExcelController?.abort();
-  legacyExcelController = null;
-  legacyExcelBusy = false;
-  const staleSessionId = legacyExcelSessionId;
-  legacyExcelSessionId = '';
-  legacyExcelAnalysis = null;
-  if (removeSession && staleSessionId) {
-    rememberUploadSession(staleSessionId);
-    requestUploadSessionCleanup(staleSessionId);
-  }
-  document.getElementById('excel-analysis-panel')?.classList.add('d-none');
-  document.getElementById('excel-date-selection-panel')?.classList.add('d-none');
-  document.getElementById('excel-date-checkboxes')?.replaceChildren();
-}
-
-function normalizeLegacyProjectTitle(value) {
-  return String(value || '').toLowerCase().replaceAll('&', ' and ')
-    .replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
-}
-
-function selectDetectedLegacyProject(analysis) {
-  const detected = normalizeLegacyProjectTitle(analysis?.project?.project_title);
-  const select = document.getElementById('monthly-project');
-  if (!detected || select.value) return;
-  const matches = Array.from(select.options).filter(option => {
-    const title = normalizeLegacyProjectTitle(option.dataset?.title);
-    return title && (title === detected || title.includes(detected) || detected.includes(title));
-  });
-  if (matches.length === 1) select.value = matches[0].value;
-}
-
-function legacyExcelDates() {
-  return Array.isArray(legacyExcelAnalysis?.available_dates)
-    ? legacyExcelAnalysis.available_dates.map(String).sort()
-    : [];
-}
-
-function setLegacyExcelPeriodDefaults() {
-  const dates = legacyExcelDates();
-  if (!dates.length) return;
-  const from = document.getElementById('monthly-date-from');
-  const to = document.getElementById('monthly-date-to');
-  from.min = dates[0];
-  from.max = dates[dates.length - 1];
-  to.min = dates[0];
-  to.max = dates[dates.length - 1];
-  from.value = dates[0];
-  if (reportType === 'weekly') {
-    const maximum = isoDate(addDays(parseIsoDate(dates[0]), 6));
-    to.value = dates.filter(value => value <= maximum).at(-1) || dates[0];
-  } else {
-    const month = dates[0].slice(0, 7);
-    to.value = dates.filter(value => value.startsWith(month)).at(-1) || dates[0];
-  }
-  updatePeriodLimits();
-  renderLegacyExcelDateSelection();
-}
-
-function alignLegacyExcelPeriod() {
-  if (!legacyExcelAnalysis || monthlySource !== 'uploaded_excel') return;
-  const dates = legacyExcelDates();
-  const from = document.getElementById('monthly-date-from');
-  const to = document.getElementById('monthly-date-to');
-  if (!dates.includes(from.value)) return;
-  if (reportType === 'weekly') {
-    alignWeeklyPeriod();
-  } else {
-    const sameMonth = dates.filter(value => value.startsWith(from.value.slice(0, 7)) && value >= from.value);
-    if (!sameMonth.includes(to.value)) to.value = sameMonth.at(-1) || from.value;
-  }
-  renderLegacyExcelDateSelection();
-}
-
-function updateLegacyExcelSelectedCount() {
-  const boxes = Array.from(document.querySelectorAll('.legacy-excel-date-check'));
-  const selected = boxes.filter(input => input.checked).length;
-  const label = document.getElementById('excel-selected-date-count');
-  if (label) label.textContent = `${selected} of ${boxes.length} selected`;
-}
-
-function renderLegacyExcelDateSelection() {
-  const panel = document.getElementById('excel-date-selection-panel');
-  const container = document.getElementById('excel-date-checkboxes');
-  if (!panel || !container || !legacyExcelAnalysis) return;
-  const from = document.getElementById('monthly-date-from').value;
-  const to = document.getElementById('monthly-date-to').value;
-  const dates = legacyExcelDates().filter(value => (!from || value >= from) && (!to || value <= to));
-  container.replaceChildren();
-  dates.forEach((value, index) => {
-    const column = document.createElement('div');
-    column.className = 'col-6 col-md-4 col-lg-3';
-    const wrapper = document.createElement('div');
-    wrapper.className = 'form-check border rounded px-2 py-1 h-100';
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.checked = true;
-    checkbox.value = value;
-    checkbox.id = `legacy-excel-date-${index}`;
-    checkbox.className = 'form-check-input legacy-excel-date-check ms-0 me-2';
-    checkbox.addEventListener('change', () => {
-      updateLegacyExcelSelectedCount();
-      invalidateCompiledDraft();
-    });
-    const label = document.createElement('label');
-    label.className = 'form-check-label small';
-    label.htmlFor = checkbox.id;
-    label.textContent = value;
-    wrapper.append(checkbox, label);
-    column.appendChild(wrapper);
-    container.appendChild(column);
-  });
-  panel.classList.toggle('d-none', dates.length === 0);
-  updateLegacyExcelSelectedCount();
-}
-
-function selectedLegacyExcelDates() {
-  return Array.from(document.querySelectorAll('.legacy-excel-date-check:checked'))
-    .map(input => input.value).sort();
-}
-
-function applyLegacyExcelAnalysis(analysis) {
-  legacyExcelAnalysis = analysis;
-  const panel = document.getElementById('excel-analysis-panel');
-  const warnings = Array.isArray(analysis?.warnings) ? analysis.warnings : [];
-  panel.classList.remove('d-none');
-  document.getElementById('excel-analysis-summary').textContent =
-    `${analysis.daily_sheet_count || 0} Daily Report sheet(s) · ${analysis.date_from || '-'} to ${analysis.date_to || '-'}`;
-  const badge = document.getElementById('excel-analysis-badge');
-  badge.textContent = warnings.length ? `${warnings.length} warning(s)` : 'Ready';
-  badge.className = `badge ${warnings.length ? 'text-bg-warning' : 'text-bg-success'}`;
-  const project = analysis.project || {};
-  document.getElementById('excel-analysis-project').textContent = [
-    project.project_title || 'Project not detected',
-    project.customer,
-    project.location,
-    project.equipment,
-  ].filter(Boolean).join(' · ');
-  const warningBox = document.getElementById('excel-analysis-warnings');
-  const visibleWarnings = warnings.slice(0, 10).map(legacyExcelWarningText);
-  if (warnings.length > visibleWarnings.length) {
-    visibleWarnings.push(`And ${warnings.length - visibleWarnings.length} additional warning(s).`);
-  }
-  warningBox.textContent = visibleWarnings.join('\n');
-  warningBox.style.whiteSpace = 'pre-line';
-  warningBox.classList.toggle('d-none', visibleWarnings.length === 0);
-  selectDetectedLegacyProject(analysis);
-  setLegacyExcelPeriodDefaults();
-}
-
-async function analyzeLegacyExcelFile(file) {
-  resetLegacyExcelAnalysis();
-  if (!file) return;
-  const generation = legacyExcelGeneration;
-  if (!file.name.toLowerCase().endsWith('.xlsx')) {
-    showMonthlyAlert(`${file.name} is not an .xlsx workbook.`, 'warning');
-    return;
-  }
-  if (file.size > MAX_LEGACY_EXCEL_BYTES) {
-    showMonthlyAlert(`${file.name} exceeds the ${Math.round(MAX_LEGACY_EXCEL_BYTES / 1048576)} MB workbook limit.`, 'warning');
-    return;
-  }
-  legacyExcelBusy = true;
-  legacyExcelController = new AbortController();
-  const panel = document.getElementById('excel-analysis-panel');
-  panel.classList.remove('d-none');
-  document.getElementById('excel-analysis-summary').textContent = `Analyzing ${file.name}...`;
-  document.getElementById('excel-analysis-badge').textContent = 'Analyzing';
-  document.getElementById('excel-analysis-badge').className = 'badge text-bg-info';
-  setLoading('compile-monthly-btn', true, 'Analyzing Excel...');
-  try {
-    const form = new FormData();
-    form.append('file', file, file.name);
-    const response = await fetch('/monthly/excel-source/analyze', {
-      method:'POST', body:form, signal:legacyExcelController.signal,
-    });
-    const data = await responsePayload(response, 'Excel source could not be analyzed.');
-    if (generation !== legacyExcelGeneration) throw new DOMException('Workbook selection changed.', 'AbortError');
-    legacyExcelSessionId = data.upload_session_id || '';
-    if (!legacyExcelSessionId || !data.analysis) throw new Error('Excel analysis returned an incomplete response.');
-    rememberUploadSession(legacyExcelSessionId);
-    applyLegacyExcelAnalysis(data.analysis);
-    showMonthlyAlert('Excel source analyzed. Choose the reporting dates, then compile.', 'success');
-  } catch (error) {
-    if (error.name !== 'AbortError') {
-      resetLegacyExcelAnalysis({removeSession:false});
-      setLoading('compile-monthly-btn', false);
-      showMonthlyAlert(error.message || 'Excel source analysis failed.');
-    }
-  } finally {
-    if (generation === legacyExcelGeneration) {
-      legacyExcelBusy = false;
-      legacyExcelController = null;
-      setLoading('compile-monthly-btn', false);
-    }
-  }
 }
 
 function updateReportTypeCopy() {
@@ -1396,15 +419,11 @@ function updateReportTypeCopy() {
   const typeName = weekly ? 'Weekly' : 'Monthly';
   document.getElementById('create-report-title').textContent = `Create ${typeName} Report`;
   document.getElementById('create-report-hint').textContent = weekly
-    ? 'Compile a partial or full rolling 7-day report from final JSON, legacy PDFs, or a legacy Excel workbook.'
-    : 'Compile a selected monthly period from final JSON, legacy PDFs, or a legacy Excel workbook.';
-  document.getElementById('period-from-label').textContent = weekly ? 'Day 1 / Start' : 'From';
+    ? 'Compile a Week-to-Date or full Monday-Sunday report from final JSON or uploaded legacy PDFs.'
+    : 'Compile a selected monthly period from final JSON or uploaded legacy PDFs.';
+  document.getElementById('period-from-label').textContent = weekly ? 'Week starts (Monday)' : 'From';
   document.getElementById('period-to-label').textContent = weekly ? 'To / Cutoff' : 'To / Cutoff';
-  const weeklyHelp = document.getElementById('weekly-period-help');
-  weeklyHelp.textContent = monthlySource === 'uploaded_excel'
-    ? 'Choose a start and cutoff date found in the workbook. A full period is 7 days; individual dates may be excluded below.'
-    : 'Uploaded PDFs use the earliest valid report date as Day 1. A full period ends automatically on Day 7; partial reports may cover 1-7 days.';
-  weeklyHelp.classList.toggle('d-none', !weekly);
+  document.getElementById('weekly-period-help').classList.toggle('d-none', !weekly);
   document.getElementById('review-report-title').textContent = `Review ${typeName} Draft`;
   document.getElementById('review-report-hint').textContent = weekly
     ? 'Check missing dates and edit weekly fields before generating the PDF.'
@@ -1421,14 +440,9 @@ function updateReportTypeCopy() {
 
 function populateReportModes() {
   const select = document.getElementById('monthly-report-mode');
-  const current = select.value;
-  const partialWeeklyLabel = ['uploaded_pdf', 'uploaded_excel'].includes(monthlySource)
-    ? 'Rolling 7 Days - Partial Data'
-    : 'Rolling Period / Partial (1-7 Days)';
   select.innerHTML = reportType === 'weekly'
-    ? `<option value="wtd">${partialWeeklyLabel}</option><option value="draft">Rolling 7 Days - Draft</option><option value="final">Rolling 7 Days - Final</option>`
+    ? '<option value="wtd">Week-to-Date / Partial</option><option value="draft">Full Week - Draft</option><option value="final">Full Week - Final</option>'
     : '<option value="mtd">Month-to-Date / Partial</option><option value="draft">Monthly Draft</option><option value="final">Monthly Final</option>';
-  if (Array.from(select.options).some(option => option.value === current)) select.value = current;
 }
 
 function invalidateCompiledDraft(message='Report setup changed. Compile & Review again before creating the PDF.') {
@@ -1443,7 +457,8 @@ function setReportPeriodDefaults() {
   const from = document.getElementById('monthly-date-from');
   const to = document.getElementById('monthly-date-to');
   if (reportType === 'weekly') {
-    from.value = isoDate(today);
+    const monday = mondayFor(today);
+    from.value = isoDate(monday);
     to.value = isoDate(today);
   } else {
     from.value = isoDate(new Date(today.getFullYear(), today.getMonth(), 1));
@@ -1470,16 +485,17 @@ function alignWeeklyPeriod() {
   const fromInput = document.getElementById('monthly-date-from');
   const toInput = document.getElementById('monthly-date-to');
   const selected = parseIsoDate(fromInput.value) || new Date();
-  fromInput.value = isoDate(selected);
+  const monday = mondayFor(selected);
+  fromInput.value = isoDate(monday);
   const mode = document.getElementById('monthly-report-mode').value;
   if (mode === 'draft' || mode === 'final') {
-    toInput.value = isoDate(addDays(selected, 6));
+    toInput.value = isoDate(addDays(monday, 6));
   } else {
     const cutoff = parseIsoDate(toInput.value);
-    if (!cutoff || cutoff < selected || inclusiveDays(selected, cutoff) > 7) {
+    if (!cutoff || cutoff < monday || inclusiveDays(monday, cutoff) > 7) {
       const now = new Date();
       const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      toInput.value = isoDate(today >= selected && today <= addDays(selected, 6) ? today : addDays(selected, 6));
+      toInput.value = isoDate(today >= monday && today <= addDays(monday, 6) ? today : addDays(monday, 6));
     }
   }
   updatePeriodLimits();
@@ -1489,18 +505,12 @@ function handleReportModeChange() {
   const mode = document.getElementById('monthly-report-mode').value;
   document.getElementById('monthly-date-to').readOnly =
     reportType === 'weekly' && (mode === 'draft' || mode === 'final');
-  if (reportType === 'weekly') {
-    if (monthlySource === 'uploaded_excel') alignLegacyExcelPeriod();
-    else alignWeeklyPeriod();
-  }
-  if (monthlySource === 'uploaded_excel') renderLegacyExcelDateSelection();
+  if (reportType === 'weekly') alignWeeklyPeriod();
   toggleFinalConfirmation();
   invalidateCompiledDraft();
-  discardMonthlyUploadSession({keepQueue:true});
 }
 
 function setReportType(value, resetPeriod=true) {
-  discardMonthlyUploadSession({keepQueue:true});
   reportType = value === 'weekly' ? 'weekly' : 'monthly';
   document.getElementById('type-weekly-card').classList.toggle('active', reportType === 'weekly');
   document.getElementById('type-monthly-card').classList.toggle('active', reportType === 'monthly');
@@ -1509,13 +519,7 @@ function setReportType(value, resetPeriod=true) {
   });
   populateReportModes();
   updateReportTypeCopy();
-  if (resetPeriod) {
-    if (monthlySource === 'uploaded_excel' && legacyExcelAnalysis) setLegacyExcelPeriodDefaults();
-    else {
-      setReportPeriodDefaults();
-      if (monthlySource === 'uploaded_pdf') setPdfPeriodDefaults();
-    }
-  }
+  if (resetPeriod) setReportPeriodDefaults();
   document.getElementById('monthly-date-to').readOnly = false;
   monthlyDraftId = '';
   document.getElementById('monthly-review-panel').classList.add('d-none');
@@ -1527,102 +531,36 @@ function setLoading(buttonId, loading, label) {
   const btn = document.getElementById(buttonId);
   if (!btn) return;
   if (loading) {
-    if (!btn.disabled) btn.dataset.original = btn.innerHTML;
+    btn.dataset.original = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>${label || 'Working...'}`;
   } else {
     btn.disabled = false;
     btn.innerHTML = btn.dataset.original || label || btn.innerHTML;
-    delete btn.dataset.original;
   }
 }
 
-function showMonthlyAlert(message, type='danger', options={}) {
+function showMonthlyAlert(message, type='danger') {
   const el = document.getElementById('monthly-alert');
-  if (!el) return;
-  if (monthlyAlertTimer) clearTimeout(monthlyAlertTimer);
-  monthlyAlertTimer = null;
-
-  const normalizedType = ['success', 'info', 'warning', 'danger'].includes(type) ? type : 'danger';
-  const labels = {
-    success:['Success', '✓'], info:['Information', 'i'],
-    warning:['Review required', '!'], danger:['Action required', '!'],
-  };
-  el.replaceChildren();
-  el.className = `report-toast report-toast-${normalizedType}`;
-  el.setAttribute('role', ['warning', 'danger'].includes(normalizedType) ? 'alert' : 'status');
-  el.setAttribute('aria-live', ['warning', 'danger'].includes(normalizedType) ? 'assertive' : 'polite');
-
-  const icon = document.createElement('span');
-  icon.className = 'report-toast-icon';
-  icon.setAttribute('aria-hidden', 'true');
-  icon.textContent = labels[normalizedType][1];
-
-  const content = document.createElement('div');
-  content.className = 'report-toast-content';
-  const title = document.createElement('div');
-  title.className = 'report-toast-title';
-  title.textContent = options.title || labels[normalizedType][0];
-  const body = document.createElement('div');
-  body.className = 'report-toast-message';
-  body.textContent = message;
-  content.append(title, body);
-
-  if (options.actionUrl) {
-    const action = document.createElement('a');
-    action.className = 'report-toast-action';
-    action.href = options.actionUrl;
-    action.textContent = options.actionLabel || 'Open';
-    if (options.download === true) action.setAttribute('download', '');
-    content.appendChild(action);
-  }
-
-  const close = document.createElement('button');
-  close.type = 'button';
-  close.className = 'report-toast-close';
-  close.setAttribute('aria-label', 'Dismiss notification');
-  close.textContent = '×';
-  close.addEventListener('click', hideMonthlyAlert);
-  el.append(icon, content, close);
-  requestAnimationFrame(() => el.classList.add('is-visible'));
-
-  const duration = options.duration ?? ({success:5000, info:6500, warning:9000, danger:10000}[normalizedType]);
-  if (duration > 0) monthlyAlertTimer = setTimeout(hideMonthlyAlert, duration);
+  el.className = `alert alert-${type}`;
+  el.textContent = message;
+  el.classList.remove('d-none');
+  el.scrollIntoView({behavior:'smooth', block:'center'});
 }
 
 function hideMonthlyAlert() {
-  if (monthlyAlertTimer) clearTimeout(monthlyAlertTimer);
-  monthlyAlertTimer = null;
-  document.getElementById('monthly-alert')?.classList.remove('is-visible');
+  document.getElementById('monthly-alert').classList.add('d-none');
 }
 
 function setMonthlySource(value) {
   const sourceChanged = monthlySource !== value;
-  monthlySource = ['uploaded_pdf', 'uploaded_excel'].includes(value) ? value : 'stored_json';
-  populateReportModes();
-  updateReportTypeCopy();
-  document.getElementById('source-json-card').classList.toggle('active', monthlySource === 'stored_json');
-  document.getElementById('source-pdf-card').classList.toggle('active', monthlySource === 'uploaded_pdf');
-  document.getElementById('source-excel-card').classList.toggle('active', monthlySource === 'uploaded_excel');
-  document.getElementById('pdf-upload-panel').classList.toggle('d-none', monthlySource !== 'uploaded_pdf');
-  document.getElementById('excel-upload-panel').classList.toggle('d-none', monthlySource !== 'uploaded_excel');
+  monthlySource = value;
+  document.getElementById('source-json-card').classList.toggle('active', value === 'stored_json');
+  document.getElementById('source-pdf-card').classList.toggle('active', value === 'uploaded_pdf');
+  document.getElementById('pdf-upload-panel').classList.toggle('d-none', value !== 'uploaded_pdf');
   const scope = document.getElementById('stored-scope-panel');
-  if (scope) scope.classList.toggle('d-none', monthlySource !== 'stored_json');
-  if (sourceChanged) {
-    invalidateCompiledDraft();
-    discardMonthlyUploadSession({keepQueue:true});
-  }
-  if (monthlySource === 'uploaded_excel' && legacyExcelAnalysis) {
-    setLegacyExcelPeriodDefaults();
-  } else if (monthlySource !== 'uploaded_excel') {
-    document.getElementById('monthly-date-from').removeAttribute('min');
-    document.getElementById('monthly-date-from').removeAttribute('max');
-    document.getElementById('monthly-date-to').removeAttribute('min');
-    document.getElementById('monthly-date-to').removeAttribute('max');
-    updatePeriodLimits();
-    if (sourceChanged && monthlySource === 'uploaded_pdf') setPdfPeriodDefaults();
-  }
-  renderMonthlyUploadQueue();
+  if (scope) scope.classList.toggle('d-none', value !== 'stored_json');
+  if (sourceChanged) invalidateCompiledDraft();
 }
 
 function selectedProject() {
@@ -1639,380 +577,17 @@ function validateMonthlyInput() {
   if (!project.project_no) throw new Error('Select a project first.');
   if (!dateFrom || !dateTo) throw new Error('Select the reporting start and cutoff dates.');
   if (dateFrom > dateTo) throw new Error('The From date cannot be after the To date.');
-  if (reportType === 'monthly' && dateFrom.slice(0, 7) !== dateTo.slice(0, 7)) {
-    throw new Error('A Monthly Report period must stay within one calendar month.');
-  }
   if (reportType === 'weekly') {
     const from = parseIsoDate(dateFrom);
     const to = parseIsoDate(dateTo);
     const days = inclusiveDays(from, to);
+    if (from.getDay() !== 1) throw new Error('A Weekly Report must start on Monday.');
     if (days < 1 || days > 7) throw new Error('A Weekly Report may cover a maximum of 7 days.');
-    if ((mode === 'draft' || mode === 'final') && days !== 7) {
-      throw new Error('A full rolling Weekly Report must cover exactly 7 days.');
-    }
-  }
-  if (monthlySource === 'uploaded_excel') {
-    if (legacyExcelBusy) throw new Error('Wait for the Excel workbook analysis to finish.');
-    if (!legacyExcelSessionId || !legacyExcelAnalysis) {
-      throw new Error('Choose and analyze a legacy Daily Report Excel workbook first.');
-    }
-    const available = legacyExcelDates();
-    if (!available.includes(dateFrom) || !available.includes(dateTo)) {
-      throw new Error('The From and To dates must be available worksheet dates.');
-    }
-    if (!selectedLegacyExcelDates().length) {
-      throw new Error('Select at least one workbook date to compile.');
+    if ((mode === 'draft' || mode === 'final') && (days !== 7 || to.getDay() !== 0)) {
+      throw new Error('A Full Week report must cover Monday through Sunday.');
     }
   }
   return {project, dateFrom, dateTo, mode};
-}
-
-function validateMonthlyUploadQueue() {
-  if (!monthlyUploadQueue.length) throw new Error('Choose at least one Daily Report PDF.');
-  if (monthlyUploadQueue.length > MAX_MONTHLY_UPLOAD_FILES) {
-    throw new Error(`Choose no more than ${MAX_MONTHLY_UPLOAD_FILES} PDF files.`);
-  }
-  const nonPdf = monthlyUploadQueue.find(item => !item.file.name.toLowerCase().endsWith('.pdf'));
-  if (nonPdf) throw new Error(`${nonPdf.file.name} is not a PDF file.`);
-  const oversized = monthlyUploadQueue.find(item => item.file.size > MAX_MONTHLY_PDF_BYTES);
-  if (oversized) {
-    throw new Error(`${oversized.file.name} exceeds the ${MAX_MONTHLY_PDF_BYTES / (1024 * 1024)} MB per-file limit. Compress it and choose the files again.`);
-  }
-}
-
-function applyCompiledMonthlyDraft(data, {scrollToReview=true}={}) {
-  monthlyDraftId = data.draft_id;
-  populateMonthlyReview(data.draft);
-  document.getElementById('monthly-review-panel').classList.remove('d-none');
-  if (scrollToReview) {
-    document.getElementById('monthly-review-panel').scrollIntoView({behavior:'smooth'});
-  }
-}
-
-const REPORT_NARRATIVE_REVIEW_FIELD_IDS = [
-  'review-executive-summary', 'review-engineering', 'review-procurement',
-  'review-this-month', 'review-next-month', 'review-concerns',
-];
-const AI_SUGGESTION_REVIEW_FIELD_IDS = [
-  'ai-executive-summary', 'ai-engineering-summary',
-  'ai-procurement-summary', 'ai-site-summary',
-  'ai-concerns-summary', 'ai-lookahead-summary',
-];
-const NON_WORKFORCE_REVIEW_FIELD_IDS = [
-  'review-project-title', 'review-project-no', 'review-validation-notes',
-  'review-confirm-validation', ...REPORT_NARRATIVE_REVIEW_FIELD_IDS,
-  'review-recordable', 'review-lost-days', 'review-lti',
-  'review-confirm-final', ...AI_SUGGESTION_REVIEW_FIELD_IDS,
-];
-
-function snapshotNonWorkforceReview() {
-  const fields = {};
-  NON_WORKFORCE_REVIEW_FIELD_IDS.forEach(id => {
-    const element = document.getElementById(id);
-    if (!element) return;
-    fields[id] = element.type === 'checkbox'
-      ? {checked:element.checked}
-      : {value:element.value};
-  });
-  const selectValues = selector => Array.from(document.querySelectorAll(selector)).map(select => ({
-    groupKey:select.dataset.groupKey || '',
-    value:select.value,
-  }));
-  const progressRows = Array.from(document.querySelectorAll('#review-progress-table tbody tr')).map(tr =>
-    Array.from(tr.querySelectorAll('input')).map(input => input.value)
-  );
-  return {
-    fields,
-    projectResolutions:selectValues('.project-resolution-select'),
-    duplicateResolutions:selectValues('.duplicate-resolution-select'),
-    progressRows,
-    sourceValidationApplied:monthlySourceValidationApplied,
-    photos:monthlyPhotos.map(photo => ({...photo})),
-  };
-}
-
-function restoreResolutionValues(selector, values) {
-  const saved = new Map((values || []).map(item => [item.groupKey, item.value]));
-  document.querySelectorAll(selector).forEach(select => {
-    if (saved.has(select.dataset.groupKey || '')) {
-      select.value = saved.get(select.dataset.groupKey || '');
-    }
-  });
-}
-
-function restoreNonWorkforceReview(snapshot) {
-  if (!snapshot) return;
-  Object.entries(snapshot.fields || {}).forEach(([id, state]) => {
-    const element = document.getElementById(id);
-    if (!element) return;
-    if (Object.prototype.hasOwnProperty.call(state, 'checked')) element.checked = state.checked;
-    else element.value = state.value;
-  });
-  restoreResolutionValues('.project-resolution-select', snapshot.projectResolutions);
-  restoreResolutionValues('.duplicate-resolution-select', snapshot.duplicateResolutions);
-
-  const tbody = document.querySelector('#review-progress-table tbody');
-  if (tbody) {
-    tbody.replaceChildren();
-    (snapshot.progressRows || []).forEach(values => {
-      addProgressRow({
-        description:values[0] || '', weight:values[1] ?? '', previous:values[2] ?? '',
-        this_month:values[3] ?? '', to_date:values[4] ?? '', plan:values[5] ?? '',
-        variance:values[6] ?? '',
-      });
-      const inputs = tbody.lastElementChild?.querySelectorAll('input') || [];
-      values.forEach((value, index) => {
-        if (inputs[index]) inputs[index].value = value;
-      });
-    });
-  }
-  monthlyPhotos = (snapshot.photos || []).map(photo => ({...photo}));
-  monthlySourceValidationApplied = snapshot.sourceValidationApplied === true;
-  updatePhotoReviewCard();
-  updateValidationStatus();
-}
-
-function applyWorkforceDraftPreservingReview(data) {
-  const snapshot = snapshotNonWorkforceReview();
-  // The decision endpoint preserves submitted wording and synchronizes facts.
-  // Restoring the old textarea here would overwrite the updated summary.
-  delete snapshot.fields['review-executive-summary'];
-  applyCompiledMonthlyDraft(data, {scrollToReview:false});
-  restoreNonWorkforceReview(snapshot);
-}
-
-function populateWorkforcePreservingReview(draft) {
-  const snapshot = snapshotNonWorkforceReview();
-  populateWorkforceReview(draft);
-  restoreNonWorkforceReview(snapshot);
-}
-
-function snapshotAiActionReview({preserveNarratives=true}={}) {
-  const snapshot = snapshotNonWorkforceReview();
-  AI_SUGGESTION_REVIEW_FIELD_IDS.forEach(id => delete snapshot.fields[id]);
-  if (!preserveNarratives) {
-    REPORT_NARRATIVE_REVIEW_FIELD_IDS.forEach(id => delete snapshot.fields[id]);
-  }
-  // AI does not calculate safety. Preserve manual safety values while still
-  // allowing workforce actions to replace these two fields from the server.
-  ['review-total-manpower', 'review-man-hours'].forEach(id => {
-    const element = document.getElementById(id);
-    if (element) snapshot.fields[id] = {value:element.value};
-  });
-  return snapshot;
-}
-
-function applyAiDraftPreservingReview(data, {preserveNarratives=true}={}) {
-  const snapshot = snapshotAiActionReview({preserveNarratives});
-  applyCompiledMonthlyDraft(data, {scrollToReview:false});
-  restoreNonWorkforceReview(snapshot);
-}
-
-function assertCurrentUpload(generation) {
-  if (generation !== monthlyUploadGeneration) {
-    throw new DOMException('Upload selection changed.', 'AbortError');
-  }
-}
-
-async function startMonthlyUploadSession(input, generation) {
-  if (!monthlyUploadSessionId) {
-    monthlyUploadSessionId = createUploadFileId();
-    rememberUploadSession(monthlyUploadSessionId);
-  }
-  const response = await fetch('/monthly/upload-session/start', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    signal:monthlyUploadController.signal,
-    body:JSON.stringify({
-      project_no:input.project.project_no,
-      project_title:input.project.project_title,
-      date_from:input.dateFrom,
-      date_to:input.dateTo,
-      report_type:reportType,
-      report_mode:input.mode,
-      upload_session_id:monthlyUploadSessionId,
-      files:monthlyUploadQueue.map(item => ({
-        file_id:item.fileId,
-        filename:item.file.name,
-        size_bytes:item.file.size,
-      })),
-    }),
-  });
-  const data = await responsePayload(response, 'Could not start the PDF upload.');
-  assertCurrentUpload(generation);
-  monthlyUploadSessionId = data.upload_session_id;
-  monthlyUploadSessionReady = true;
-}
-
-async function uploadMonthlyQueueItem(item, generation) {
-  assertCurrentUpload(generation);
-  item.status = 'uploading';
-  item.message = '';
-  renderMonthlyUploadQueue();
-  try {
-    const form = new FormData();
-    form.append('file_id', item.fileId);
-    form.append('file', item.file, item.file.name);
-    const response = await fetch(
-      `/monthly/upload-session/${encodeURIComponent(monthlyUploadSessionId)}/file`,
-      {
-        method:'POST',
-        headers:{'X-Upload-File-ID':item.fileId},
-        body:form,
-        signal:monthlyUploadController.signal,
-      },
-    );
-    const data = await responsePayload(response, `${item.file.name} could not be uploaded.`);
-    assertCurrentUpload(generation);
-    const result = data.item || {};
-    item.status = result.included ? 'uploaded' : 'skipped';
-    item.reportDate = result.report_date || '';
-    item.message = Array.isArray(result.warnings) && result.warnings.length
-      ? result.warnings[0]
-      : (result.included ? 'Ready for compilation' : 'File was not included');
-    renderMonthlyUploadQueue();
-    return true;
-  } catch (err) {
-    if (err.name === 'AbortError') throw err;
-    if ([401, 404, 410].includes(err.status)) {
-      err.uploadSessionInvalid = true;
-      throw err;
-    }
-    item.status = 'error';
-    item.message = err.message || 'Connection interrupted';
-    renderMonthlyUploadQueue();
-    return false;
-  }
-}
-
-async function finalizeMonthlyUploadSession(generation) {
-  assertCurrentUpload(generation);
-  setLoading('compile-monthly-btn', true, 'Compiling report...');
-  const response = await fetch(
-    `/monthly/upload-session/${encodeURIComponent(monthlyUploadSessionId)}/compile`,
-    {method:'POST', signal:monthlyUploadController.signal},
-  );
-  let data;
-  try {
-    data = await responsePayload(response, `Could not compile ${reportType} report.`);
-  } catch (err) {
-    if ([401, 404, 410].includes(err.status)) err.uploadSessionInvalid = true;
-    throw err;
-  }
-  assertCurrentUpload(generation);
-  if (!data.ok) throw new Error(data.error || `Could not compile ${reportType} report.`);
-  applyCompiledMonthlyDraft(data);
-}
-
-async function compileUploadedMonthly(input) {
-  validateMonthlyUploadQueue();
-  if (monthlyUploadBusy) return;
-  monthlyUploadBusy = true;
-  const generation = monthlyUploadGeneration;
-  monthlyUploadController = new AbortController();
-  setLoading('compile-monthly-btn', true, `Uploading 0/${monthlyUploadQueue.length}...`);
-  renderMonthlyUploadQueue();
-  try {
-    if (!monthlyUploadSessionReady) await startMonthlyUploadSession(input, generation);
-    for (let index = 0; index < monthlyUploadQueue.length; index += 1) {
-      const item = monthlyUploadQueue[index];
-      if (!['pending', 'error'].includes(item.status)) continue;
-      setLoading('compile-monthly-btn', true, `Uploading ${index + 1}/${monthlyUploadQueue.length}...`);
-      await uploadMonthlyQueueItem(item, generation);
-    }
-    assertCurrentUpload(generation);
-    const failed = monthlyUploadQueue.filter(item => item.status === 'error');
-    if (failed.length) {
-      showMonthlyAlert(
-        `${failed.length} PDF file(s) failed to upload. Click Retry on the failed file, or click Compile again to retry all failed files.`,
-        'warning',
-      );
-      return;
-    }
-    await finalizeMonthlyUploadSession(generation);
-  } catch (err) {
-    if (err.uploadSessionInvalid) {
-      const message = err.message || 'The upload session expired.';
-      discardMonthlyUploadSession({keepQueue:true});
-      showMonthlyAlert(`${message} Click Compile again to restart the upload.`, 'warning');
-    } else if (err.name !== 'AbortError') {
-      showMonthlyAlert(err.message || 'PDF upload failed.');
-    }
-  } finally {
-    if (generation === monthlyUploadGeneration) {
-      monthlyUploadBusy = false;
-      monthlyUploadController = null;
-      setLoading('compile-monthly-btn', false);
-      renderMonthlyUploadQueue();
-    }
-  }
-}
-
-async function retryMonthlyUpload(fileId) {
-  if (monthlyUploadBusy) return;
-  const item = monthlyUploadQueue.find(row => row.fileId === fileId);
-  if (!item) return;
-  if (!monthlyUploadSessionReady) {
-    await compileMonthly();
-    return;
-  }
-  hideMonthlyAlert();
-  monthlyUploadBusy = true;
-  const generation = monthlyUploadGeneration;
-  monthlyUploadController = new AbortController();
-  setLoading('compile-monthly-btn', true, 'Retrying upload...');
-  renderMonthlyUploadQueue();
-  try {
-    await uploadMonthlyQueueItem(item, generation);
-    const remaining = monthlyUploadQueue.filter(row => ['pending', 'error'].includes(row.status));
-    if (!remaining.length) await finalizeMonthlyUploadSession(generation);
-    else showMonthlyAlert(`${remaining.length} PDF file(s) still need to be uploaded or retried.`, 'warning');
-  } catch (err) {
-    if (err.uploadSessionInvalid) {
-      const message = err.message || 'The upload session expired.';
-      discardMonthlyUploadSession({keepQueue:true});
-      showMonthlyAlert(`${message} Click Compile again to restart the upload.`, 'warning');
-    } else if (err.name !== 'AbortError') {
-      showMonthlyAlert(err.message || 'PDF retry failed.');
-    }
-  } finally {
-    if (generation === monthlyUploadGeneration) {
-      monthlyUploadBusy = false;
-      monthlyUploadController = null;
-      setLoading('compile-monthly-btn', false);
-      renderMonthlyUploadQueue();
-    }
-  }
-}
-
-async function compileLegacyExcel(input) {
-  if (!legacyExcelSessionId || !legacyExcelAnalysis) {
-    throw new Error('Choose and analyze a legacy Daily Report Excel workbook first.');
-  }
-  setLoading('compile-monthly-btn', true, 'Reading selected Excel sheets...');
-  try {
-    const response = await fetch(
-      `/monthly/excel-source/${encodeURIComponent(legacyExcelSessionId)}/compile`,
-      {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
-          project_no:input.project.project_no,
-          project_title:input.project.project_title,
-          date_from:input.dateFrom,
-          date_to:input.dateTo,
-          selected_dates:selectedLegacyExcelDates(),
-          report_type:reportType,
-          report_mode:input.mode,
-        }),
-      },
-    );
-    const data = await responsePayload(response, `Could not compile ${reportType} report from Excel.`);
-    if (!data.ok) throw new Error(data.error || `Could not compile ${reportType} report from Excel.`);
-    applyCompiledMonthlyDraft(data);
-  } finally {
-    setLoading('compile-monthly-btn', false);
-  }
 }
 
 async function compileMonthly() {
@@ -2021,35 +596,42 @@ async function compileMonthly() {
   try { input = validateMonthlyInput(); }
   catch (err) { showMonthlyAlert(err.message, 'warning'); return; }
 
-  if (monthlySource === 'uploaded_pdf') {
-    try { await compileUploadedMonthly(input); }
-    catch (err) { showMonthlyAlert(err.message, 'warning'); }
-    return;
-  }
-
-  if (monthlySource === 'uploaded_excel') {
-    try { await compileLegacyExcel(input); }
-    catch (err) { showMonthlyAlert(err.message || 'Excel compilation failed.'); }
-    return;
-  }
-
   setLoading('compile-monthly-btn', true, 'Compiling...');
   try {
-    const response = await fetch('/monthly/compile/stored', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        project_no:input.project.project_no,
-        project_title:input.project.project_title,
-        date_from:input.dateFrom,
-        date_to:input.dateTo,
-        report_type:reportType,
-        report_mode:input.mode,
-        include_all_users:document.getElementById('monthly-all-users')?.checked === true,
-      }),
-    });
-    const data = await responsePayload(response, `Could not compile ${reportType} report.`);
-    if (!data.ok) throw new Error(data.error || `Could not compile ${reportType} report.`);
-    applyCompiledMonthlyDraft(data);
+    let response;
+    if (monthlySource === 'stored_json') {
+      response = await fetch('/monthly/compile/stored', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          project_no:input.project.project_no,
+          project_title:input.project.project_title,
+          date_from:input.dateFrom,
+          date_to:input.dateTo,
+          report_type:reportType,
+          report_mode:input.mode,
+          include_all_users:document.getElementById('monthly-all-users')?.checked === true,
+        }),
+      });
+    } else {
+      const files = document.getElementById('monthly-pdf-files').files;
+      if (!files.length) throw new Error('Choose at least one Daily Report PDF.');
+      const form = new FormData();
+      Array.from(files).forEach(file => form.append('files', file));
+      form.append('project_no', input.project.project_no);
+      form.append('project_title', input.project.project_title);
+      form.append('date_from', input.dateFrom);
+      form.append('date_to', input.dateTo);
+      form.append('report_type', reportType);
+      form.append('report_mode', input.mode);
+      response = await fetch('/monthly/compile/upload', {method:'POST', body:form});
+    }
+
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || `Could not compile ${reportType} report.`);
+    monthlyDraftId = data.draft_id;
+    populateMonthlyReview(data.draft);
+    document.getElementById('monthly-review-panel').classList.remove('d-none');
+    document.getElementById('monthly-review-panel').scrollIntoView({behavior:'smooth'});
   } catch (err) {
     showMonthlyAlert(err.message);
   } finally {
@@ -2063,208 +645,28 @@ function asList(value) {
   return String(value).split('\n').map(v => v.trim()).filter(Boolean);
 }
 
-function cleanReviewWarning(value) {
-  if (value && typeof value === 'object') {
-    const source = [value.filename, value.field, value.page ? `page ${value.page}` : ''].filter(Boolean).join(' / ');
-    value = [source, value.message || value.text || value.code].filter(Boolean).join(': ');
-  }
-  return String(value ?? '')
-    .replace(/(?:&#x0*20;|&#0*32;|&nbsp;|&#x0*a0;|&#0*160;)/gi, ' ')
-    .replace(/[\u00a0\u200b]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function groupReviewWarnings(warnings) {
-  const groups = [
-    {key:'check', title:'Check source data', items:[]},
-    {key:'review', title:'Review / confirm', items:[]},
-    {key:'info', title:'Information', items:[]},
-  ];
-  const seen = new Set();
-  for (const warning of warnings || []) {
-    const text = cleanReviewWarning(warning);
-    if (!text || seen.has(text)) continue;
-    seen.add(text);
-    const severity = String(warning?.severity || '').toLowerCase();
-    const code = String(warning?.code || '').toLowerCase();
-    let group = 1;
-    if (['error', 'critical', 'blocker'].includes(severity)
-        || /\b(?:error|critical|blocker):/i.test(text)
-        || /progress.*(?:arithmetic|mismatch)|invalid.*(?:date|year|number)|arithmetic.*mismatch/i.test(`${code} ${text}`)) {
-      group = 0;
-    } else if (severity === 'info' || /\bINFO:/i.test(text)
-        || /repeated header\/footer.*removed|non-report image occurrence.*ignored/i.test(text)) {
-      group = 2;
-    }
-    groups[group].items.push(text);
-  }
-  return groups.filter(group => group.items.length);
-}
-
-function warningDailyReferences(text, manifest) {
-  const matches = (manifest || []).filter(source => source.filename && text.includes(source.filename));
-  if (matches.length) {
-    return [...new Set(matches.map(source =>
-      [source.filename, source.report_date].filter(Boolean).join(' — ')))];
-  }
-  // Parser warnings can reference rejected sources absent from the manifest.
-  const filename = text.match(/^(.+?\.(?:pdf|xlsx?))\s*:/i);
-  if (filename) return [filename[1]];
-  const snapshot = text.match(/latest Daily snapshot on (\d{4}-\d{2}-\d{2})/i);
-  return snapshot ? [`Daily Report dated ${snapshot[1]}`] : [];
-}
-
-function renderGroupedWarnings(element, warnings, manifest = []) {
-  element.replaceChildren();
-  const groups = groupReviewWarnings(warnings);
-  element.classList.toggle('d-none', !groups.length);
-  if (!groups.length) return;
-  const note = document.createElement('div');
-  note.className = 'small text-muted mb-2';
-  note.textContent = 'Grouped for reading only. Existing validation and approval rules still apply.';
-  element.appendChild(note);
-  for (const group of groups) {
-    const section = document.createElement('details');
-    section.className = 'border rounded p-2 mb-2 bg-white';
-    section.open = group.key !== 'info';
-    const heading = document.createElement('summary');
-    heading.className = 'fw-semibold';
-    heading.textContent = `${group.title} (${group.items.length})`;
-    section.appendChild(heading);
-    const list = document.createElement('ul');
-    list.className = 'mt-2 mb-0 ps-3';
-    for (const text of group.items) {
-      const row = document.createElement('li');
-      row.className = 'mb-2 text-break';
-      const references = group.key === 'info' ? [] : warningDailyReferences(text, manifest);
-      if (references.length) {
-        const source = document.createElement('strong');
-        source.className = 'd-block';
-        source.textContent = `Review Daily Report: ${references.join('; ')}`;
-        row.appendChild(source);
-      }
-      row.appendChild(document.createTextNode(text));
-      list.appendChild(row);
-    }
-    section.appendChild(list);
-    element.appendChild(section);
-  }
-}
-
-let sCurveCurrentPoint = null;
-let sCurveCandidates = [];
-function populateSCurveSelection(draft) {
-  document.getElementById('scurve-selection-panel').classList.toggle('d-none', !['weekly', 'monthly'].includes(reportType));
-  document.getElementById('scurve-selection-help').textContent = `Select earlier Final ${reportType} reports from this project by reporting period. Cumulative percentages are compared, never added. The current period is included when progress data is available.`;
-  sCurveCurrentPoint = draft.s_curve_current_point || null;
-  sCurveCandidates = draft.s_curve_candidates || [];
-  const selection = draft.s_curve_selection || {};
-  document.getElementById('include-history-scurve').checked = selection.enabled === true;
-  const selected = new Set(selection.report_ids || []);
-  const tbody = document.getElementById('scurve-source-rows');
-  tbody.replaceChildren();
-  sCurveCandidates.forEach(candidate => {
-    const tr = document.createElement('tr');
-    const td = document.createElement('td');
-    const input = document.createElement('input');
-    input.type = 'checkbox'; input.className = 'form-check-input'; input.value = candidate.id;
-    input.disabled = !candidate.available; input.checked = candidate.available && selected.has(candidate.id);
-    input.setAttribute('aria-label', `Use report ${candidate.period_start} to ${candidate.period_end}, revision ${candidate.revision}`);
-    input.addEventListener('change', updateSCurveSelection);
-    td.appendChild(input); tr.appendChild(td);
-    const point = candidate.point || {};
-    [`${candidate.period_start} to ${candidate.period_end}`, `R${candidate.revision}`, point.date || '—',
-      point.plan ?? '—', point.actual ?? '—', candidate.available ? 'Available' : 'Progress data unavailable'].forEach(value => {
-      const cell = document.createElement('td'); cell.textContent = value; tr.appendChild(cell);
-    });
-    tbody.appendChild(tr);
-  });
-  document.getElementById('scurve-current-point').textContent = sCurveCurrentPoint
-    ? `Current period: ${sCurveCurrentPoint.date} · Plan ${sCurveCurrentPoint.plan}% · Actual ${sCurveCurrentPoint.actual}% (included automatically; final values follow the progress review).`
-    : 'Current period: progress data unavailable; no point will be invented.';
-  updateSCurveSelection();
-}
-
-function updateSCurveSelection() {
-  const enabled = document.getElementById('include-history-scurve').checked;
-  document.getElementById('scurve-selection-details').classList.toggle('d-none', !enabled);
-  const selected = new Set(Array.from(document.querySelectorAll('#scurve-source-rows input:checked')).map(input => input.value));
-  const chosen = sCurveCandidates.filter(c => selected.has(c.id) && c.point);
-  const points = chosen.map(c => c.point);
-  if (sCurveCurrentPoint) points.push(sCurveCurrentPoint);
-  const dates = [...new Set(points.map(p => p.date))].sort();
-  const duplicate = points.length !== dates.length;
-  const months = new Set(dates.map(d => d.slice(0, 7)));
-  const gaps = [];
-  if (reportType === 'monthly' && dates.length > 1) {
-    let year = Number(dates[0].slice(0, 4)), month = Number(dates[0].slice(5, 7));
-    const end = dates[dates.length - 1].slice(0, 7);
-    for (let i = 0; i < 1200; i++) {
-      const key = `${year}-${String(month).padStart(2, '0')}`;
-      if (key >= end) break;
-      if (!months.has(key)) gaps.push(key);
-      if (++month > 12) { month = 1; year++; }
-    }
-  }
-  if (reportType === 'weekly') {
-    const periods = chosen.map(c => ({start:c.period_start, end:c.period_end}));
-    if (sCurveCurrentPoint) periods.push({start:sCurveCurrentPoint.period_start, end:sCurveCurrentPoint.period_end});
-    periods.sort((a, b) => a.start.localeCompare(b.start));
-    let end = periods.length ? periods[0].end : '';
-    for (const period of periods.slice(1)) {
-      const next = new Date(`${end}T00:00:00Z`);
-      next.setUTCDate(next.getUTCDate() + 1);
-      if (next.toISOString().slice(0,10) < period.start) {
-        const last = new Date(`${period.start}T00:00:00Z`);
-        last.setUTCDate(last.getUTCDate() - 1);
-        gaps.push(`${next.toISOString().slice(0,10)} to ${last.toISOString().slice(0,10)}`);
-      }
-      if (period.end > end) end = period.end;
-    }
-  }
-  const message = document.getElementById('scurve-selection-message');
-  message.textContent = duplicate ? 'Select only one report for each progress source date.'
-    : dates.length < 2 ? 'Select at least two different source dates, including the current period when available.'
-    : `${dates.length} source dates selected.${gaps.length ? ` No selected data for: ${gaps.join(', ')}. Connecting lines do not represent measured progress in those periods.` : ''}`;
-  message.className = `small mb-2 ${duplicate || dates.length < 2 || gaps.length ? 'text-warning-emphasis' : 'text-muted'}`;
-  document.getElementById('scurve-preview-button').disabled = !enabled || duplicate || dates.length < 2;
-}
-
 function populateMonthlyReview(draft) {
-  populateSCurveSelection(draft);
   const coverage = draft.coverage || {};
   document.getElementById('coverage-included').textContent = coverage.included_count ?? (draft.source_manifest || []).length;
   document.getElementById('coverage-missing').textContent = (coverage.missing_dates || []).length;
   document.getElementById('coverage-duplicates').textContent = coverage.duplicate_count || 0;
   document.getElementById('coverage-warnings').textContent = (draft.warnings || []).length;
-  const missingDates = coverage.missing_dates || [];
-  document.getElementById('source-coverage-summary').textContent =
-    `Source Coverage (${draft.period?.start || ''} to ${draft.period?.end || ''}). ` +
-    (missingDates.length
-      ? `Tanggal belum tercakup: ${missingDates.join(', ')}. Tanggal tanpa laporan atau dengan PDF yang di-ignore tidak menghalangi generate laporan.`
-      : 'Semua tanggal pada periode yang dipilih sudah tercakup.');
-  document.getElementById('review-source-badge').textContent = {
-    uploaded_pdf:'Uploaded PDF',
-    uploaded_excel:'Uploaded Excel',
-    stored_json:'Stored JSON',
-  }[draft.source_method] || 'Imported source';
+  document.getElementById('review-source-badge').textContent = draft.source_method === 'uploaded_pdf' ? 'Uploaded PDF' : 'Stored JSON';
 
-  const details = [...(draft.warnings || [])];
-  if ((coverage.missing_dates || []).length) details.unshift(`Missing dates: ${coverage.missing_dates.join(', ')}`);
+  const details = [];
+  if ((coverage.missing_dates || []).length) details.push(`Missing: ${coverage.missing_dates.join(', ')}`);
+  if ((draft.warnings || []).length) details.push(`Warnings: ${draft.warnings.join(' | ')}`);
   const detail = document.getElementById('coverage-detail');
-  renderGroupedWarnings(detail, details, draft.source_manifest || []);
+  detail.textContent = details.join('\n');
+  detail.classList.toggle('d-none', !details.length);
   populateSourceManifest(draft.source_manifest || []);
-  populateSourceValidation(draft);
-  populateWorkforceReview(draft);
-  populateAiSummaryReview(draft);
 
   document.getElementById('review-executive-summary').value = draft.executive_summary || '';
   document.getElementById('review-total-manpower').value = draft.safety?.total_manpower ?? '';
   document.getElementById('review-man-hours').value = draft.safety?.total_man_hours ?? '';
-  document.getElementById('review-recordable').value = draft.safety?.recordable_cases ?? '';
-  document.getElementById('review-lost-days').value = draft.safety?.lost_workdays ?? '';
-  document.getElementById('review-lti').value = draft.safety?.lost_time_injuries ?? '';
+  document.getElementById('review-recordable').value = draft.safety?.recordable_cases ?? 0;
+  document.getElementById('review-lost-days').value = draft.safety?.lost_workdays ?? 0;
+  document.getElementById('review-lti').value = draft.safety?.lost_time_injuries ?? 0;
   document.getElementById('review-engineering').value = draft.engineering?.summary || draft.engineering_summary || '';
   document.getElementById('review-procurement').value = draft.procurement?.summary || draft.procurement_summary || '';
   document.getElementById('review-this-month').value = asList(draft.site?.this_month_activities || draft.this_month_activities).join('\n');
@@ -2280,1020 +682,7 @@ function populateMonthlyReview(draft) {
   const rows = draft.progress?.rows || draft.progress_rows || [];
   rows.forEach(row => addProgressRow(row));
   if (!rows.length) addProgressRow();
-  monthlyPhotos = Array.isArray(draft.photo_documentation)
-    ? draft.photo_documentation.map(photo => ({...photo}))
-    : [];
-  updatePhotoReviewCard();
   toggleFinalConfirmation();
-}
-
-function workbookWarnings(result) {
-  const values = [
-    ...(Array.isArray(result?.warnings) ? result.warnings : []),
-    ...(Array.isArray(result?.conflicts) ? result.conflicts : []),
-    ...(Array.isArray(result?.unresolved) ? result.unresolved : []),
-  ];
-  return values.map(value => {
-    if (typeof value === 'string') return value;
-    return value?.message || value?.reason || value?.code || JSON.stringify(value);
-  }).filter(Boolean);
-}
-
-function workforceDailyRows(result) {
-  if (Array.isArray(result?.daily)) return result.daily;
-  if (Array.isArray(result?.daily_totals)) return result.daily_totals.map(row => ({
-    ...row,
-    direct_headcount:row.present_by_section?.direct ?? 0,
-    indirect_headcount:row.present_by_section?.indirect ?? 0,
-    total_headcount:row.present_count ?? 0,
-    total_man_hours:row.physical_manhours ?? 0,
-  }));
-  if (Array.isArray(result?.manpower?.daily)) return result.manpower.daily;
-  return [];
-}
-
-function populateWorkforceReview(draft) {
-  monthlyWorkforce = draft.workforce_validation || {};
-  const cutoff = document.getElementById('timesheet-cutoff');
-  if (cutoff.dataset.draftId !== monthlyDraftId) {
-    cutoff.dataset.draftId = monthlyDraftId;
-    cutoff.dataset.manual = '';
-  }
-  cutoff.dataset.reportEnd = draft.period?.end || '';
-  cutoff.min = draft.period?.start || '';
-  cutoff.max = draft.period?.end || '';
-  if (!cutoff.dataset.manual) {
-    cutoff.value = monthlyWorkforce.timesheet?.preview?.period?.cutoff || cutoff.dataset.reportEnd;
-  }
-  const card = document.getElementById('workforce-review-card');
-  card.classList.toggle('d-none', !monthlySourceValidationApplied);
-  const effective = monthlyWorkforce.effective || {};
-  const badge = document.getElementById('workforce-status-badge');
-  const source = effective.source || 'daily_report';
-  badge.className = `badge ${source === 'timesheet' ? 'text-bg-success' : 'text-bg-secondary'}`;
-  const sourceLabel = workforceSourceLabel(effective.source_mode || (source === 'timesheet' ? 'combined' : 'daily_only'));
-  badge.textContent = sourceLabel + (effective.overtime_applied ? ' + OT applied' : ' active');
-  document.getElementById('workforce-effective-summary').textContent = [
-    `Effective source: ${sourceLabel}`,
-    source === 'timesheet' && monthlyWorkforce.timesheet?.preview?.daily_fallback_count
-      ? 'Daily Report used for workers not listed in the timesheet' : '',
-    effective.peak_headcount !== undefined ? `Peak HC ${effective.peak_headcount}` : '',
-    effective.regular_man_hours !== undefined ? `Regular ${effective.regular_man_hours} MH` : '',
-    effective.overtime_man_hours !== undefined ? `OT ${effective.overtime_man_hours} MH` : '',
-    effective.total_man_hours !== undefined ? `Total ${effective.total_man_hours} MH` : '',
-  ].filter(Boolean).join(' · ');
-  ['review-total-manpower', 'review-man-hours'].forEach(id => {
-    const input = document.getElementById(id);
-    input.readOnly = source === 'timesheet';
-    input.classList.toggle('bg-light', source === 'timesheet');
-    input.title = source === 'timesheet' ? 'Locked to the reviewed timesheet/overtime calculation.' : '';
-  });
-  const sourceSelect = document.getElementById('timesheet-source-mode');
-  const hasSourceOptions = Boolean(monthlyWorkforce.timesheet?.preview_options);
-  sourceSelect.querySelector('[value="timesheet_only"]').disabled = !hasSourceOptions;
-  sourceSelect.value = monthlyWorkforce.timesheet?.source_mode || (hasSourceOptions ? 'timesheet_only' : 'combined');
-  renderSelectedWorkforceSource();
-  renderOvertimePreview(monthlyWorkforce.overtime?.preview || null, monthlyWorkforce.overtime?.status || '');
-}
-
-function renderWarningBox(id, warnings) {
-  const box = document.getElementById(id);
-  const unique = Array.from(new Set(warnings || []));
-  box.textContent = unique.length ? `Review required:\n- ${unique.join('\n- ')}` : '';
-  box.classList.toggle('d-none', unique.length === 0);
-}
-
-function groupTimesheetWarnings(result) {
-  const groups = [
-    {key:'identity', title:'Check worker identities', open:true, items:[]},
-    {key:'attendance', title:'Review attendance differences', open:true, items:[]},
-    {key:'details', title:'Complete worker details', open:true, items:[]},
-    {key:'fallback', title:'Review Daily Report workers', open:false, items:[]},
-    {key:'matches', title:'Review matched name variants', open:false, items:[]},
-    {key:'other', title:'Other source notes', open:false, items:[]},
-  ];
-  const entries = new Map();
-  const sources = new Map((result?.source_manifest || []).map(s => [s.source_id, s.filename]));
-  const readable = value => String(value ?? '').replace(/_/g, ' ').trim();
-  const add = (group, code, name, message, dates=[], refs=[]) => {
-    const key = JSON.stringify([group, code, name, message]);
-    if (!entries.has(key)) {
-      const item = {name, message, dates:new Set(), refs:new Set()};
-      entries.set(key, item);
-      groups.find(g => g.key === group).items.push(item);
-    }
-    const item = entries.get(key);
-    dates.filter(Boolean).forEach(date => item.dates.add(date));
-    refs.filter(Boolean).forEach(ref => item.refs.add(ref));
-  };
-  const variants = (result?.identity_matches || []).filter(m => ['name_variant','spelling_variant'].includes(m.method));
-  const fallback = (result?.employees || []).filter(e => e.source === 'daily_fallback');
-  for (const raw of [...(result?.warnings || []), ...(result?.conflicts || []), ...(result?.unresolved || [])]) {
-    const value = typeof raw === 'string' ? {message:raw} : raw || {};
-    const detail = {...value, ...(value.details || {})};
-    const code = value.code || value.type || value.reason || '';
-    if (code === 'matched_name_variants' && variants.length) continue;
-    if (code === 'daily_person_fallback' && fallback.length) continue;
-    let message = String(value.message || value.text || '').replace(/^\d{4}-\d{2}-\d{2}:\s*/, '');
-    let name = detail.employee || detail.name || '';
-    if (!name) name = message.match(/^(.+?) (?:is listed in the Daily Report|matches multiple timesheet workers|has no confirmed timesheet match)/)?.[1] || '';
-    let group = 'other';
-    if (/ambiguous|identity/.test(code)) {
-      group = 'identity';
-      // The structured unresolved record duplicates the detailed warning.
-      if (!message && (result?.warnings || []).some(w => w.code === code && w.date === detail.date && String(w.message).includes(name))) continue;
-      message ||= 'Multiple worker matches require identity review.';
-    } else if (code === 'missing_role') {
-      group = 'details'; message = 'Position is blank. Check and complete the source timesheet.';
-    } else if (code === 'employee_date_status_conflict') {
-      group = 'attendance';
-      message = `Conflicting statuses: ${(detail.statuses || []).map(readable).sort().join(' / ')}. No regular hours counted for these dates.`;
-    } else if (/attendance|hours_missing|status|incomplete|missing.*date/.test(code)) {
-      group = 'attendance';
-    } else if (/role|section/.test(code)) {
-      group = 'details';
-    } else if (/daily_person/.test(code)) {
-      group = 'fallback';
-    } else if (code === 'matched_name_variants') {
-      group = 'matches';
-    }
-    message ||= readable(code) || 'Review the source workbook.';
-    const refs = [];
-    const reference = item => [item.filename || sources.get(item.source_id), item.sheet, item.row ? `row ${item.row}` : ''].filter(Boolean).join(' / ');
-    const ownRef = reference(detail);
-    if (ownRef) refs.push(ownRef);
-    for (const observation of detail.observations || []) {
-      const ref = reference(observation);
-      if (ref) refs.push(`${detail.date ? detail.date + ' / ' : ''}${ref}: ${readable(observation.status)}`);
-    }
-    if (detail.roles) refs.push(`Positions: ${detail.roles.join(' / ')}`);
-    if (detail.sections) refs.push(`Sections: ${detail.sections.join(' / ')}`);
-    add(group, code, name, message, [detail.date], refs);
-  }
-  for (const worker of fallback) {
-    add('fallback', 'daily_person_fallback', worker.name,
-        'Daily attendance and hours were added because no confirmed timesheet match was found.',
-        (worker.statuses || []).map(s => s.date));
-  }
-  for (const match of variants) {
-    add('matches', 'matched_name_variants', `${match.daily_name} → ${match.timesheet_name}`,
-        'Matched by name variation. Confirm these names refer to the same worker.', [match.date]);
-  }
-  return groups.filter(g => g.items.length).map(g => ({...g, items:g.items.map(item => ({
-    ...item, dates:[...item.dates].sort(), refs:[...item.refs].sort(),
-  }))}));
-}
-
-function renderTimesheetWarnings(result) {
-  const box = document.getElementById('timesheet-warnings');
-  box.replaceChildren();
-  const groups = groupTimesheetWarnings(result);
-  box.classList.toggle('d-none', !groups.length);
-  if (!groups.length) return;
-  const note = document.createElement('div');
-  note.className = 'small text-muted mb-2';
-  note.textContent = 'Grouped for reading only. Repeated issues are combined; calculations and confirmation rules are unchanged.';
-  box.appendChild(note);
-  for (const group of groups) {
-    const section = document.createElement('details');
-    section.className = 'border rounded p-2 mb-2 bg-white';
-    section.open = group.open;
-    const heading = document.createElement('summary');
-    heading.className = 'fw-semibold';
-    heading.textContent = `${group.title} (${group.items.length})`;
-    section.appendChild(heading);
-    const list = document.createElement('ul');
-    list.className = 'mt-2 mb-0 ps-3';
-    list.style.maxHeight = '320px';
-    list.style.overflowY = 'auto';
-    for (const item of group.items) {
-      const row = document.createElement('li');
-      row.className = 'mb-3 text-break';
-      const name = document.createElement('strong');
-      name.className = 'd-block'; name.textContent = item.name || 'Source workbook';
-      row.appendChild(name);
-      if (item.dates.length) {
-        const dates = document.createElement('div');
-        dates.className = 'small fw-semibold mb-1'; dates.textContent = `Dates: ${item.dates.join(', ')}`;
-        row.appendChild(dates);
-      }
-      row.appendChild(document.createTextNode(item.message));
-      if (item.refs.length) {
-        const refs = document.createElement('details'); refs.className = 'small text-muted mt-1';
-        const label = document.createElement('summary'); label.textContent = 'Source details'; refs.appendChild(label);
-        for (const text of item.refs) {
-          const line = document.createElement('div'); line.textContent = text; refs.appendChild(line);
-        }
-        row.appendChild(refs);
-      }
-      list.appendChild(row);
-    }
-    section.appendChild(list); box.appendChild(section);
-  }
-}
-
-function workforceSourceLabel(mode) {
-  const labels = {daily_only:'Daily PDF only', combined:'Timesheet + Daily fallback', timesheet_only:'Timesheet only'};
-  return labels[mode] || 'Daily PDF only';
-}
-
-function renderSelectedWorkforceSource() {
-  const state = monthlyWorkforce.timesheet || {};
-  const mode = document.getElementById('timesheet-source-mode').value;
-  const hasPreview = Boolean(state.preview);
-  document.getElementById('timesheet-source-panel').classList.toggle('d-none', !hasPreview);
-  let result = state.preview_options?.[mode] || state.preview || null;
-  if (mode === 'daily_only' && hasPreview) {
-    const manpower = monthlyWorkforce.baseline?.manpower || {};
-    result = {manpower, daily:manpower.daily || [], warnings:[]};
-  }
-  const appliedMode = state.source_mode || (state.status === 'kept' ? 'daily_only' : 'combined');
-  const pending = hasPreview && (state.status === 'preview' || mode !== appliedMode);
-  renderTimesheetPreview(result, pending ? 'preview' : state.status || '');
-  document.getElementById('apply-workforce-source-btn').disabled = !pending;
-  const descriptions = {
-    daily_only:'Use Daily Report headcount and hours. Timesheet attendance is not applied.',
-    combined:'Use timesheet attendance first; add workers without a confirmed match from Daily. Ambiguous identities require review.',
-    timesheet_only:'Use timesheet attendance only. Daily workers without a confirmed timesheet match are shown for review; no Daily hours are added.',
-  };
-  document.getElementById('timesheet-source-help').textContent = descriptions[mode];
-}
-
-function changeWorkforceSource() {
-  document.getElementById('timesheet-confirm-exceptions').checked = false;
-  renderSelectedWorkforceSource();
-}
-
-function applyWorkforceSource() {
-  const mode = document.getElementById('timesheet-source-mode').value;
-  return decideTimesheet(mode === 'daily_only' ? 'keep' : 'apply');
-}
-
-function renderTimesheetPreview(result, status='') {
-  const statusLabels = {preview:'Analyzed, not applied', applied:'Applied to report', kept:'Daily Report data kept'};
-  document.getElementById('timesheet-pending-notice').classList.toggle('d-none', !result || status !== 'preview');
-  const rows = workforceDailyRows(result);
-  const totals = result?.manpower?.totals || result?.totals || {};
-  const breakdown = result?.hours_breakdown;
-  const summary = document.getElementById('timesheet-summary');
-  summary.textContent = result
-    ? [
-        status ? `Status: ${statusLabels[status] || status}` : '',
-        result.period?.start && result.period?.end ? `${result.period.start}–${result.period.end}` : '',
-        totals.total_person_days !== undefined ? `${totals.total_person_days} person-days` : '',
-        totals.peak_headcount !== undefined ? `peak ${totals.peak_headcount}` : '',
-        totals.total_man_hours !== undefined ? `${totals.total_man_hours} regular MH` : '',
-        breakdown ? `Timesheet ${breakdown.timesheet_regular_mh} MH + Daily fallback ${breakdown.daily_fallback_regular_mh} MH` : '',
-        result.daily_fallback_count ? `${result.daily_fallback_count} workers use Daily Report attendance/hours` : '',
-      ].filter(Boolean).join(' · ')
-    : 'No attendance workbook reviewed.';
-  renderTimesheetWarnings(result);
-  const body = document.getElementById('timesheet-daily-body');
-  body.replaceChildren();
-  rows.forEach(row => {
-    const tr = document.createElement('tr');
-    [row.date, row.direct_headcount, row.indirect_headcount, row.total_headcount, row.total_man_hours]
-      .forEach(value => { const td=document.createElement('td'); td.textContent=value ?? '-'; tr.appendChild(td); });
-    body.appendChild(tr);
-  });
-  document.getElementById('timesheet-daily-panel').classList.toggle('d-none', rows.length === 0);
-  const needsConfirmation = Boolean(result?.requires_confirmation || workbookWarnings(result).length);
-  const confirmationPanel = document.getElementById('timesheet-confirm-panel');
-  confirmationPanel.classList.toggle('d-none', !result || !needsConfirmation);
-  if (!result || !needsConfirmation || status !== 'preview') {
-    document.getElementById('timesheet-confirm-exceptions').checked = false;
-  }
-  document.getElementById('timesheet-actions').classList.toggle(
-    'd-none', !result
-  );
-}
-
-function renderOvertimePreview(result, status='') {
-  const rows = workforceDailyRows(result);
-  const totals = result?.totals || {};
-  document.getElementById('overtime-summary').textContent = result
-    ? [
-        status ? `Status: ${status}` : '',
-        result.coverage?.covered_days !== undefined && result.coverage?.expected_days !== undefined
-          ? `coverage ${result.coverage.covered_days}/${result.coverage.expected_days} days` : '',
-        totals.participant_count !== undefined ? `${totals.participant_count} participants` : '',
-        (totals.actual_ot_man_hours ?? totals.total_man_hours) !== undefined
-          ? `${totals.actual_ot_man_hours ?? totals.total_man_hours} OT MH` : '',
-      ].filter(Boolean).join(' · ')
-    : 'No overtime workbook reviewed.';
-  renderWarningBox('overtime-warnings', result ? workbookWarnings(result) : []);
-  const body = document.getElementById('overtime-daily-body');
-  body.replaceChildren();
-  rows.forEach(row => {
-    const tr = document.createElement('tr');
-    [row.date, row.participant_count ?? row.total_headcount, row.actual_ot_man_hours ?? row.total_man_hours,
-      row.supplied === false ? 'Not supplied' : 'Supplied']
-      .forEach(value => { const td=document.createElement('td'); td.textContent=value ?? '-'; tr.appendChild(td); });
-    body.appendChild(tr);
-  });
-  document.getElementById('overtime-daily-panel').classList.toggle('d-none', rows.length === 0);
-
-  const people = Array.isArray(result?.review_people) ? result.review_people : [];
-  const mappingBody = document.getElementById('overtime-mapping-body');
-  mappingBody.replaceChildren();
-  people.forEach((person, index) => {
-    const tr = document.createElement('tr');
-    const name = document.createElement('td');
-    name.textContent = person.name || person.source_name || '(blank)';
-    const action = document.createElement('td');
-    const select = document.createElement('select');
-    select.className = 'form-select form-select-sm overtime-person-resolution';
-    select.dataset.key = person.key || person.normalized_name || String(index);
-    [['','Choose...'],['direct','Direct'],['indirect','Indirect'],['exclude','Exclude']].forEach(([value,label]) => {
-      const option=document.createElement('option'); option.value=value; option.textContent=label; select.appendChild(option);
-    });
-    select.value = person.category || person.resolution || '';
-    action.appendChild(select);
-    if (person.match_name) {
-      const hint=document.createElement('div'); hint.className='small text-muted mt-1'; hint.textContent=`Matched: ${person.match_name}`; action.appendChild(hint);
-    }
-    tr.append(name, action); mappingBody.appendChild(tr);
-  });
-  document.getElementById('overtime-mapping-panel').classList.toggle('d-none', people.length === 0);
-  const reviewRecords = Array.isArray(result?.records)
-    ? result.records.filter(record => record && record.requires_review)
-    : [];
-  const recordBody = document.getElementById('overtime-record-body');
-  recordBody.replaceChildren();
-  reviewRecords.forEach(record => {
-    const tr = document.createElement('tr');
-    const identity = document.createElement('td');
-    identity.textContent = `${record.date || '-'} / ${record.employee || '(blank)'}`;
-    const detail = document.createElement('td');
-    const interval = [record.start, record.end].filter(Boolean).join('–') || record.overtime_raw || '-';
-    const reasons = Array.isArray(record.review_reasons) ? record.review_reasons.join('; ') : '';
-    detail.textContent = [interval, record.notes || '', reasons].filter(Boolean).join(' · ');
-    const decisionCell = document.createElement('td');
-    const decision = document.createElement('select');
-    decision.className = 'form-select form-select-sm overtime-record-decision';
-    decision.dataset.recordId = record.record_id || '';
-    [['','Choose...'],['include','Include'],['exclude','Exclude']].forEach(([value,label]) => {
-      const option=document.createElement('option'); option.value=value; option.textContent=label; decision.appendChild(option);
-    });
-    decisionCell.appendChild(decision);
-    const hoursCell = document.createElement('td');
-    const hours = document.createElement('input');
-    hours.type = 'number'; hours.min = '0.01'; hours.max = '24'; hours.step = '0.25';
-    hours.className = 'form-control form-control-sm overtime-record-hours';
-    hours.dataset.recordId = record.record_id || '';
-    hours.value = record.duration_hours ?? record.suggested_duration_hours ?? '';
-    hoursCell.appendChild(hours);
-    tr.append(identity, detail, decisionCell, hoursCell);
-    recordBody.appendChild(tr);
-  });
-  document.getElementById('overtime-record-panel').classList.toggle('d-none', reviewRecords.length === 0);
-  const needsConfirmation = Boolean(result?.requires_confirmation || workbookWarnings(result).length || people.some(row => row.requires_confirmation));
-  document.getElementById('overtime-confirm-panel').classList.toggle('d-none', !result || !needsConfirmation);
-  if (!result || !needsConfirmation || status !== 'preview') {
-    document.getElementById('overtime-confirm-exceptions').checked = false;
-  }
-  document.getElementById('overtime-actions').classList.toggle(
-    'd-none', !result || ['applied', 'kept'].includes(status)
-  );
-}
-
-async function postWorkbookPreview(kind, inputId, cutoffId='') {
-  if (!monthlyDraftId || !monthlySourceValidationApplied) {
-    throw new Error('Apply Source Data Validation before uploading workforce data.');
-  }
-  const files = Array.from(document.getElementById(inputId).files || []);
-  if (!files.length) throw new Error('Choose at least one .xlsx workbook.');
-  if (files.length > 31) throw new Error('Choose no more than 31 workbooks at once.');
-  const invalid = files.find(file => !file.name.toLowerCase().endsWith('.xlsx'));
-  if (invalid) throw new Error(`${invalid.name} is not an .xlsx workbook.`);
-  const form = new FormData();
-  files.forEach(file => form.append('files', file, file.name));
-  if (cutoffId) {
-    const cutoff = document.getElementById(cutoffId);
-    if (!cutoff.checkValidity()) throw new Error('Choose a cutoff within the report period.');
-    form.append('cutoff_date', cutoff.dataset.manual ? cutoff.value : '');
-  }
-  const response = await fetch(`/monthly/workforce/${kind}/${encodeURIComponent(monthlyDraftId)}/preview`, {
-    method:'POST', body:form,
-  });
-  return responsePayload(response, `${kind} workbook could not be analyzed.`);
-}
-
-async function analyzeTimesheet() {
-  hideMonthlyAlert();
-  document.getElementById('timesheet-confirm-exceptions').checked = false;
-  setLoading('analyze-timesheet-btn', true, 'Analyzing...');
-  try {
-    const data = await postWorkbookPreview('timesheet', 'timesheet-files', 'timesheet-cutoff');
-    populateWorkforcePreservingReview(data.draft);
-    document.getElementById('timesheet-confirm-exceptions').checked = false;
-    showMonthlyAlert('Timesheet analyzed. Choose the manpower source, review the results, then click Apply Source.', 'warning');
-  } catch (error) { showMonthlyAlert(error.message, 'warning'); }
-  finally { setLoading('analyze-timesheet-btn', false); }
-}
-
-async function analyzeOvertime() {
-  hideMonthlyAlert();
-  document.getElementById('overtime-confirm-exceptions').checked = false;
-  setLoading('analyze-overtime-btn', true, 'Analyzing...');
-  try {
-    const data = await postWorkbookPreview('overtime', 'overtime-files');
-    populateWorkforcePreservingReview(data.draft);
-    document.getElementById('overtime-confirm-exceptions').checked = false;
-    showMonthlyAlert('Overtime analyzed. Confirm mappings and exceptions before applying it.', 'success');
-  } catch (error) { showMonthlyAlert(error.message, 'warning'); }
-  finally { setLoading('analyze-overtime-btn', false); }
-}
-
-function overtimeResolutionPayload() {
-  return Array.from(document.querySelectorAll('.overtime-person-resolution')).map(select => ({
-    key:select.dataset.key, category:select.value,
-  }));
-}
-
-function overtimeRecordResolutionPayload() {
-  const hourInputs = new Map(Array.from(document.querySelectorAll('.overtime-record-hours')).map(input => [input.dataset.recordId, input]));
-  return Array.from(document.querySelectorAll('.overtime-record-decision')).map(select => ({
-    record_id:select.dataset.recordId,
-    decision:select.value,
-    duration_hours:hourInputs.get(select.dataset.recordId)?.value || '',
-  }));
-}
-
-async function workforceDecision(kind, decision) {
-  if (!monthlyDraftId) return;
-  const body = {decision, executive_summary:document.getElementById('review-executive-summary').value};
-  if (kind === 'timesheet') {
-    body.source_mode = document.getElementById('timesheet-source-mode').value;
-    body.confirm_exceptions = document.getElementById('timesheet-confirm-exceptions').checked;
-  }
-  if (kind === 'overtime') {
-    body.resolutions = overtimeResolutionPayload();
-    body.record_resolutions = overtimeRecordResolutionPayload();
-    body.confirm_exceptions = document.getElementById('overtime-confirm-exceptions').checked;
-  }
-  const response = await fetch(`/monthly/workforce/${kind}/${encodeURIComponent(monthlyDraftId)}/decision`, {
-    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body),
-  });
-  const data = await responsePayload(response, `${kind} decision could not be saved.`);
-  applyWorkforceDraftPreservingReview(data);
-}
-
-async function decideTimesheet(decision) {
-  try {
-    await workforceDecision('timesheet', decision);
-    showMonthlyAlert(`${workforceSourceLabel(monthlyWorkforce.timesheet?.source_mode)} applied.`, 'success');
-  } catch (error) { showMonthlyAlert(error.message, 'warning'); }
-}
-
-async function decideOvertime(decision) {
-  try {
-    await workforceDecision('overtime', decision);
-    showMonthlyAlert(decision === 'apply' ? 'Confirmed overtime applied.' : 'Report kept without overtime.', 'success');
-  } catch (error) { showMonthlyAlert(error.message, 'warning'); }
-}
-
-async function resetWorkforceValidation() {
-  if (!monthlyDraftId || !confirm('Reset timesheet and overtime decisions to the Daily Report baseline?')) return;
-  try {
-    const response = await fetch(`/monthly/workforce/reset/${encodeURIComponent(monthlyDraftId)}`, {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({executive_summary:document.getElementById('review-executive-summary').value}),
-    });
-    const data = await responsePayload(response, 'Workforce validation could not be reset.');
-    applyWorkforceDraftPreservingReview(data);
-    showMonthlyAlert('Timesheet and overtime reset to the Daily Report baseline.', 'success');
-  } catch (error) { showMonthlyAlert(error.message, 'warning'); }
-}
-
-function aiCitationRows(state) {
-  const direct = state?.suggestion?.citations;
-  if (Array.isArray(direct)) {
-    return direct.map((row, index) => ({
-      label:String(row?.label || row?.section || `Claim ${index + 1}`),
-      sourceIds:Array.isArray(row?.source_ids) ? row.source_ids.map(String) : [],
-      dates:Array.isArray(row?.dates) ? row.dates.map(String) : [],
-    })).filter(row => row.sourceIds.length || row.dates.length);
-  }
-
-  const provider = state?.provider_envelope?.suggestion;
-  if (!provider || typeof provider !== 'object') return [];
-  const rows = [];
-  const addClaim = (label, claim) => {
-    if (!claim || typeof claim !== 'object') return;
-    const sourceIds = Array.isArray(claim.source_ids) ? claim.source_ids.map(String) : [];
-    const dates = Array.isArray(claim.dates) ? claim.dates.map(String) : [];
-    if (sourceIds.length || dates.length) rows.push({label, sourceIds, dates});
-  };
-  [
-    ['Executive summary', provider.executive_summary],
-    ['Engineering', provider.engineering_summary],
-    ['Procurement', provider.procurement_summary],
-    ['Site summary', provider.site_summary],
-  ].forEach(([label, claim]) => addClaim(label, claim));
-  (Array.isArray(provider.concern_actions) ? provider.concern_actions : [])
-    .forEach((claim, index) => addClaim(`Concern / action ${index + 1}`, claim));
-  (Array.isArray(provider.lookahead) ? provider.lookahead : [])
-    .forEach((claim, index) => addClaim(`Look-ahead ${index + 1}`, claim));
-  (Array.isArray(provider.claims) ? provider.claims : [])
-    .forEach((claim, index) => addClaim(`Supporting claim ${index + 1}`, claim));
-  return rows;
-}
-
-function renderAiEvidence(state) {
-  const citations = aiCitationRows(state);
-  const missingData = Array.isArray(state?.suggestion?.missing_data)
-    ? state.suggestion.missing_data.map(String)
-    : (Array.isArray(state?.provider_envelope?.suggestion?.missing_data)
-        ? state.provider_envelope.suggestion.missing_data.map(String)
-        : []);
-  const panel = document.getElementById('ai-evidence-panel');
-  const citationList = document.getElementById('ai-citations-list');
-  const missingPanel = document.getElementById('ai-missing-data-panel');
-  const missingList = document.getElementById('ai-missing-data-list');
-  citationList.replaceChildren();
-  missingList.replaceChildren();
-  citations.forEach(row => {
-    const item = document.createElement('li');
-    const sources = row.sourceIds.length ? row.sourceIds.join(', ') : 'none';
-    const dates = row.dates.length ? row.dates.join(', ') : 'none';
-    item.textContent = `${row.label} — source IDs: ${sources}; dates: ${dates}`;
-    citationList.appendChild(item);
-  });
-  missingData.forEach(value => {
-    const item = document.createElement('li');
-    item.textContent = value;
-    missingList.appendChild(item);
-  });
-  citationList.classList.toggle('d-none', citations.length === 0);
-  missingPanel.classList.toggle('d-none', missingData.length === 0);
-  panel.classList.toggle('d-none', citations.length === 0 && missingData.length === 0);
-}
-
-function populateAiSummaryReview(draft) {
-  const state = draft.ai_summary || {};
-  monthlyAiSuggestion = state.suggestion || null;
-  const card = document.getElementById('ai-summary-card');
-  card.classList.toggle('d-none', !monthlySourceValidationApplied);
-  const status = document.getElementById('ai-summary-status');
-  const review = document.getElementById('ai-summary-review');
-  status.textContent = state.status ? `AI summary status: ${state.status}` : '';
-  status.classList.toggle('d-none', !state.status);
-  review.classList.toggle('d-none', !monthlyAiSuggestion || state.status !== 'suggested');
-  renderAiEvidence(state);
-  if (!monthlyAiSuggestion) return;
-  document.getElementById('ai-executive-summary').value = monthlyAiSuggestion.executive_summary || '';
-  document.getElementById('ai-engineering-summary').value = monthlyAiSuggestion.engineering_summary || '';
-  document.getElementById('ai-procurement-summary').value = monthlyAiSuggestion.procurement_summary || '';
-  document.getElementById('ai-site-summary').value = monthlyAiSuggestion.site_summary || '';
-  const concerns = Array.isArray(monthlyAiSuggestion.concerns) ? monthlyAiSuggestion.concerns : [];
-  document.getElementById('ai-concerns-summary').value = concerns.map(item =>
-    typeof item === 'string' ? item : `${item.concern || ''} | ${item.corrective_action || item.action || ''}`
-  ).join('\n');
-  const lookahead = Array.isArray(monthlyAiSuggestion.lookahead) ? monthlyAiSuggestion.lookahead : [monthlyAiSuggestion.lookahead];
-  document.getElementById('ai-lookahead-summary').value = lookahead.filter(Boolean).join('\n');
-}
-
-async function generateAiSummary() {
-  if (!monthlyDraftId || !monthlySourceValidationApplied) {
-    showMonthlyAlert('Apply Source Data Validation before generating AI suggestions.', 'warning'); return;
-  }
-  setLoading('generate-ai-summary-btn', true, 'Generating...');
-  try {
-    const response = await fetch(`/monthly/ai-summary/${encodeURIComponent(monthlyDraftId)}`, {method:'POST'});
-    const data = await responsePayload(response, 'AI summary could not be generated.');
-    applyAiDraftPreservingReview(data);
-    showMonthlyAlert('AI narrative suggestions are ready. Review and edit them before accepting.', 'success');
-  } catch (error) { showMonthlyAlert(error.message, 'warning'); }
-  finally { setLoading('generate-ai-summary-btn', false); }
-}
-
-function collectAiSuggestionReview() {
-  const concerns = document.getElementById('ai-concerns-summary').value.split('\n').map(line => {
-    const [concern, ...action] = line.split('|');
-    return {concern:concern.trim(), corrective_action:action.join('|').trim()};
-  }).filter(item => item.concern || item.corrective_action);
-  return {
-    executive_summary:document.getElementById('ai-executive-summary').value.trim(),
-    engineering_summary:document.getElementById('ai-engineering-summary').value.trim(),
-    procurement_summary:document.getElementById('ai-procurement-summary').value.trim(),
-    site_summary:document.getElementById('ai-site-summary').value.trim(),
-    concerns,
-    lookahead:document.getElementById('ai-lookahead-summary').value.split('\n').map(value => value.trim()).filter(Boolean),
-  };
-}
-
-async function decideAiSummary(decision) {
-  if (!monthlyDraftId) return;
-  try {
-    const response = await fetch(`/monthly/ai-summary/${encodeURIComponent(monthlyDraftId)}/decision`, {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({decision, suggestion:decision === 'accept' ? collectAiSuggestionReview() : {}}),
-    });
-    const data = await responsePayload(response, 'AI summary decision could not be saved.');
-    applyAiDraftPreservingReview(data, {preserveNarratives:decision !== 'accept'});
-    showMonthlyAlert(decision === 'accept' ? 'AI suggestions applied for final manual review.' : 'AI suggestions rejected.', 'success');
-  } catch (error) { showMonthlyAlert(error.message, 'warning'); }
-}
-
-function updatePhotoReviewCard() {
-  const card = document.getElementById('photo-review-card');
-  const badge = document.getElementById('photo-count-badge');
-  card.classList.toggle('d-none', monthlyPhotos.length === 0 || !monthlySourceValidationApplied);
-  badge.textContent = `${monthlyPhotos.length} photo${monthlyPhotos.length === 1 ? '' : 's'}`;
-}
-
-function moveMonthlyPhoto(index, offset) {
-  const target = index + offset;
-  if (target < 0 || target >= monthlyPhotos.length) return;
-  [monthlyPhotos[index], monthlyPhotos[target]] = [monthlyPhotos[target], monthlyPhotos[index]];
-  renderPhotoReviewGrid();
-}
-
-function removeMonthlyPhoto(index) {
-  monthlyPhotos.splice(index, 1);
-  renderPhotoReviewGrid();
-}
-
-function renderPhotoReviewGrid() {
-  const grid = document.getElementById('photo-review-grid');
-  grid.replaceChildren();
-  if (!monthlyPhotos.length) {
-    const empty = document.createElement('div');
-    empty.className = 'col-12 text-muted small';
-    empty.textContent = 'No photos are selected for Appendix 6.6.';
-    grid.appendChild(empty);
-    return;
-  }
-  monthlyPhotos.forEach((photo, index) => {
-    const column = document.createElement('div');
-    column.className = 'col-12 col-sm-6 col-lg-4';
-    const card = document.createElement('div');
-    card.className = 'border rounded p-2 h-100 bg-white';
-
-    const image = document.createElement('img');
-    image.className = 'rounded mb-2 d-block w-100';
-    image.style.height = '180px';
-    image.style.objectFit = 'contain';
-    image.alt = 'Extracted Daily Report photo';
-    image.loading = 'lazy';
-    image.src = `/monthly/photos/${encodeURIComponent(monthlyDraftId)}/${encodeURIComponent(photo.asset_id || '')}`;
-    card.appendChild(image);
-
-    const source = document.createElement('div');
-    source.className = 'small text-muted mb-2 text-break';
-    source.textContent = `${photo.source || 'Daily Report'}${photo.page ? ` - page ${photo.page}` : ''}`;
-    card.appendChild(source);
-
-    const captionStatus = document.createElement('div');
-    captionStatus.className = photo.caption_review_required
-      ? 'small text-warning-emphasis mb-2'
-      : 'small text-success mb-2';
-    captionStatus.textContent = photo.caption_review_required
-      ? 'Area or caption may need adjustment. Editing is optional.'
-      : (photo.caption_match_confidence === 'reviewed'
-        ? 'Area and caption confirmed by reviewer.'
-        : 'Area and caption matched from the Daily Report photo card.');
-    card.appendChild(captionStatus);
-
-    const areaLabel = document.createElement('label');
-    areaLabel.className = 'form-label small mb-1';
-    areaLabel.textContent = 'Photo area';
-    const area = document.createElement('input');
-    area.id = `photo-area-${index}`;
-    areaLabel.htmlFor = area.id;
-    area.className = 'form-control form-control-sm mb-2';
-    area.maxLength = 255;
-    area.placeholder = 'Area shown in the Daily Report photo card';
-    area.value = photo.source_area || '';
-    area.addEventListener('input', () => { photo.source_area = area.value; });
-    card.append(areaLabel, area);
-
-    const caption = document.createElement('textarea');
-    caption.className = 'form-control form-control-sm mb-2';
-    caption.rows = 2;
-    caption.maxLength = 500;
-    caption.placeholder = 'Photo caption';
-    caption.value = photo.caption || '';
-    caption.setAttribute('aria-label', 'Photo caption');
-    caption.addEventListener('input', () => { photo.caption = caption.value; });
-    card.appendChild(caption);
-    const captionHelp = document.createElement('div');
-    captionHelp.className = 'small text-muted mb-2';
-    captionHelp.textContent = 'Jika caption terpotong pada PDF sumber, lengkapi di sini berdasarkan informasi yang sudah dikonfirmasi. Teks yang hilang tidak diisi otomatis.';
-    card.appendChild(captionHelp);
-
-    const actions = document.createElement('div');
-    actions.className = 'd-flex gap-1';
-    const actionSpecs = [
-      ['Move up', 'Up', () => moveMonthlyPhoto(index, -1), index === 0],
-      ['Move down', 'Down', () => moveMonthlyPhoto(index, 1), index === monthlyPhotos.length - 1],
-      ['Remove photo', 'Remove', () => removeMonthlyPhoto(index), false],
-    ];
-    actionSpecs.forEach(([label, text, handler, disabled], actionIndex) => {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = actionIndex === 2
-        ? 'btn btn-sm btn-outline-danger ms-auto'
-        : 'btn btn-sm btn-outline-secondary';
-      button.setAttribute('aria-label', label);
-      button.textContent = text;
-      button.disabled = disabled;
-      button.addEventListener('click', handler);
-      actions.appendChild(button);
-    });
-    card.appendChild(actions);
-    column.appendChild(card);
-    grid.appendChild(column);
-  });
-}
-
-function openPhotoReview() {
-  document.getElementById('photo-review-status').textContent = '';
-  renderPhotoReviewGrid();
-  bootstrap.Modal.getOrCreateInstance(document.getElementById('photo-review-modal')).show();
-}
-
-async function savePhotoReview() {
-  if (!monthlyDraftId) return;
-  const button = document.getElementById('save-photo-review-btn');
-  const status = document.getElementById('photo-review-status');
-  button.disabled = true;
-  status.textContent = 'Saving...';
-  try {
-    const response = await fetch(`/monthly/photos/${encodeURIComponent(monthlyDraftId)}`, {
-      method:'PATCH',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        photos:monthlyPhotos.map(photo => ({
-          asset_id:photo.asset_id,
-          caption:photo.caption || '',
-          source_area:photo.source_area || '',
-        })),
-      }),
-    });
-    const data = await responsePayload(response, 'Photo review could not be saved.');
-    monthlyPhotos = Array.isArray(data.photos) ? data.photos.map(photo => ({...photo})) : monthlyPhotos;
-    updatePhotoReviewCard();
-    bootstrap.Modal.getInstance(document.getElementById('photo-review-modal'))?.hide();
-  } catch (error) {
-    status.textContent = error.message || 'Photo review could not be saved.';
-  } finally {
-    button.disabled = false;
-  }
-}
-
-function validationIssueText(issue) {
-  if (typeof issue === 'string') return issue.trim();
-  if (!issue || typeof issue !== 'object') return '';
-  const prefix = [issue.filename, issue.field].filter(Boolean).join(' / ');
-  const message = issue.message || issue.code || 'Source data requires review';
-  return prefix ? `${prefix}: ${message}` : String(message);
-}
-
-function normalizeSourceValidationGroups(groups, keyPrefix) {
-  return (Array.isArray(groups) ? groups : []).map((group, index) => ({
-    ...group,
-    key:String(group.key || group.group_key || `${keyPrefix}-${index}`),
-  }));
-}
-
-function populateSourceValidationIdentity(draft) {
-  document.getElementById('review-project-title').value = draft.project_title || draft.project_name || '';
-  document.getElementById('review-project-no').value = draft.project_no || draft.vendor_project_no || '';
-  const periodStart = draft.period?.start || '';
-  const periodEnd = draft.period?.end || '';
-  document.getElementById('review-period-display').textContent = periodStart && periodEnd
-    ? `${periodStart} - ${periodEnd}`
-    : '-';
-  if (periodStart) document.getElementById('monthly-date-from').value = periodStart;
-  if (periodEnd) document.getElementById('monthly-date-to').value = periodEnd;
-}
-
-function appendSourceValidationCells(row, values) {
-  values.forEach(value => {
-    const cell = document.createElement('td');
-    cell.textContent = value;
-    row.appendChild(cell);
-  });
-}
-
-function sourceValidationSelect(className, groupKey, options) {
-  const select = document.createElement('select');
-  select.className = `form-select form-select-sm ${className}`;
-  select.dataset.groupKey = groupKey;
-  options.forEach(([value, label]) => {
-    const option = document.createElement('option');
-    option.value = value;
-    option.textContent = label;
-    select.appendChild(option);
-  });
-  select.addEventListener('change', markSourceValidationDirty);
-  return select;
-}
-
-function projectResolutionRow(group) {
-  const row = document.createElement('tr');
-  const dates = Array.isArray(group.dates) ? group.dates : [];
-  const filenames = Array.isArray(group.filenames) ? group.filenames : [];
-  const similarity = Number(group.title_similarity);
-  const matchLabel = group.matches_selected === true
-    ? 'Exact identity'
-    : (Number.isFinite(similarity) ? `${similarity.toFixed(1)}%` : 'Different');
-  const fileLabel = filenames.length ? filenames.join(', ') : `${group.file_count || 0} source(s)`;
-  appendSourceValidationCells(row, [
-    group.project_title || group.source_project_title || '(blank)',
-    group.project_no || group.source_project_no || '(blank)',
-    `${fileLabel}${dates.length ? ` / ${dates.join(', ')}` : ''}`,
-    matchLabel,
-  ]);
-  const actionCell = document.createElement('td');
-  const select = sourceValidationSelect(
-    'project-resolution-select',
-    group.key,
-    [
-      ['', 'Choose...'],
-      ['merge', 'Merge into this report'],
-      ['separate', 'Keep separate / exclude'],
-    ],
-  );
-  if (group.decision) select.value = group.decision;
-  else if (group.matches_selected === true && !group.requires_confirmation) select.value = 'merge';
-  actionCell.appendChild(select);
-  row.appendChild(actionCell);
-  return row;
-}
-
-function renderProjectResolutionGroups(validation) {
-  const body = document.getElementById('project-resolution-body');
-  body.replaceChildren();
-  monthlyProjectValidationGroups.forEach(group => body.appendChild(projectResolutionRow(group)));
-  const hasGroups = monthlyProjectValidationGroups.length > 0;
-  document.getElementById('project-resolution-panel').classList.toggle('d-none', !hasGroups);
-  document.getElementById('project-resolution-help').classList.toggle(
-    'd-none',
-    !hasGroups || (!validation.required && monthlyProjectValidationGroups.length <= 1),
-  );
-}
-
-function duplicateResolutionOptions(group) {
-  const options = [['', 'Choose Daily Report source...']];
-  (Array.isArray(group.candidates) ? group.candidates : []).forEach(candidate => {
-    const identity = [candidate.project_title, candidate.project_no].filter(Boolean).join(' / ');
-    const revision = Number(candidate.revision || 0) > 0 ? `R${candidate.revision}` : '';
-    const label = [candidate.filename || candidate.record_id || 'Daily Report', identity, revision]
-      .filter(Boolean).join(' — ');
-    options.push([String(candidate.record_id || ''), label]);
-  });
-  return options;
-}
-
-function duplicateResolutionRow(group) {
-  const row = document.createElement('tr');
-  const dateCell = document.createElement('td');
-  dateCell.textContent = group.report_date || '-';
-  const sourceCell = document.createElement('td');
-  const select = sourceValidationSelect(
-    'duplicate-resolution-select',
-    group.key,
-    duplicateResolutionOptions(group),
-  );
-  if (group.selected_record_id) select.value = String(group.selected_record_id);
-  sourceCell.appendChild(select);
-  row.append(dateCell, sourceCell);
-  return row;
-}
-
-function renderDuplicateResolutionGroups() {
-  const body = document.getElementById('duplicate-resolution-body');
-  body.replaceChildren();
-  monthlyDuplicateValidationGroups.forEach(group => body.appendChild(duplicateResolutionRow(group)));
-  const hasDuplicates = monthlyDuplicateValidationGroups.length > 0;
-  document.getElementById('duplicate-resolution-panel').classList.toggle('d-none', !hasDuplicates);
-  document.getElementById('duplicate-resolution-help').classList.toggle('d-none', !hasDuplicates);
-}
-
-function renderSourceValidationIssues(validation, draft) {
-  const issues = [
-    ...(Array.isArray(validation.issues) ? validation.issues : []),
-    ...(Array.isArray(draft.warnings) ? draft.warnings : []),
-  ];
-  const issueBox = document.getElementById('source-validation-issues');
-  renderGroupedWarnings(issueBox, issues, draft.source_manifest || []);
-}
-
-function populateSourceValidation(draft) {
-  const validation = draft.source_validation || draft.validation || {};
-  monthlySourceValidationApplied = validation.applied === true;
-  monthlyProjectValidationGroups = normalizeSourceValidationGroups(
-    validation.project_groups,
-    'project',
-  );
-  monthlyDuplicateValidationGroups = normalizeSourceValidationGroups(
-    validation.duplicate_groups,
-    'duplicate',
-  );
-  populateSourceValidationIdentity(draft);
-  renderProjectResolutionGroups(validation);
-  renderDuplicateResolutionGroups();
-  renderSourceValidationIssues(validation, draft);
-  document.getElementById('review-validation-notes').value = validation.notes || '';
-  document.getElementById('review-confirm-validation').checked = validation.confirmed === true;
-  updateValidationStatus();
-}
-
-function collectProjectResolutions() {
-  return Array.from(document.querySelectorAll('.project-resolution-select')).map(select => ({
-    group_key:select.dataset.groupKey,
-    decision:select.value,
-  }));
-}
-
-function collectDuplicateResolutions() {
-  return Array.from(document.querySelectorAll('.duplicate-resolution-select')).map(select => ({
-    group_key:select.dataset.groupKey,
-    selected_record_id:select.value,
-  }));
-}
-
-function updateValidationStatus() {
-  const badge = document.getElementById('validation-status-badge');
-  const unresolvedProjects = collectProjectResolutions().some(item => !item.decision);
-  const unresolvedDuplicates = collectDuplicateResolutions().some(item => !item.selected_record_id);
-  const unresolved = unresolvedProjects || unresolvedDuplicates;
-  const confirmed = document.getElementById('review-confirm-validation').checked;
-  const readyToApply = !unresolved && confirmed;
-  const ready = readyToApply && monthlySourceValidationApplied;
-  badge.className = `badge ${ready ? 'text-bg-success' : 'text-bg-warning'}`;
-  badge.textContent = ready
-    ? 'Validated'
-    : (unresolved ? 'Source decision required' : (!confirmed ? 'Confirmation required' : 'Ready to apply'));
-}
-
-function markSourceValidationDirty() {
-  monthlySourceValidationApplied = false;
-  updatePhotoReviewCard();
-  updateValidationStatus();
-}
-
-function validateSourceReview({forFinal=false}={}) {
-  if (!forFinal) return;
-  const projectTitle = document.getElementById('review-project-title').value.trim();
-  const projectNo = document.getElementById('review-project-no').value.trim();
-  if (!projectTitle || !projectNo) {
-    throw new Error('Complete the Report Project Title and Project No. before Final issue.');
-  }
-}
-
-function sourceValidationPayload() {
-  return {
-    confirmed:document.getElementById('review-confirm-validation').checked,
-    project_title:document.getElementById('review-project-title').value.trim(),
-    project_no:document.getElementById('review-project-no').value.trim(),
-    notes:document.getElementById('review-validation-notes').value.trim(),
-    project_resolutions:collectProjectResolutions(),
-    duplicate_resolutions:collectDuplicateResolutions(),
-  };
-}
-
-async function applySourceValidation() {
-  if (!monthlyDraftId) {
-    showMonthlyAlert(`Compile a ${reportType} draft first.`, 'warning');
-    return;
-  }
-  const payload = sourceValidationPayload();
-  if (!payload.project_title || !payload.project_no) {
-    showMonthlyAlert('Complete the Report Project Title and Project No. before applying validation.', 'warning');
-    return;
-  }
-  if (payload.project_resolutions.some(item => !item.decision)) {
-    showMonthlyAlert('Choose Merge or Keep separate for every detected project identity.', 'warning');
-    return;
-  }
-  if (payload.duplicate_resolutions.some(item => !item.selected_record_id)) {
-    showMonthlyAlert('Choose which Daily Report to use for every duplicate date.', 'warning');
-    return;
-  }
-  if (!payload.confirmed) {
-    showMonthlyAlert('Confirm Source Data Validation before applying it.', 'warning');
-    return;
-  }
-  setLoading('apply-source-validation-btn', true, 'Applying...');
-  try {
-    const response = await fetch(`/monthly/validate/${encodeURIComponent(monthlyDraftId)}`, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({source_validation:payload}),
-    });
-    const data = await responsePayload(response, 'Source validation could not be applied.');
-    if (!data.ok) throw new Error(data.error || 'Source validation could not be applied.');
-    applyCompiledMonthlyDraft(data, {scrollToReview:false});
-    showMonthlyAlert('Source validation applied. Review the refreshed totals before Preview or Generate.', 'success');
-  } catch (err) {
-    showMonthlyAlert(err.message || 'Source validation could not be applied.');
-  } finally {
-    setLoading('apply-source-validation-btn', false);
-  }
 }
 
 function populateSourceManifest(rows) {
@@ -3375,13 +764,6 @@ function numberOrZero(id) {
   return Number.isFinite(value) ? value : 0;
 }
 
-function numberOrNull(id) {
-  const raw = document.getElementById(id).value.trim();
-  if (!raw) return null;
-  const value = Number(raw);
-  return Number.isFinite(value) ? value : null;
-}
-
 function collectMonthlyReview() {
   const progress = Array.from(document.querySelectorAll('#review-progress-table tbody tr')).map(tr => {
     const values = Array.from(tr.querySelectorAll('input')).map(input => input.value.trim());
@@ -3397,19 +779,14 @@ function collectMonthlyReview() {
   });
   return {
     report_type:reportType,
-    ...(['weekly', 'monthly'].includes(reportType) ? {s_curve_selection: {
-      enabled: document.getElementById('include-history-scurve').checked,
-      report_ids: Array.from(document.querySelectorAll('#scurve-source-rows input:checked')).map(input => input.value),
-    }} : {}),
     report_mode:document.getElementById('monthly-report-mode').value,
     confirm_final:document.getElementById('review-confirm-final').checked,
-    source_validation:sourceValidationPayload(),
     executive_summary:document.getElementById('review-executive-summary').value.trim(),
     progress:{rows:progress},
     safety:{
-      total_manpower:numberOrNull('review-total-manpower'), total_man_hours:numberOrNull('review-man-hours'),
-      recordable_cases:numberOrNull('review-recordable'), lost_workdays:numberOrNull('review-lost-days'),
-      lost_time_injuries:numberOrNull('review-lti'),
+      total_manpower:numberOrZero('review-total-manpower'), total_man_hours:numberOrZero('review-man-hours'),
+      recordable_cases:numberOrZero('review-recordable'), lost_workdays:numberOrZero('review-lost-days'),
+      lost_time_injuries:numberOrZero('review-lti'),
     },
     engineering:{summary:document.getElementById('review-engineering').value.trim()},
     procurement:{summary:document.getElementById('review-procurement').value.trim()},
@@ -3417,99 +794,12 @@ function collectMonthlyReview() {
   };
 }
 
-function setFinalGenerateStatus(message='', type='secondary') {
-  const badge = document.getElementById('final-generate-status');
-  if (!badge) return;
-  badge.textContent = message;
-  badge.className = `badge text-bg-${type}${message ? '' : ' d-none'}`;
-}
-
-function addMonthlyReportToHistory(report, downloadUrl='') {
-  if (!report?.filename) return;
-  const list = document.getElementById('monthly-report-list');
-  if (!list) return;
-  document.getElementById('monthly-empty')?.remove();
-  Array.from(list.querySelectorAll('.monthly-report-card')).forEach(card => {
-    if (card.dataset.filename === report.filename) card.remove();
-  });
-
-  const kind = String(report.report_type || reportType || 'monthly').toLowerCase() === 'weekly'
-    ? 'weekly' : 'monthly';
-  const card = document.createElement('div');
-  card.className = 'report-card monthly-report-card';
-  card.dataset.filename = report.filename;
-
-  const icon = document.createElement('div');
-  icon.className = 'report-type-icon';
-  icon.setAttribute('aria-hidden', 'true');
-  icon.textContent = kind === 'weekly' ? 'W' : 'M';
-
-  const meta = document.createElement('div');
-  meta.className = 'report-meta';
-  const filename = document.createElement('div');
-  filename.className = 'fname';
-  filename.textContent = report.filename;
-  const info = document.createElement('div');
-  info.className = 'info';
-  const typeBadge = document.createElement('span');
-  typeBadge.className = `badge-status badge-report-type ${kind}`;
-  typeBadge.textContent = kind.toUpperCase();
-  const statusBadge = document.createElement('span');
-  statusBadge.className = 'badge-status';
-  statusBadge.textContent = String(report.status || 'draft').toUpperCase();
-  info.append(typeBadge, document.createTextNode('  '), statusBadge);
-  const details = [
-    [report.period_start, report.period_end].filter(Boolean).join(' → '),
-    report.project_no || '',
-    `Generated ${report.generated_at || 'just now'}`,
-    report.size_kb !== undefined && report.size_kb !== null ? `${report.size_kb} KB` : '',
-  ].filter(Boolean);
-  if (details.length) info.appendChild(document.createTextNode(`  ${details.join(' · ')}`));
-  meta.append(filename, info);
-
-  const actions = document.createElement('div');
-  actions.className = 'd-flex gap-2 flex-shrink-0';
-  const download = document.createElement('a');
-  download.className = 'btn btn-sm btn-outline-primary';
-  download.href = downloadUrl || `/monthly/download/${encodeURIComponent(report.filename)}`;
-  download.textContent = 'Download';
-  const remove = document.createElement('button');
-  remove.type = 'button';
-  remove.className = 'btn btn-sm btn-outline-danger';
-  remove.textContent = 'Delete';
-  remove.addEventListener('click', () => deleteMonthlyReport(report.filename, remove));
-  actions.append(download, remove);
-  card.append(icon, meta, actions);
-  list.prepend(card);
-  updateMonthlyCount();
-}
-
-function requireTimesheetDecision() {
-  const state = monthlyWorkforce.timesheet || {};
-  const mode = document.getElementById('timesheet-source-mode').value;
-  const appliedMode = state.source_mode || (state.status === 'kept' ? 'daily_only' : 'combined');
-  if (state.status !== 'preview' && (!state.preview || mode === appliedMode)) return true;
-  const message = 'Source selection not applied. Review the selected manpower source and click Apply Source before generating the PDF.';
-  showMonthlyAlert(message, 'warning');
-  setFinalGenerateStatus('Choose timesheet source', 'warning');
-  const notice = document.getElementById('timesheet-pending-notice');
-  notice.classList.remove('d-none');
-  notice.scrollIntoView({behavior:'smooth', block:'center'});
-  notice.focus({preventScroll:true});
-  return false;
-}
-
 async function postMonthlyPdf(endpoint, save) {
   if (!monthlyDraftId) { showMonthlyAlert(`Compile a ${reportType} draft first.`, 'warning'); return; }
-  if (save && !requireTimesheetDecision()) return;
   const typeName = reportType === 'weekly' ? 'Weekly' : 'Monthly';
-  const finalRequested = save && document.getElementById('monthly-report-mode').value === 'final';
-  try { validateSourceReview({forFinal:finalRequested}); }
-  catch (err) { showMonthlyAlert(err.message, 'warning'); return; }
   const previewWindow = save ? null : window.open('about:blank', '_blank');
   if (previewWindow) previewWindow.document.title = `Preparing ${typeName} Report Preview...`;
   const btnId = save ? 'generate-monthly-btn' : 'preview-monthly-btn';
-  setFinalGenerateStatus(save ? 'Generating PDF...' : 'Preparing preview...', 'warning');
   setLoading(btnId, true, save ? 'Generating...' : 'Preparing preview...');
   try {
     const response = await fetch(`${endpoint}/${encodeURIComponent(monthlyDraftId)}`, {
@@ -3522,31 +812,17 @@ async function postMonthlyPdf(endpoint, save) {
     }
     if (save) {
       const data = await response.json();
-      addMonthlyReportToHistory(data.report || {
-        filename:data.filename,
-        report_type:reportType,
-        status:document.getElementById('monthly-report-mode').value,
-        project_no:document.getElementById('review-project-no').value.trim(),
-        period_start:document.getElementById('monthly-date-from').value,
-        period_end:document.getElementById('monthly-date-to').value,
-      }, data.download_url);
-      setFinalGenerateStatus('PDF saved', 'success');
-      showMonthlyAlert(`${typeName} Report generated and saved successfully.`, 'success', {
-        actionLabel:'Download PDF', actionUrl:data.download_url, download:true,
-      });
-      reloadAfterSavedReport(data);
+      showMonthlyAlert(`${typeName} Report generated and saved successfully.`, 'success');
+      setTimeout(() => window.location.reload(), 800);
     } else {
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       if (previewWindow) previewWindow.location.href = url;
       else window.open(url, '_blank');
       setTimeout(() => URL.revokeObjectURL(url), 60000);
-      setFinalGenerateStatus('Preview ready', 'success');
-      showMonthlyAlert(`${typeName} PDF preview opened in a new tab.`, 'success');
     }
   } catch (err) {
     if (previewWindow) previewWindow.close();
-    setFinalGenerateStatus('Review required', 'danger');
     showMonthlyAlert(err.message);
   } finally {
     setLoading(btnId, false);
@@ -3556,149 +832,18 @@ async function postMonthlyPdf(endpoint, save) {
 function previewMonthly() { return postMonthlyPdf('/monthly/preview', false); }
 function generateMonthly() { return postMonthlyPdf('/monthly/generate', true); }
 
-function reloadAfterSavedReport(data) {
-  // Keep only the success notice across refresh; the next form starts clean.
-  try {
-    sessionStorage.setItem('periodic-report-saved', JSON.stringify({
-      reportType,
-      filename:data.filename || data.report?.filename || '',
-    }));
-  } catch (_) { /* Refresh still works if browser storage is unavailable. */ }
-  history.replaceState(null, '', '#monthly');
-  window.location.reload();
+function deleteReport(filename, btn) {
+  if (!confirm(`Delete "${filename}"? This cannot be undone.`)) return;
+  fetch('/reports/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({filename})})
+    .then(r => r.json()).then(d => { if (d.ok) { btn.closest('.report-card').remove(); updateCount(); } })
+    .catch(err => alert('Delete failed: ' + err.message));
 }
-
-function restoreSavedReportNotice() {
-  let saved;
-  try {
-    const raw = sessionStorage.getItem('periodic-report-saved');
-    sessionStorage.removeItem('periodic-report-saved');
-    saved = raw ? JSON.parse(raw) : null;
-  } catch (_) { return; }
-  if (!saved || !['weekly', 'monthly'].includes(saved.reportType)) return;
-  setReportType(saved.reportType);
-  const options = typeof saved.filename === 'string' && saved.filename
-    ? {actionLabel:'Download PDF', actionUrl:`/monthly/download/${encodeURIComponent(saved.filename)}`, download:true}
-    : {};
-  showMonthlyAlert('PDF saved successfully. You can create a new report.', 'success', options);
-}
-
-async function uploadDailyReportToDrive(
-  filename,
-  archiveId,
-  reportId,
-  button,
-  categoryOverride=''
-) {
-  const original = button.innerHTML;
-  button.disabled = true;
-  button.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Uploading...';
-  try {
-    const response = await fetch('/reports/drive-upload', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        filename,
-        archive_id:archiveId || '',
-        report_id:reportId || '',
-        category_override:categoryOverride || '',
-      }),
-    });
-    let payload = {};
-    try { payload = await response.json(); } catch (_) {}
-    if (!response.ok) {
-      const error = new Error(payload.error || `Drive upload failed (${response.status}).`);
-      error.code = payload.code || 'drive_upload_failed';
-      throw error;
-    }
-    button.innerHTML = '☁ Open Drive';
-    button.onclick = () => window.open(payload.web_view_link, '_blank', 'noopener');
-    button.disabled = false;
-  } catch (error) {
-    button.disabled = false;
-    button.innerHTML = original;
-    if (error.code === 'project_needs_review' && !categoryOverride) {
-      const choice = window.prompt(
-        'Project belum dapat dipetakan otomatis. Pilih folder Drive:\n' +
-        '1 = Electrical\n2 = Control Valve\n3 = Turbine & Generator'
-      );
-      const categories = {
-        '1':'electrical',
-        '2':'control_valve',
-        '3':'turbine_generator',
-      };
-      if (categories[choice]) {
-        return uploadDailyReportToDrive(
-          filename,
-          archiveId,
-          reportId,
-          button,
-          categories[choice]
-        );
-      }
-    }
-    alert('Google Drive upload failed: ' + error.message);
-  }
-}
-
-function deleteReport(filename, archiveId, reportId, btn) {
-  openReportDelete({
-    filename, button:btn, kind:'daily', endpoint:'/reports/delete',
-    payload:{filename, archive_id:archiveId || '', report_id:reportId || ''},
-  });
-}
-
-let pendingPeriodicDelete = null;
-let periodicDeleteBusy = false;
 
 function deleteMonthlyReport(filename, btn) {
-  openReportDelete({
-    filename, button:btn, kind:'periodic', endpoint:'/monthly/delete', payload:{filename},
-  });
-}
-
-function openReportDelete(target) {
-  if (periodicDeleteBusy || pendingPeriodicDelete) return;
-  pendingPeriodicDelete = target;
-  document.getElementById('delete-periodic-filename').textContent = target.filename;
-  document.getElementById('delete-periodic-error').classList.add('d-none');
-  bootstrap.Modal.getOrCreateInstance(document.getElementById('delete-periodic-modal')).show();
-}
-
-async function confirmDeleteReport() {
-  if (!pendingPeriodicDelete || periodicDeleteBusy) return;
-  const target = pendingPeriodicDelete;
-  periodicDeleteBusy = true;
-  const modal = document.getElementById('delete-periodic-modal');
-  const confirmButton = document.getElementById('delete-periodic-confirm');
-  const controls = ['delete-periodic-confirm', 'delete-periodic-cancel', 'delete-periodic-close'];
-  controls.forEach(id => { document.getElementById(id).disabled = true; });
-  confirmButton.textContent = 'Deleting…';
-  modal.setAttribute('aria-busy', 'true');
-  document.getElementById('delete-periodic-error').classList.add('d-none');
-  let deleted = false;
-  try {
-    const response = await fetch(target.endpoint, {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(target.payload),
-    });
-    const result = await responsePayload(response, 'Unable to delete the report. Please try again.');
-    if (!result.ok) throw new Error(result.error || 'Unable to delete the report. Please try again.');
-    target.button.closest('.report-card').remove();
-    if (target.kind === 'daily') updateCount();
-    else updateMonthlyCount();
-    deleted = true;
-  } catch (error) {
-    const message = document.getElementById('delete-periodic-error');
-    message.textContent = error.message || 'Unable to delete the report. Please try again.';
-    message.classList.remove('d-none');
-  } finally {
-    periodicDeleteBusy = false;
-    controls.forEach(id => { document.getElementById(id).disabled = false; });
-    confirmButton.textContent = 'Delete';
-    modal.removeAttribute('aria-busy');
-  }
-  if (deleted) bootstrap.Modal.getInstance(modal).hide();
+  if (!confirm(`Delete "${filename}"? This cannot be undone.`)) return;
+  fetch('/monthly/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({filename})})
+    .then(r => r.json()).then(d => { if (d.ok) { btn.closest('.report-card').remove(); updateMonthlyCount(); } })
+    .catch(err => alert('Delete failed: ' + err.message));
 }
 
 function filterReports() {
@@ -3719,69 +864,21 @@ function updateMonthlyCount() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  const timesheetCutoff = document.getElementById('timesheet-cutoff');
-  timesheetCutoff.addEventListener('change', () => {
-    timesheetCutoff.dataset.manual = timesheetCutoff.value ? 'true' : '';
-    if (!timesheetCutoff.value) timesheetCutoff.value = timesheetCutoff.dataset.reportEnd || '';
-  });
-  document.getElementById('timesheet-files').addEventListener('change', () => {
-    if (!timesheetCutoff.dataset.manual) timesheetCutoff.value = timesheetCutoff.dataset.reportEnd || '';
-  });
-  const deleteModal = document.getElementById('delete-periodic-modal');
-  deleteModal.addEventListener('shown.bs.modal', () => {
-    document.getElementById('delete-periodic-cancel').focus();
-  });
-  deleteModal.addEventListener('hide.bs.modal', event => {
-    if (periodicDeleteBusy) event.preventDefault();
-  });
-  deleteModal.addEventListener('hidden.bs.modal', () => {
-    const trigger = pendingPeriodicDelete?.button;
-    const tabId = pendingPeriodicDelete?.kind === 'daily' ? 'daily-tab' : 'monthly-tab';
-    pendingPeriodicDelete = null;
-    if (trigger?.isConnected) trigger.focus({preventScroll:true});
-    else document.getElementById(tabId).focus({preventScroll:true});
-  });
-  document.querySelectorAll('[data-bs-toggle="tab"]').forEach(tab => {
-    tab.addEventListener('shown.bs.tab', event => {
-      const activeHash = event.target.id === 'monthly-tab' ? '#monthly' : '#daily';
-      if (location.hash !== activeHash) history.replaceState(null, '', activeHash);
-    });
-  });
-  rememberedUploadSessions().forEach(uploadSessionId => requestUploadSessionCleanup(uploadSessionId));
   setReportType('monthly');
   document.getElementById('monthly-report-mode').addEventListener('change', handleReportModeChange);
   document.getElementById('monthly-date-from').addEventListener('change', () => {
-    if (monthlySource === 'uploaded_excel') alignLegacyExcelPeriod();
-    else if (reportType === 'weekly') alignWeeklyPeriod();
+    if (reportType === 'weekly') alignWeeklyPeriod();
     invalidateCompiledDraft();
-    discardMonthlyUploadSession({keepQueue:true});
   });
   document.getElementById('monthly-date-to').addEventListener('change', () => {
     updatePeriodLimits();
-    if (monthlySource === 'uploaded_excel') renderLegacyExcelDateSelection();
     invalidateCompiledDraft();
-    discardMonthlyUploadSession({keepQueue:true});
   });
-  document.getElementById('monthly-project').addEventListener('change', () => {
-    invalidateCompiledDraft();
-    discardMonthlyUploadSession({keepQueue:true});
-  });
-  document.getElementById('monthly-pdf-files').addEventListener('change', event => {
-    invalidateCompiledDraft();
-    setMonthlyUploadFiles(event.target.files);
-  });
-  document.getElementById('monthly-excel-file').addEventListener('change', event => {
-    invalidateCompiledDraft();
-    analyzeLegacyExcelFile(event.target.files?.[0]);
-  });
-  document.getElementById('review-confirm-validation').addEventListener('change', markSourceValidationDirty);
-  ['review-project-title', 'review-project-no', 'review-validation-notes'].forEach(id => {
-    document.getElementById(id).addEventListener('input', markSourceValidationDirty);
-  });
+  document.getElementById('monthly-project').addEventListener('change', () => invalidateCompiledDraft());
+  document.getElementById('monthly-pdf-files').addEventListener('change', () => invalidateCompiledDraft());
   document.getElementById('monthly-all-users')?.addEventListener('change', () => invalidateCompiledDraft());
   toggleFinalConfirmation();
   if (location.hash === '#monthly') new bootstrap.Tab(document.getElementById('monthly-tab')).show();
-  restoreSavedReportNotice();
 });
 </script>
 </body>

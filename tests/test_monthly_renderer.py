@@ -18,30 +18,16 @@ def _pdf_text(pdf_bytes: bytes) -> str:
     return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
-def _outline_destinations(reader: PdfReader, nodes=None):
-    result = []
-    for node in reader.outline if nodes is None else nodes:
-        if isinstance(node, list):
-            result.extend(_outline_destinations(reader, node))
-        else:
-            result.append((node.title, reader.get_destination_page_number(node)))
-    return result
-
-
 class MonthlyReportRendererTests(unittest.TestCase):
-    def test_minimal_report_hides_every_empty_chapter(self):
+    def test_minimal_report_returns_rewound_seven_page_pdf(self):
         result = render_monthly_report({})
 
         self.assertIsInstance(result, io.BytesIO)
         self.assertEqual(result.tell(), 0)
         self.assertTrue(result.getvalue().startswith(b"%PDF-"))
-        # Only the cover and TOC remain when every report chapter is empty.
-        self.assertEqual(_page_count(result.getvalue()), 2)
-        text = _pdf_text(result.getvalue())
-        self.assertNotIn("Executive Summary", text)
-        self.assertNotIn("Engineering", text)
-        self.assertNotIn("Procurement", text)
-        self.assertNotIn("Appendices", text)
+        # Cover, TOC, executive/safety, engineering, procurement, site,
+        # appendices.  The blank eighth source-template page is not emitted.
+        self.assertEqual(_page_count(result.getvalue()), 7)
 
     def test_review_schema_progress_adds_generated_s_curve_page(self):
         report = {
@@ -91,12 +77,8 @@ class MonthlyReportRendererTests(unittest.TestCase):
 
         result = render_monthly_report(report)
 
-        self.assertEqual(_page_count(result.getvalue()), 7)
+        self.assertEqual(_page_count(result.getvalue()), 8)
         self.assertEqual(result.tell(), 0)
-        reader = PdfReader(io.BytesIO(result.getvalue()))
-        appendix_page = reader.pages[-1].extract_text() or ""
-        self.assertIn("6. Appendices", appendix_page)
-        self.assertIn("Appendix 6.1 - Progress S-Curve", appendix_page)
 
     def test_internal_line_breaks_and_safety_bullets_do_not_render_as_markup(self):
         result = render_monthly_report({
@@ -119,7 +101,7 @@ class MonthlyReportRendererTests(unittest.TestCase):
         self.assertNotIn("&# 82", text)
         self.assertIn("To-date Plan", text)
         self.assertIn("Total Manpower", text)
-        self.assertNotIn("Procurement Status", text)
+        self.assertIn("Supplier/Vendor/", text)
 
     def test_s_curve_can_be_disabled(self):
         report = {
@@ -139,114 +121,7 @@ class MonthlyReportRendererTests(unittest.TestCase):
 
         result = render_monthly_report(report)
 
-        self.assertEqual(_page_count(result.getvalue()), 3)
-
-    def test_nonempty_chapters_and_subchapters_are_renumbered_without_gaps(self):
-        result = render_monthly_report({
-            "engineering": {"summary": "Issued drawing review completed."},
-            "equipment_delivery": {"rows": [{
-                "equipment": "Governor valve",
-                "supplier": "Vendor A",
-                "status": "Delivered",
-            }]},
-            "site": {"next_month_activities": ["Continue installation"]},
-            "appendices": [{
-                "number": "6.8",
-                "title": "QC Document",
-                "status": "Attached",
-                "content": ["Inspection record attached"],
-            }],
-        })
-
-        text = _pdf_text(result.getvalue())
-        self.assertIn("1. Engineering", text)
-        self.assertIn("1.1 Status Engineering", text)
-        self.assertIn("2. Procurement", text)
-        self.assertIn("2.1 Equipment Delivery Status", text)
-        self.assertNotIn("Procurement Status", text)
-        self.assertNotIn("Shipment Status", text)
-        self.assertIn("3. Site Services / Construction", text)
-        self.assertIn("3.1 Planned Activities Next Month", text)
-        self.assertNotIn("This Month Activities", text)
-        self.assertNotIn("Project Schedule Status", text)
-        self.assertIn("4. Appendices", text)
-        self.assertIn("Appendix 4.1 - QC Document", text)
-        self.assertNotIn("Executive Summary", text)
-        self.assertNotIn("Safety Status", text)
-
-    def test_empty_concern_is_hidden_and_findings_receive_the_next_number(self):
-        base = {
-            "report_type": "weekly",
-            "progress": {"rows": [{
-                "description": "Total Overall",
-                "previous": 10,
-                "this_week": 2,
-                "to_date": 12,
-                "plan": 13,
-                "is_total": True,
-            }]},
-            "safety": {"total_manpower": 12},
-            "site": {
-                "schedule_status": "On track",
-                "this_week_activities": ["Alignment"],
-                "next_week_activities": ["Continue alignment"],
-                "constraint_reporting": {
-                    "not_supplied_dates": ["2026-01-01"],
-                },
-                "concerns": [{"concern": "No constraint", "corrective_action": ""}],
-                "key_findings": [{
-                    "date": "2026-01-01",
-                    "area": "Generator 2",
-                    "text": "Waiting for coordination",
-                    "occurrence_count": 31,
-                }],
-            },
-        }
-
-        text = _pdf_text(render_monthly_report(base).getvalue())
-
-        self.assertNotIn("Area of Concern and Suggested Corrective Action", text)
-        self.assertNotIn("Concern and closeout information was not supplied", text)
-        self.assertIn("3.4 Key Remarks / Findings", text)
-        self.assertIn("31 occurrences", text)
-
-        with_concern = dict(base)
-        with_concern["site"] = dict(base["site"])
-        with_concern["site"]["concerns"] = [{
-            "concern": "Oil flushing coordination is pending",
-            "corrective_action": "Coordinate flushing schedule",
-        }]
-        text = _pdf_text(render_monthly_report(with_concern).getvalue())
-        self.assertIn("3.4 Area of Concern and Suggested Corrective Action", text)
-        self.assertIn("3.5 Key Remarks / Findings", text)
-
-    def test_outline_destinations_resolve_to_each_heading_page(self):
-        report = {
-            "report_type": "weekly",
-            "progress": {"rows": [{
-                "description": "Total Overall",
-                "previous": 10,
-                "this_week": 2,
-                "to_date": 12,
-                "plan": 13,
-                "is_total": True,
-            }]},
-            "site": {
-                "schedule_status": "On track",
-                "this_week_activities": ["Alignment"],
-                "next_week_activities": ["Continue alignment"],
-                "key_findings": [{"text": "Waiting for coordination"}],
-            },
-        }
-
-        reader = PdfReader(io.BytesIO(render_monthly_report(report).getvalue()))
-        destinations = _outline_destinations(reader)
-
-        self.assertGreater(len(destinations), 4)
-        self.assertGreater(len({page for _, page in destinations}), 1)
-        for title, page_index in destinations:
-            with self.subTest(title=title):
-                self.assertIn(title, reader.pages[page_index].extract_text() or "")
+        self.assertEqual(_page_count(result.getvalue()), 7)
 
     def test_long_runtime_text_and_tables_split_without_layout_error(self):
         long_text = "Wrapped runtime text with XML chars & < > " * 350
@@ -315,7 +190,7 @@ class MonthlyReportRendererTests(unittest.TestCase):
         self.assertTrue(result.getvalue().startswith(b"%PDF-"))
         self.assertGreater(fallback.call_count, 0)
 
-    def test_progress_normalization_does_not_invent_missing_source_fields(self):
+    def test_progress_normalization_calculates_missing_fields(self):
         rows = renderer._normalise_progress({
             "rows": [
                 {
@@ -327,8 +202,8 @@ class MonthlyReportRendererTests(unittest.TestCase):
             ]
         })
 
-        self.assertIsNone(rows[0]["to_date"])
-        self.assertIsNone(rows[0]["variance"])
+        self.assertEqual(rows[0]["to_date"], 45.0)
+        self.assertEqual(rows[0]["variance"], -1.0)
 
     def test_status_is_safe_and_explicit(self):
         self.assertEqual(renderer._normalise_status("month-to-date"), "MTD")

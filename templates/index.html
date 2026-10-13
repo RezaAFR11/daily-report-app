@@ -17,16 +17,15 @@
     body { background: #f0f4f8; font-size: 0.9rem; }
     .app-navbar { background: var(--navbar-bg) !important; padding: 8px 16px; position: sticky; top:0; z-index:900;
                   box-shadow: 0 2px 8px rgba(0,0,0,.25); display:flex; flex-direction:column;
-                  align-items:stretch; gap:6px; }
-    .app-navbar-header { display:flex; align-items:center; justify-content:space-between; gap:12px; min-width:0; }
-    .app-navbar-title { flex:1 1 auto; min-width:0; font-size:.92rem; }
-    .app-navbar-account { display:flex; align-items:center; justify-content:flex-end; gap:8px;
-                          flex:0 1 auto; min-width:0; max-width:50%; }
-    .app-navbar-username { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.78rem; }
-    .app-navbar-account .btn { flex:0 0 auto; white-space:nowrap; }
+                  align-items:stretch; gap:6px; overflow:hidden; }
+    .app-navbar-title { flex:0 0 auto; }
     .app-navbar-actions { display:flex; align-items:center; gap:4px; width:100%; min-width:0;
-                          flex-wrap:wrap; padding-bottom:2px; }
-    .app-navbar-actions .btn { white-space:nowrap; flex:1 0 auto; }
+                          flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden; padding-bottom:2px;
+                          scrollbar-width:thin; scrollbar-color:rgba(255,255,255,.45) transparent; }
+    .app-navbar-actions::-webkit-scrollbar { height:5px; }
+    .app-navbar-actions::-webkit-scrollbar-thumb { background:rgba(255,255,255,.45); border-radius:10px; }
+    .app-navbar-actions::-webkit-scrollbar-track { background:transparent; }
+    .app-navbar-actions .btn { white-space:nowrap; }
     .section-hdr { background: var(--primary); color: white; font-weight: 600; font-size: 0.85rem; padding: 8px 14px; }
     /* PDF section order is arranged in a dedicated pre-preview dialog. */
     #pdfSectionOrderList { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:7px; }
@@ -86,6 +85,7 @@
     .sig-prev.show { display: block; }
     .sig-ph { font-size: .72rem; color: #bbb; text-align: center; padding: 8px; pointer-events: none; }
     /* Sign-off column card */
+    .area-section-hdr { background: var(--light-bg); border-radius: 4px; padding: 5px 8px; margin-bottom: 8px; }
     .so-col-card { border: 1px solid #d0d8e4; border-radius: 6px; padding: 10px;
                    background: #fff; position: relative; }
     .so-col-card:hover { border-color: var(--primary); }
@@ -143,7 +143,7 @@
     #previewModal .modal-dialog { max-width: 860px; }
     #previewFrame { width: 100%; height: 72vh; border: none; }
     /* Navbar btn group */
-    .nav-group { display:flex; gap:4px; align-items:center; flex:1 1 auto; min-width:0; max-width:100%; flex-wrap:wrap; }
+    .nav-group { display:flex; gap:4px; align-items:center; flex:0 0 auto; white-space:nowrap; }
     .nav-divider { width:1px; height:24px; background:rgba(255,255,255,.3); margin:0 4px; flex:0 0 1px; }
     @media (max-width: 768px) {
       .app-navbar .btn { font-size: .72rem; padding: 3px 7px; }
@@ -191,22 +191,16 @@
 
 <!-- ═══ NAVBAR ═══ -->
 <nav class="app-navbar">
-  <div class="app-navbar-header">
-    <span class="app-navbar-title text-white fw-bold">📋 Daily Report — PT. GPA</span>
-    <div class="app-navbar-account">
-      <span class="app-navbar-username text-white opacity-75" title="{{ username }}">{{ username }}</span>
-      <a href="/logout" class="btn btn-sm btn-outline-danger">Logout</a>
-    </div>
-  </div>
-  <div class="app-navbar-actions" aria-label="Daily Report menu">
+  <span class="app-navbar-title text-white fw-bold" style="font-size:.92rem;white-space:nowrap;">📋 Daily Report — PT. GPA</span>
+  <div class="app-navbar-actions" tabindex="0" aria-label="Daily Report menu; scroll horizontally when needed">
     <!-- Draft controls -->
     <div class="nav-group">
       <button class="btn btn-sm btn-outline-light" onclick="saveDraft()" title="Auto-saves every 60s">💾 Save</button>
       <button class="btn btn-sm btn-outline-light" onclick="loadDraftFromServer()" title="Load last saved draft">📂 Load</button>
       <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#versionsModal" title="Restore a previous draft snapshot">🕐 Versions</button>
-      <button class="btn btn-sm btn-outline-light" onclick="exportDraft()" title="Download a portable ZIP containing the draft, photos, and signatures">⬇ Export</button>
-      <label class="btn btn-sm btn-outline-light mb-0" title="Import a GPA draft ZIP or legacy JSON file">
-        ⬆ Import<input type="file" id="importFileInput" accept=".zip,.json,application/zip,application/json" style="display:none" onchange="importDraft(this)">
+      <button class="btn btn-sm btn-outline-light" onclick="exportDraft()" title="Download draft as JSON">⬇ Export</button>
+      <label class="btn btn-sm btn-outline-light mb-0" title="Import draft from JSON file">
+        ⬆ Import<input type="file" id="importFileInput" accept=".json" style="display:none" onchange="importDraft(this)">
       </label>
       <button class="btn btn-sm btn-outline-light text-warning" onclick="clearFormConfirm()" title="Clear entire form">🗑 Clear</button>
     </div>
@@ -215,7 +209,7 @@
     <div class="nav-group">
       <button class="btn btn-sm btn-outline-info" onclick="previewPDF()" title="Preview PDF in browser">👁 Preview</button>
       <button class="btn btn-sm btn-outline-warning" data-bs-toggle="modal" data-bs-target="#settingsModal">⚙️ Settings</button>
-      <button class="btn btn-sm fw-bold text-white" style="background:var(--accent);border-color:var(--accent);" onclick="generatePDF()">📄 {% if google_drive_configured %}Generate PDF + Drive{% else %}Generate PDF{% endif %}</button>
+      <button class="btn btn-sm fw-bold text-white" style="background:var(--accent);border-color:var(--accent);" onclick="generatePDF()">📄 Generate PDF</button>
     </div>
     <div class="nav-divider"></div>
     <!-- User controls -->
@@ -223,17 +217,15 @@
       <a href="/my_reports" class="btn btn-sm btn-outline-light">📑 My Reports</a>
       <a href="/letters"    class="btn btn-sm btn-outline-light">📝 Letters</a>
       <a href="/field"      class="btn btn-sm btn-outline-light" title="Supervisor field input">🏗 Field</a>
-      {% if ai_chat_allowed %}
-      <button class="btn btn-sm btn-outline-light" onclick="toggleAIChat()"
-              title="{% if anthropic_configured %}AI Report Assistant{% else %}Configure ANTHROPIC_API_KEY in Railway first{% endif %}"
-              {% if not anthropic_configured %}disabled{% endif %}>🤖 AI</button>
-      {% endif %}
+      <button class="btn btn-sm btn-outline-light" onclick="toggleAIChat()" title="AI Report Assistant">🤖 AI</button>
       {% if is_admin %}
       <button class="btn btn-sm btn-outline-warning position-relative" id="reviewNavBtn" onclick="openReview()" title="Review supervisor submissions" style="display:none">
         📋 Review<span class="badge bg-danger ms-1 py-0 px-1" id="reviewBadge" style="font-size:.65rem">0</span>
       </button>
       <a href="/admin" class="btn btn-sm btn-outline-light">🛡 Admin</a>
       {% endif %}
+      <span class="text-white opacity-75" style="font-size:.78rem;padding:0 .25rem;">{{ username }}</span>
+      <a href="/logout" class="btn btn-sm btn-outline-danger">Logout</a>
     </div>
   </div>
 </nav>
@@ -292,35 +284,13 @@
         <input type="text" id="f_approved_by" class="form-control form-control-sm">
       </div>
       <div class="col-12">
+        <label class="fld-lbl" for="f_work_package">Work Package</label>
+        <input id="f_work_package" class="form-control form-control-sm" maxlength="300">
+      </div>
+      <div class="col-12">
         <div class="fld-lbl">Global Remarks</div>
         <textarea id="f_global_remarks" class="form-control form-control-sm" rows="2" placeholder="Overall remarks for today…"></textarea>
       </div>
-    </div>
-  </div>
-</div>
-
-<div class="card mb-3 border-0 shadow-sm">
-  <div class="card-header section-hdr">PDF Format</div>
-  <div class="card-body">
-    <label class="fld-lbl" for="pdf_layout">Report layout</label>
-    <select id="pdf_layout" class="form-select form-select-sm mb-3" onchange="syncKNLayout()">
-      <option value="kn" selected>KN Daily Activity Report (Word format)</option>
-      <option value="standard">Existing GPA format</option>
-    </select>
-    <div id="kn_fields">
-      <label class="fld-lbl" for="f_work_package">Work Package</label>
-      <input id="f_work_package" class="form-control form-control-sm mb-3" maxlength="300">
-      <div class="fld-lbl">Hourly Weather (07:00?18:00)</div>
-      <p class="small text-muted">Fill observed hours only. When all hours are blank, the weather entries below are used.</p>
-      <div id="kn_hourly_fields" class="row g-2 mb-3"></div>
-      <div class="fld-lbl">H. Conclusion</div>
-      <p class="small text-muted">Enter the original quantities and progress values. Empty tables print one row with a dash.</p>
-      <div class="table-responsive"><table class="table table-sm table-bordered">
-        <thead><tr><th>Description</th><th>BQ Contract</th><th>Progress Today</th><th>Total Accum.</th><th>Progress (%)</th><th></th></tr></thead>
-        <tbody id="kn_conclusion_rows"></tbody>
-      </table></div>
-      <button type="button" class="btn btn-sm btn-outline-primary" onclick="addKNConclusion()">Add conclusion row</button>
-      <p class="small text-muted mt-3 mb-0">KN format uses the fixed A?H section order and a repeated identity header. Documentation photos use up to 12 photos per page.</p>
     </div>
   </div>
 </div>
@@ -331,6 +301,9 @@
     <span>🌤️ <span class="form-step-number">Step 2 · </span>Weather Report</span>
   </div>
   <div class="card-body">
+    <div class="fld-lbl">Hourly Weather (07:00?18:00)</div>
+    <p class="small text-muted">Fill observed hours only. When all hours are blank, the weather entries below are used.</p>
+    <div id="kn_hourly_fields" class="row g-2 mb-3"></div>
     <div class="row g-2">
       <div class="col-6 col-md-2">
         <div class="fld-lbl">Morning</div>
@@ -390,8 +363,19 @@
   </div>
 </div>
 
-<!-- S4: Overall Progress -->
-<div class="card mb-3 border-0 shadow-sm report-section" id="overallProgressCard">
+<div class="card mb-3 border-0 shadow-sm report-section">
+  <div class="card-header section-hdr"><span id="conclusionSectionNo">Step 4 ? </span>Conclusion</div>
+  <div class="card-body">
+    <div class="table-responsive"><table class="table table-sm table-bordered">
+      <thead><tr><th>Description</th><th>BQ Contract</th><th>Progress Today</th><th>Total Accum.</th><th>Progress (%)</th><th></th></tr></thead>
+      <tbody id="kn_conclusion_rows"></tbody>
+    </table></div>
+    <button type="button" class="btn btn-sm btn-outline-primary" onclick="addKNConclusion()">Add conclusion row</button>
+  </div>
+</div>
+
+<!-- Legacy progress values retained when loading existing drafts. -->
+<div class="card mb-3 border-0 shadow-sm report-section" id="overallProgressCard" hidden>
   <div class="card-header section-hdr d-flex justify-content-between align-items-center flex-wrap gap-2">
     <span>📈 <span id="overallProgressSectionNo"></span>Overall Progress <span id="overallProgressInactiveBadge" class="badge bg-secondary ms-1">Inactive</span></span>
     <div class="d-flex align-items-center flex-wrap gap-3">
@@ -501,7 +485,7 @@
 <div class="d-flex gap-3 justify-content-end mb-5 flex-wrap">
   <button class="btn btn-outline-secondary px-4" onclick="saveDraft()">💾 Save Draft</button>
   <button class="btn btn-outline-info px-4" onclick="previewPDF()">👁 Preview PDF</button>
-  <button class="btn fw-bold text-white px-5 py-2" style="background:var(--accent);border-color:var(--accent);font-size:1rem;" onclick="generatePDF()">📄 {% if google_drive_configured %}Generate PDF + Drive{% else %}Generate PDF{% endif %}</button>
+  <button class="btn fw-bold text-white px-5 py-2" style="background:var(--accent);border-color:var(--accent);font-size:1rem;" onclick="generatePDF()">📄 Generate PDF</button>
 </div>
 
 </div><!-- /container -->
@@ -574,9 +558,7 @@
       <div class="modal-header py-2" style="background:var(--primary);">
         <h5 class="modal-title text-white fs-6">👁 PDF Preview</h5>
         <div class="d-flex gap-2 ms-2">
-          <button class="btn btn-sm btn-outline-light" onclick="generatePDF()">
-            {% if google_drive_configured %}⬇ Download PDF + Drive{% else %}⬇ Download PDF{% endif %}
-          </button>
+          <button class="btn btn-sm btn-outline-light" onclick="generatePDF()">⬇ Download PDF</button>
           <button class="btn btn-sm btn-outline-success" id="waShareBtn" onclick="shareReportWA()" style="display:none" title="Share to WhatsApp">📤 WhatsApp</button>
         </div>
         <button type="button" class="btn-close btn-close-white ms-auto" data-bs-dismiss="modal"></button>
@@ -661,9 +643,7 @@
             <button class="nav-link" data-tab="appearance">🎨 Appearance</button>
             <button class="nav-link" data-tab="manpower">👥 Manpower</button>
             <button class="nav-link" data-tab="areas">📍 Areas</button>
-            {% if ai_chat_allowed %}
             <button class="nav-link" data-tab="ai">🤖 AI Assistant</button>
-            {% endif %}
           </div>
         </div>
         <!-- Content -->
@@ -712,31 +692,19 @@
             <div class="d-flex justify-content-between align-items-center mb-2">
               <div>
                 <h6 class="mb-1 text-primary">Master Projects</h6>
-                <div class="text-muted" style="font-size:.75rem;">
-                  Each title is paired with a project number. Approved Daily Report title aliases are optional;
-                  work hours default to elapsed time with no unpaid-break deduction.
-                </div>
+                <div class="text-muted" style="font-size:.75rem;">Each title is paired with a project number. The same title may use different numbers.</div>
               </div>
               <button type="button" class="btn btn-sm btn-primary" onclick="addProjectEntry()">+ Add Project</button>
             </div>
             <div class="table-responsive" style="max-height:420px;overflow-y:auto;">
               <table class="table table-sm table-bordered align-middle mb-0" style="font-size:.8rem;">
                 <thead style="position:sticky;top:0;background:var(--light-bg);z-index:1;">
-                  <tr>
-                    <th style="min-width:300px;">Project Title / Name</th>
-                    <th style="min-width:220px;">Project No.</th>
-                    <th style="min-width:320px;">Approved Daily Title Aliases</th>
-                    <th style="min-width:430px;">Work-hours Policy</th>
-                    <th style="width:42px;"></th>
-                  </tr>
+                  <tr><th style="min-width:330px;">Project Title / Name</th><th style="min-width:240px;">Project No.</th><th style="width:42px;"></th></tr>
                 </thead>
                 <tbody id="projectTableBody"></tbody>
               </table>
             </div>
-            <p class="text-muted mt-2 mb-0" style="font-size:.75rem;">
-              Separate multiple approved aliases with semicolons. Unpaid breaks are deducted only when that policy is explicitly selected.
-              Saved projects appear in the Project Title dropdown on the main form.
-            </p>
+            <p class="text-muted mt-2 mb-0" style="font-size:.75rem;">Saved projects appear in the Project Title dropdown on the main form.</p>
           </div>
           {% endif %}
 
@@ -836,17 +804,14 @@
             <p class="text-muted mt-2 mb-0" style="font-size:.75rem;">Changes take effect next time you add an area.</p>
           </div>
 
-          {% if ai_chat_allowed %}
           <!-- AI Assistant -->
           <div class="stg-tab d-none" id="tab-ai">
             <h6 class="mb-3 text-primary">AI Report Assistant</h6>
-            <p style="font-size:.82rem;color:#555;">The AI assistant uses Claude (Anthropic) to turn a natural-language description into reviewable form suggestions.</p>
-            <div class="alert {% if anthropic_configured %}alert-success{% else %}alert-warning{% endif %} py-2" style="font-size:.78rem;">
-              {% if anthropic_configured %}
-              Claude is configured. The API key is stored only in the Railway environment variable.
-              {% else %}
-              Claude is not configured. Add <code>ANTHROPIC_API_KEY</code> to the Railway service variables, then redeploy.
-              {% endif %}
+            <p style="font-size:.82rem;color:#555;">The AI assistant uses Claude (Anthropic) to parse natural language descriptions of your day into structured report data. You need an API key from <a href="https://console.anthropic.com/" target="_blank">console.anthropic.com</a>.</p>
+            <div class="mb-3">
+              <div class="fld-lbl">Anthropic API Key</div>
+              <input type="password" id="cfg_ai_key" class="form-control form-control-sm" placeholder="sk-ant-...">
+              <div class="text-muted mt-1" style="font-size:.7rem;">Your key is stored in the app config on the server. Cost: ~$0.003 per report conversation.</div>
             </div>
             <div class="mb-2">
               <div class="fld-lbl">How to use</div>
@@ -858,7 +823,6 @@
               </ol>
             </div>
           </div>
-          {% endif %}
 
         </div><!-- /stg-content -->
       </div>
@@ -937,51 +901,7 @@ function normalizeProjectList(items) {
     const key = `${title.toLocaleLowerCase()}\u0000${projectNo.toLocaleLowerCase()}`;
     if (seen.has(key)) return;
     seen.add(key);
-    const rawAliases = Array.isArray(item.title_aliases)
-      ? item.title_aliases
-      : (typeof item.title_aliases === 'string' ? item.title_aliases.split(';') : []);
-    const aliasSeen = new Set();
-    const titleAliases = [];
-    rawAliases.forEach(rawAlias => {
-      if (typeof rawAlias !== 'string' || titleAliases.length >= 20) return;
-      const alias = rawAlias.trim();
-      const aliasKey = alias.toLocaleLowerCase();
-      if (!alias || alias.length > 300 || aliasKey === title.toLocaleLowerCase() || aliasSeen.has(aliasKey)) return;
-      aliasSeen.add(aliasKey);
-      titleAliases.push(alias);
-    });
-
-    const rawPolicy = item.work_hours_policy && typeof item.work_hours_policy === 'object'
-      ? item.work_hours_policy
-      : {};
-    const rawBreakMinutes = Number(rawPolicy.break_minutes);
-    const rawThreshold = Number(rawPolicy.deduct_when_elapsed_gte_minutes);
-    const breakMinutes = Number.isInteger(rawBreakMinutes) && rawBreakMinutes >= 0 && rawBreakMinutes <= 240
-      ? rawBreakMinutes
-      : 0;
-    const threshold = Number.isInteger(rawThreshold) && rawThreshold >= 0 && rawThreshold <= 1440
-      ? rawThreshold
-      : 360;
-    const requestedMode = rawPolicy.mode === 'elapsed_less_break'
-      ? 'elapsed_less_break'
-      : 'elapsed_no_break';
-    const workHoursPolicy = {
-      mode: requestedMode === 'elapsed_less_break' && breakMinutes > 0
-        ? 'elapsed_less_break'
-        : 'elapsed_no_break',
-      break_minutes: requestedMode === 'elapsed_less_break' ? breakMinutes : 0,
-      deduct_when_elapsed_gte_minutes: threshold,
-      allow_overnight: rawPolicy.allow_overnight !== false,
-      version: typeof rawPolicy.version === 'string' && rawPolicy.version.trim()
-        ? rawPolicy.version.trim().slice(0, 80)
-        : 'work-hours-policy/1',
-    };
-    result.push({
-      title,
-      project_no: projectNo,
-      title_aliases: titleAliases,
-      work_hours_policy: workHoursPolicy,
-    });
+    result.push({title, project_no: projectNo});
   });
   return result;
 }
@@ -1090,19 +1010,6 @@ function renderProjectTable() {
   localProjects.forEach(project => addProjectEntry(project));
 }
 
-function syncProjectWorkHoursRow(row) {
-  if (!row) return;
-  const modeInput = row.querySelector('.project-work-mode-entry');
-  const breakInput = row.querySelector('.project-break-minutes-entry');
-  const thresholdInput = row.querySelector('.project-break-threshold-entry');
-  const deductBreak = modeInput && modeInput.value === 'elapsed_less_break';
-  if (breakInput) {
-    breakInput.disabled = !deductBreak;
-    if (!deductBreak) breakInput.value = '0';
-  }
-  if (thresholdInput) thresholdInput.disabled = !deductBreak;
-}
-
 function addProjectEntry(project={}) {
   const body = document.getElementById('projectTableBody');
   if (!body) return;
@@ -1126,102 +1033,6 @@ function addProjectEntry(project={}) {
   numberInput.value = project.project_no || '';
   numberCell.appendChild(numberInput);
 
-  const aliasesCell = document.createElement('td');
-  const aliasesInput = document.createElement('textarea');
-  aliasesInput.className = 'form-control form-control-sm project-aliases-entry';
-  aliasesInput.rows = 2;
-  aliasesInput.maxLength = 6020;
-  aliasesInput.placeholder = 'Old or alternate Daily title; another approved title';
-  aliasesInput.title = 'Optional approved Daily Report project-title aliases, separated by semicolons';
-  aliasesInput.setAttribute('aria-label', 'Approved Daily Report title aliases');
-  const rawAliases = Array.isArray(project.title_aliases)
-    ? project.title_aliases
-    : (typeof project.title_aliases === 'string' ? project.title_aliases.split(';') : []);
-  aliasesInput.value = rawAliases.map(value => String(value || '').trim()).filter(Boolean).join('; ');
-  aliasesCell.appendChild(aliasesInput);
-
-  const policyCell = document.createElement('td');
-  const policy = project.work_hours_policy && typeof project.work_hours_policy === 'object'
-    ? project.work_hours_policy
-    : {};
-  row.dataset.workHoursPolicyVersion = typeof policy.version === 'string' && policy.version.trim()
-    ? policy.version.trim().slice(0, 80)
-    : 'work-hours-policy/1';
-
-  const policyGrid = document.createElement('div');
-  policyGrid.className = 'row g-1 align-items-end';
-
-  const modeWrap = document.createElement('div');
-  modeWrap.className = 'col-12';
-  const modeInput = document.createElement('select');
-  modeInput.className = 'form-select form-select-sm project-work-mode-entry';
-  modeInput.setAttribute('aria-label', 'Work-hours calculation policy');
-  modeInput.innerHTML = [
-    '<option value="elapsed_no_break">Elapsed hours (no break deduction)</option>',
-    '<option value="elapsed_less_break">Elapsed hours less unpaid break</option>',
-  ].join('');
-  const configuredBreak = Number(policy.break_minutes);
-  modeInput.value = policy.mode === 'elapsed_less_break' && Number.isFinite(configuredBreak) && configuredBreak > 0
-    ? 'elapsed_less_break'
-    : 'elapsed_no_break';
-  modeWrap.appendChild(modeInput);
-
-  const breakWrap = document.createElement('div');
-  breakWrap.className = 'col-4';
-  const breakLabel = document.createElement('label');
-  breakLabel.className = 'form-label mb-0 text-muted';
-  breakLabel.style.fontSize = '.68rem';
-  breakLabel.textContent = 'Unpaid break (min)';
-  const breakInput = document.createElement('input');
-  breakInput.type = 'number';
-  breakInput.className = 'form-control form-control-sm project-break-minutes-entry';
-  breakInput.min = '0';
-  breakInput.max = '240';
-  breakInput.step = '1';
-  breakInput.value = Number.isInteger(configuredBreak) && configuredBreak >= 0 && configuredBreak <= 240
-    ? String(configuredBreak)
-    : '0';
-  breakInput.setAttribute('aria-label', 'Unpaid break minutes');
-  breakWrap.append(breakLabel, breakInput);
-
-  const thresholdWrap = document.createElement('div');
-  thresholdWrap.className = 'col-5';
-  const thresholdLabel = document.createElement('label');
-  thresholdLabel.className = 'form-label mb-0 text-muted';
-  thresholdLabel.style.fontSize = '.68rem';
-  thresholdLabel.textContent = 'Deduct if elapsed >= (min)';
-  const thresholdInput = document.createElement('input');
-  thresholdInput.type = 'number';
-  thresholdInput.className = 'form-control form-control-sm project-break-threshold-entry';
-  thresholdInput.min = '0';
-  thresholdInput.max = '1440';
-  thresholdInput.step = '1';
-  const configuredThreshold = Number(policy.deduct_when_elapsed_gte_minutes);
-  thresholdInput.value = Number.isInteger(configuredThreshold) && configuredThreshold >= 0 && configuredThreshold <= 1440
-    ? String(configuredThreshold)
-    : '360';
-  thresholdInput.setAttribute('aria-label', 'Minimum elapsed minutes before break deduction');
-  thresholdWrap.append(thresholdLabel, thresholdInput);
-
-  const overnightWrap = document.createElement('div');
-  overnightWrap.className = 'col-3 pb-1';
-  const overnightCheckWrap = document.createElement('div');
-  overnightCheckWrap.className = 'form-check form-switch mb-0';
-  const overnightInput = document.createElement('input');
-  overnightInput.type = 'checkbox';
-  overnightInput.className = 'form-check-input project-allow-overnight-entry';
-  overnightInput.checked = policy.allow_overnight !== false;
-  overnightInput.setAttribute('aria-label', 'Allow shifts crossing midnight');
-  const overnightLabel = document.createElement('label');
-  overnightLabel.className = 'form-check-label text-muted';
-  overnightLabel.style.fontSize = '.68rem';
-  overnightLabel.textContent = 'Overnight';
-  overnightCheckWrap.append(overnightInput, overnightLabel);
-  overnightWrap.appendChild(overnightCheckWrap);
-
-  policyGrid.append(modeWrap, breakWrap, thresholdWrap, overnightWrap);
-  policyCell.appendChild(policyGrid);
-
   const actionCell = document.createElement('td');
   actionCell.className = 'text-center';
   const removeButton = document.createElement('button');
@@ -1232,10 +1043,8 @@ function addProjectEntry(project={}) {
   removeButton.addEventListener('click', () => row.remove());
   actionCell.appendChild(removeButton);
 
-  row.append(titleCell, numberCell, aliasesCell, policyCell, actionCell);
+  row.append(titleCell, numberCell, actionCell);
   body.appendChild(row);
-  modeInput.addEventListener('change', () => syncProjectWorkHoursRow(row));
-  syncProjectWorkHoursRow(row);
   if (!project.title && !project.project_no) titleInput.focus();
 }
 
@@ -1256,54 +1065,7 @@ function collectProjectRows() {
       return {projects: [], error: `Duplicate project pair on row ${index + 1}.`};
     }
     seen.add(key);
-
-    const aliasesText = (row.querySelector('.project-aliases-entry') || {}).value || '';
-    const aliasSeen = new Set();
-    const titleAliases = [];
-    for (const rawAlias of aliasesText.split(';')) {
-      const alias = rawAlias.trim();
-      if (!alias || alias.toLocaleLowerCase() === title.toLocaleLowerCase()) continue;
-      if (alias.length > 300) {
-        return {projects: [], error: `Project row ${index + 1} contains an alias longer than 300 characters.`};
-      }
-      const aliasKey = alias.toLocaleLowerCase();
-      if (!aliasSeen.has(aliasKey)) {
-        aliasSeen.add(aliasKey);
-        titleAliases.push(alias);
-      }
-    }
-    if (titleAliases.length > 20) {
-      return {projects: [], error: `Project row ${index + 1} may contain at most 20 approved aliases.`};
-    }
-
-    const mode = (row.querySelector('.project-work-mode-entry') || {}).value === 'elapsed_less_break'
-      ? 'elapsed_less_break'
-      : 'elapsed_no_break';
-    const rawBreakMinutes = Number((row.querySelector('.project-break-minutes-entry') || {}).value || 0);
-    const rawThreshold = Number((row.querySelector('.project-break-threshold-entry') || {}).value || 360);
-    if (!Number.isInteger(rawBreakMinutes) || rawBreakMinutes < 0 || rawBreakMinutes > 240) {
-      return {projects: [], error: `Project row ${index + 1} unpaid break must be a whole number from 0 to 240 minutes.`};
-    }
-    if (!Number.isInteger(rawThreshold) || rawThreshold < 0 || rawThreshold > 1440) {
-      return {projects: [], error: `Project row ${index + 1} break threshold must be a whole number from 0 to 1440 minutes.`};
-    }
-    if (mode === 'elapsed_less_break' && rawBreakMinutes === 0) {
-      return {projects: [], error: `Project row ${index + 1} needs unpaid break minutes greater than zero when break deduction is enabled.`};
-    }
-
-    const projectEntry = {
-      title,
-      project_no: projectNo,
-      work_hours_policy: {
-        mode,
-        break_minutes: mode === 'elapsed_less_break' ? rawBreakMinutes : 0,
-        deduct_when_elapsed_gte_minutes: rawThreshold,
-        allow_overnight: (row.querySelector('.project-allow-overnight-entry') || {}).checked !== false,
-        version: row.dataset.workHoursPolicyVersion || 'work-hours-policy/1',
-      },
-    };
-    if (titleAliases.length) projectEntry.title_aliases = titleAliases;
-    projects.push(projectEntry);
+    projects.push({title, project_no: projectNo});
   }
   return {projects, error: ''};
 }
@@ -1334,9 +1096,9 @@ const PDF_SECTION_DEFINITIONS = {
   indirect_manpower:   { label:'Indirect Manpower', description:'Global indirect manpower list' },
   overall_progress:    { label:'Overall Progress', description:'Included only when the Overall Progress toggle is ON' },
   area_activities:     { label:'Daily Activities', description:'Activity today and tomorrow for each area' },
-  area_manpower:       { label:'Direct Manpower', description:'Direct manpower table for each area' },
+  area_manpower:       { label:'Direct Manpower', description:'Manpower table for each area' },
   constraints:         { label:'Constraints & Issues', description:'Summary of constraints entered for each area' },
-  remarks:             { label:'Remarks', description:'Area and global report remarks' },
+  remarks:             { label:'Remarks', description:'Global report remarks' },
   sign_off:            { label:'Sign-Off', description:'Approval names, roles, and signatures' },
   photo_documentation: { label:'Photo Documentation', description:'Photos and captions entered inside each area' },
 };
@@ -1381,16 +1143,14 @@ function normaliseSavedSectionOrder(sectionOrder) {
       if (known.has(key) && !requested.includes(key)) requested.push(key);
     });
   });
-  // Backward compatibility: old drafts used one Daily Activities & Manpower
-  // item. Keep its two replacement sections adjacent, without changing the
-  // existing Constraints and Remarks sections.
+  // Old drafts used 'daily_activities' which expands to both new keys via alias.
+  // If area_activities landed but area_manpower didn't, insert it right after.
   if (requested.includes('area_activities') && !requested.includes('area_manpower')) {
     requested.splice(requested.indexOf('area_activities') + 1, 0, 'area_manpower');
   }
-  if (requested.includes('area_manpower')
-      && !requested.includes('constraints') && !requested.includes('remarks')) {
-    const insertAt = requested.indexOf('area_manpower') + 1;
-    requested.splice(insertAt, 0, 'constraints', 'remarks');
+  // Insert constraints/remarks after area_manpower if missing.
+  if (requested.includes('area_manpower') && !requested.includes('constraints') && !requested.includes('remarks')) {
+    requested.splice(requested.indexOf('area_manpower') + 1, 0, 'constraints', 'remarks');
   }
   const result = ['report_information'];
   requested.forEach(key => { if (key !== 'report_information') result.push(key); });
@@ -1627,17 +1387,7 @@ function initPDFSectionOrderModal() {
 }
 
 function openPDFSectionOrderModal() {
-  if (formFieldValue('pdf_layout') === 'kn') { renderPDFPreview(); return; }
-  if (_pdfOrderConfirming) return;
-  _pendingPDFSectionOrder = getSectionOrder();
-  renderPDFSectionOrderList();
-  if (!_pdfSectionOrderModal) {
-    _pdfSectionOrderModal = new bootstrap.Modal(document.getElementById('pdfSectionOrderModal'), {
-      backdrop: 'static',
-      keyboard: false,
-    });
-  }
-  _pdfSectionOrderModal.show();
+  renderPDFPreview();
 }
 
 async function confirmPDFSectionOrder() {
@@ -1908,7 +1658,11 @@ function addAreaBlock(data={}) {
     </div>
     <div class="card-body p-2">
       <!-- Activities -->
-      <div class="row g-2 mb-2">
+      <div class="area-section-hdr d-flex align-items-center gap-2">
+        <span class="fw-bold" style="font-size:.8rem;">📋 Daily Activities</span>
+        <button class="btn btn-sm btn-outline-secondary acts-swap-btn" style="font-size:.7rem;padding:1px 8px;" onclick="toggleActsSwap(this)" title="Swap column order in PDF">⇄ Today first</button>
+      </div>
+      <div class="row g-2 mb-3">
         <div class="col-md-6">
           <div class="fld-lbl mb-1 fw-bold">Activity Today</div>
           <div class="acts-today"></div>
@@ -1921,13 +1675,12 @@ function addAreaBlock(data={}) {
         </div>
       </div>
       <!-- Direct Manpower -->
-      <div class="d-flex justify-content-between align-items-center mb-1">
-        <span class="fld-lbl mb-0 fw-bold">Direct Manpower</span>
+      <div class="area-section-hdr d-flex justify-content-between align-items-center">
+        <span class="fw-bold" style="font-size:.8rem;">👷 Direct Manpower</span>
         <button class="btn btn-sm btn-outline-primary add-dm-btn" onclick="addDM(this)">+ Add Person</button>
       </div>
       <div class="row g-1 mb-1 px-1" style="font-size:.7rem;color:#888;">
-        <div class="col-3">Name</div><div class="col-2">Position</div>
-        <div class="col-4">Task Today</div><div class="col-2">Hours</div><div class="col-1"></div>
+        <div class="col-4">Name</div><div class="col-4">Role / Position</div><div class="col-3">Working Hours</div><div class="col-1"></div>
       </div>
       <div class="dm-container"></div>
       <!-- Area Indirect Manpower (collapsible) -->
@@ -1979,6 +1732,7 @@ function addAreaBlock(data={}) {
 
   if (data.activities_today)    data.activities_today.forEach(t => addAct(block.querySelector('[onclick*="today"]'), 'today', t));
   if (data.activities_tomorrow) data.activities_tomorrow.forEach(t => addAct(block.querySelector('[onclick*="tomorrow"]'), 'tomorrow', t));
+  if (data.activities_swapped)  { const btn = block.querySelector('.acts-swap-btn'); if (btn) { btn.dataset.swapped='1'; btn.textContent='⇄ Tomorrow first'; btn.classList.replace('btn-outline-secondary','btn-outline-primary'); } }
   if (data.manpower)            data.manpower.forEach(p => addDM(block.querySelector('.add-dm-btn'), p));
   if (data.constraints)         block.querySelector('.area-const').value = data.constraints;
   if (data.remarks)             block.querySelector('.area-rem').value   = data.remarks;
@@ -2039,6 +1793,19 @@ function addAreaIndRow(btn, d={}) {
 // ════════════════════════════════════════════════════════════
 // ACTIVITIES
 // ════════════════════════════════════════════════════════════
+function toggleActsSwap(btn) {
+  const swapped = btn.dataset.swapped === '1';
+  if (swapped) {
+    btn.dataset.swapped = '0';
+    btn.textContent = '⇄ Today first';
+    btn.classList.replace('btn-outline-primary', 'btn-outline-secondary');
+  } else {
+    btn.dataset.swapped = '1';
+    btn.textContent = '⇄ Tomorrow first';
+    btn.classList.replace('btn-outline-secondary', 'btn-outline-primary');
+  }
+}
+
 function addAct(btn, type, text='') {
   const block = btn.closest('[data-ai]');
   const cont  = block.querySelector(type==='today' ? '.acts-today' : '.acts-tmr');
@@ -2059,17 +1826,14 @@ function addDM(btn, d={}) {
   const row   = document.createElement('div');
   row.className = 'row g-1 mb-1 align-items-center dm-row';
   row.innerHTML = `
-    <div class="col-3 ac-wrap">
+    <div class="col-4 ac-wrap">
       <input type="text" class="form-control form-control-sm mp-name" placeholder="Name…" value="${esc(d.name||'')}">
       <div class="ac-drop"></div>
     </div>
-    <div class="col-2">
-      <input type="text" class="form-control form-control-sm mp-role" placeholder="Position" value="${esc(d.role||'')}">
-    </div>
     <div class="col-4">
-      <input type="text" class="form-control form-control-sm mp-task" placeholder="Task today…" value="${esc(d.task||'')}">
+      <input type="text" class="form-control form-control-sm mp-role" placeholder="Role / Position" value="${esc(d.role||'')}">
     </div>
-    <div class="col-2">
+    <div class="col-3">
       <select class="form-select form-select-sm mp-hours">${hoursOpts(d.hours)}</select>
     </div>
     <div class="col-1 text-end">
@@ -2207,11 +1971,19 @@ function recompressDataUrl(dataUrl, maxPx=1280, quality=0.74) {
   });
 }
 
+function dataUrlToBlob(dataUrl) {
+  const [header, b64] = dataUrl.split(',', 2);
+  const byteStr = atob(b64);
+  const arr = new Uint8Array(byteStr.length);
+  for (let i = 0; i < byteStr.length; i++) arr[i] = byteStr.charCodeAt(i);
+  const mime = (header.match(/:(.*?);/) || [,'image/jpeg'])[1];
+  return new Blob([arr], {type: mime});
+}
+
 function _prepareLegacyMedia(box, dataUrl, maxPx, quality, setter) {
-  const isSignature = box.classList.contains('sig-box');
-  const root = isSignature ? box.closest('.so-col-card') : box;
-  const dataInput = root.querySelector(isSignature ? '.so-sig' : '.photo-data');
-  const retryButton = root.querySelector(isSignature ? '.sig-retry' : '.photo-retry');
+  const root = box;
+  const dataInput = root.querySelector('.photo-data');
+  const retryButton = root.querySelector('.photo-retry');
   dataInput.value = dataUrl;
   box.dataset.uploadState = 'uploading';
   _pendingUploads++;
@@ -2227,22 +1999,11 @@ function _prepareLegacyMedia(box, dataUrl, maxPx, quality, setter) {
     });
 }
 
-function dataUrlToBlob(dataUrl) {
-  const [header, b64] = dataUrl.split(',', 2);
-  if (!header || !b64) throw new Error('Invalid image data');
-  const byteStr = atob(b64);
-  const arr = new Uint8Array(byteStr.length);
-  for (let i = 0; i < byteStr.length; i++) arr[i] = byteStr.charCodeAt(i);
-  const mime = (header.match(/:(.*?);/) || [,'image/jpeg'])[1];
-  return new Blob([arr], {type: mime});
-}
-
 async function _startMediaUpload(box, dataUrl, kind) {
-  const isSignature = kind === 'signature';
-  const root = isSignature ? box.closest('.so-col-card') : box;
-  const dataInput = root.querySelector(isSignature ? '.so-sig' : '.photo-data');
-  const filenameInput = root.querySelector(isSignature ? '.so-sig-filename' : '.photo-filename');
-  const retryButton = root.querySelector(isSignature ? '.sig-retry' : '.photo-retry');
+  const root = box;
+  const dataInput = root.querySelector('.photo-data');
+  const filenameInput = root.querySelector('.photo-filename');
+  const retryButton = root.querySelector('.photo-retry');
   const token = String(++_mediaUploadSequence);
 
   box.dataset.uploadToken = token;
@@ -2257,7 +2018,7 @@ async function _startMediaUpload(box, dataUrl, kind) {
     box.dataset.uploadState = 'failed';
     box.dataset.uploadError = error.message;
     if (retryButton) retryButton.style.display = '';
-    toast(`${isSignature ? 'Signature' : 'Photo'} could not be prepared for upload.`, 'warning');
+    toast(`Photo could not be prepared for upload.`, 'warning');
     return false;
   }
 
@@ -2266,7 +2027,7 @@ async function _startMediaUpload(box, dataUrl, kind) {
   const timeout = setTimeout(() => controller.abort(), 25000);
   try {
     const form = new FormData();
-    form.append('photo', blob, isSignature ? 'signature.jpg' : 'photo.jpg');
+    form.append('photo', blob, 'photo.jpg');
     const response = await fetch(`/upload_temp_photo?kind=${encodeURIComponent(kind)}`, {
       method: 'POST',
       body: form,
@@ -2294,7 +2055,7 @@ async function _startMediaUpload(box, dataUrl, kind) {
       box.dataset.uploadState = 'failed';
       box.dataset.uploadError = message;
       if (retryButton) retryButton.style.display = '';
-      toast(`${isSignature ? 'Signature' : 'Photo'} upload failed. Use Retry before saving or generating.`, 'warning');
+      toast(`Photo upload failed. Use Retry before saving or generating.`, 'warning');
     }
     return false;
   } finally {
@@ -2305,6 +2066,50 @@ async function _startMediaUpload(box, dataUrl, kind) {
       setTimeout(() => saveDraft({automatic:true}), 0);
     }
   }
+}
+
+function retryPhotoUpload(btn) {
+  const box = btn.closest('.photo-box');
+  const dataUrl = box.querySelector('.photo-data').value;
+  if (!dataUrl || !dataUrl.includes(',')) {
+    toast('Photo data is unavailable. Please browse or paste the photo again.', 'warning');
+    return;
+  }
+  _startMediaUpload(box, dataUrl, 'photo');
+}
+
+function _hasMediaUploadFailures() {
+  return Array.from(document.querySelectorAll('.photo-box'))
+    .some(box => box.dataset.uploadState === 'failed');
+}
+
+async function _ensureMediaReady(action, timeoutMs=27000) {
+  let showedProgress = false;
+  if (_pendingUploads > 0) {
+    _setProgress('Finishing media uploads…', 10);
+    showedProgress = true;
+    const deadline = Date.now() + timeoutMs;
+    while (_pendingUploads > 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+  }
+  if (_pendingUploads > 0) {
+    _hideProgress();
+    toast(`Media upload is taking too long. Retry before you ${action}.`, 'warning');
+    return false;
+  }
+  if (_hasMediaUploadFailures()) {
+    _hideProgress();
+    toast(`A photo upload failed. Retry or replace it before you ${action}.`, 'warning');
+    return false;
+  }
+  if (_payloadContainsInlineMedia(collectData())) {
+    _hideProgress();
+    toast('Photos are not ready. Retry the upload before continuing.', 'warning');
+    return false;
+  }
+  if (showedProgress) _hideProgress();
+  return true;
 }
 
 function setPhoto(box, dataUrl) {
@@ -2318,16 +2123,6 @@ function setPhoto(box, dataUrl) {
   box.querySelector('.photo-missing').value = '';
 
   // Upload to server as binary (FormData) — avoids base64 33% overhead → stays under nginx limit
-  _startMediaUpload(box, dataUrl, 'photo');
-}
-
-function retryPhotoUpload(btn) {
-  const box = btn.closest('.photo-box');
-  const dataUrl = box.querySelector('.photo-data').value;
-  if (!dataUrl || !dataUrl.includes(',')) {
-    toast('Photo data is unavailable. Please browse or paste the photo again.', 'warning');
-    return;
-  }
   _startMediaUpload(box, dataUrl, 'photo');
 }
 
@@ -2356,13 +2151,6 @@ function addSignOffCol(d={}) {
   const col = document.createElement('div');
   col.className = 'col-6 col-md-3 so-col';
   col.dataset.si = idx;
-  const missingSigFilename = !!d.sig_filename && d.signature_missing === true;
-  const hasSigFilename = !!d.sig_filename && !missingSigFilename;
-  const hasInlineSig = !hasSigFilename && typeof d.sig === 'string' && d.sig.includes(',');
-  const signatureSrc = hasSigFilename
-    ? `/temp_photo/${encodeURIComponent(d.sig_filename)}`
-    : (hasInlineSig ? d.sig : '');
-  const hasSignature = hasSigFilename || hasInlineSig;
   col.innerHTML = `
     <div class="so-col-card">
       <button class="btn btn-sm btn-outline-danger so-remove-btn" onclick="this.closest('.so-col').remove()">✕</button>
@@ -2373,22 +2161,19 @@ function addSignOffCol(d={}) {
       <div class="fld-lbl mb-1">Title / Role</div>
       <input type="text" class="form-control form-control-sm so-role mb-2" placeholder="e.g. Project Manager" value="${esc(d.role||'')}">
       <div class="fld-lbl mb-1">Signature</div>
-      <div class="sig-box${hasSignature?' filled':''}" tabindex="0"
-           data-upload-state="${missingSigFilename?'failed':(hasSigFilename?'ready':'idle')}"
+      <div class="sig-box${d.sig?' filled':''}" tabindex="0"
            title="Click here then Ctrl+V to paste signature">
-        <img class="sig-prev${hasSignature?' show':''}" src="${esc(signatureSrc)}" alt="">
-        <span class="sig-ph"${hasSignature?' style="display:none"':''}>✍️ No signature<br><small>Browse or paste</small></span>
+        <img class="sig-prev${d.sig?' show':''}" src="${d.sig||''}" alt="">
+        <span class="sig-ph"${d.sig?' style="display:none"':''}>✍️ No signature<br><small>Browse or paste</small></span>
       </div>
       <div class="d-flex gap-1 mt-1">
-        <button class="btn btn-sm btn-outline-warning sig-retry" style="font-size:.72rem;${missingSigFilename?'':'display:none;'}" onclick="retrySigUpload(this)" title="Retry signature upload">Retry</button>
         <label class="btn btn-sm btn-outline-secondary flex-grow-1 mb-0" style="font-size:.72rem;">
           📁 Browse<input type="file" accept="image/*" style="display:none" onchange="handleSigFile(this)">
         </label>
         <button class="btn btn-sm btn-outline-secondary" style="font-size:.72rem;" onclick="pasteSig(this)" title="Paste from clipboard">📋</button>
         <button class="btn btn-sm btn-outline-danger" style="font-size:.72rem;" onclick="clearSig(this)">✕</button>
       </div>
-      <input type="hidden" class="so-sig" value="">
-      <input type="hidden" class="so-sig-filename" value="${esc(d.sig_filename||'')}">
+      <input type="hidden" class="so-sig" value="${esc(d.sig||'')}">
     </div>`;
   c.appendChild(col);
 
@@ -2399,32 +2184,23 @@ function addSignOffCol(d={}) {
     for (const it of items) {
       if (it.type.startsWith('image/')) {
         e.preventDefault();
-        compressImage(it.getAsFile(), 800, 0.82).then(data => setSig(box, data));
+        const reader = new FileReader();
+        reader.onload = ev => setSig(box, ev.target.result);
+        reader.readAsDataURL(it.getAsFile());
         return;
       }
     }
   });
   // Click sig-box to focus for paste
   box.addEventListener('click', () => box.focus());
-  const preview = box.querySelector('.sig-prev');
-  if (hasSigFilename) {
-    preview.addEventListener('error', () => {
-      box.dataset.uploadState = 'failed';
-      box.dataset.uploadError = 'Stored signature file is unavailable.';
-      const retry = col.querySelector('.sig-retry');
-      if (retry) retry.style.display = '';
-    }, {once:true});
-  }
-  if (hasInlineSig) {
-    _prepareLegacyMedia(box, d.sig, 800, 0.82, setSig);
-  }
 }
 
-async function handleSigFile(input) {
+function handleSigFile(input) {
   const box = input.closest('.so-col-card').querySelector('.sig-box');
   const file = input.files[0]; if (!file) return;
-  const compressed = await compressImage(file, 800, 0.82);
-  setSig(box, compressed);
+  const reader = new FileReader();
+  reader.onload = e => setSig(box, e.target.result);
+  reader.readAsDataURL(file);
 }
 
 async function pasteSig(btn) {
@@ -2435,8 +2211,9 @@ async function pasteSig(btn) {
       for (const type of item.types) {
         if (type.startsWith('image/')) {
           const blob = await item.getType(type);
-          const compressed = await compressImage(blob, 800, 0.82);
-          setSig(box, compressed); return;
+          const reader = new FileReader();
+          reader.onload = e => setSig(box, e.target.result);
+          reader.readAsDataURL(blob); return;
         }
       }
     }
@@ -2451,35 +2228,16 @@ async function pasteSig(btn) {
 function setSig(box, dataUrl) {
   const card = box.closest('.so-col-card');
   card.querySelector('.so-sig').value = dataUrl;
-  card.querySelector('.so-sig-filename').value = '';
   const img = box.querySelector('.sig-prev');
   img.src = dataUrl; img.classList.add('show');
   box.querySelector('.sig-ph').style.display = 'none';
   box.classList.add('filled');
-  _startMediaUpload(box, dataUrl, 'signature');
-}
-
-function retrySigUpload(btn) {
-  const card = btn.closest('.so-col-card');
-  const box = card.querySelector('.sig-box');
-  const dataUrl = card.querySelector('.so-sig').value;
-  if (!dataUrl || !dataUrl.includes(',')) {
-    toast('Signature data is unavailable. Please browse or paste it again.', 'warning');
-    return;
-  }
-  _startMediaUpload(box, dataUrl, 'signature');
 }
 
 function clearSig(btn) {
   const card = btn.closest('.so-col-card');
   const box  = card.querySelector('.sig-box');
-  box.dataset.uploadToken = String(++_mediaUploadSequence);
   card.querySelector('.so-sig').value = '';
-  card.querySelector('.so-sig-filename').value = '';
-  box.dataset.uploadState = 'idle';
-  box.dataset.uploadError = '';
-  const retry = card.querySelector('.sig-retry');
-  if (retry) retry.style.display = 'none';
   const img = box.querySelector('.sig-prev');
   img.src = ''; img.classList.remove('show');
   box.querySelector('.sig-ph').style.display = '';
@@ -2495,7 +2253,6 @@ function collectSignOffs() {
       name:  card.querySelector('.so-name').value,
       role:  card.querySelector('.so-role').value,
       sig:   card.querySelector('.so-sig').value,
-      sig_filename: card.querySelector('.so-sig-filename').value,
     });
   });
   return cols;
@@ -2514,95 +2271,6 @@ function populateSignOffs(signOffs) {
 // ════════════════════════════════════════════════════════════
 // COLLECT ALL FORM DATA
 // ════════════════════════════════════════════════════════════
-const WEATHER_FIELD_IDS = {
-  Morning:'wx_morning',
-  Afternoon:'wx_afternoon',
-  Evening:'wx_evening',
-  Wind:'wx_wind',
-  Temperature:'wx_temp',
-  Impact:'wx_impact',
-};
-
-function formFieldValue(id) {
-  const field = document.getElementById(id);
-  return field ? field.value : '';
-}
-
-function collectWeatherData() {
-  const weather = {};
-  Object.entries(WEATHER_FIELD_IDS).forEach(([label, id]) => {
-    const field = document.getElementById(id);
-    if (field) weather[label] = field.value;
-  });
-  return weather;
-}
-
-function collectManpowerRows(root, selector, includeTask=false) {
-  return Array.from(root.querySelectorAll(selector)).map(row => {
-    if (includeTask) {
-      return {
-        name:  row.querySelector('.mp-name').value,
-        role:  row.querySelector('.mp-role').value,
-        task:  row.querySelector('.mp-task').value,
-        hours: row.querySelector('.mp-hours').value,
-      };
-    }
-    return {
-      name: row.querySelector('.mp-name').value,
-      role: row.querySelector('.mp-role').value,
-      hours: row.querySelector('.mp-hours').value,
-    };
-  });
-}
-
-function collectOverallProgressData() {
-  const progress = [];
-  document.querySelectorAll('#overallProgressContainer .overall-progress-row').forEach(row => {
-    const item = {};
-    OVERALL_PROGRESS_INPUTS.forEach(([field, selector]) => {
-      item[field] = row.querySelector(selector).value.trim();
-    });
-    if (Object.values(item).some(value => value)) progress.push(item);
-  });
-  return progress;
-}
-
-function collectActivityValues(areaBlock, selector) {
-  return Array.from(areaBlock.querySelectorAll(selector))
-    .map(input => input.value.trim())
-    .filter(Boolean);
-}
-
-function collectAreaPhotos(areaBlock) {
-  const photos = [];
-  areaBlock.querySelectorAll('.photo-box').forEach(box => {
-    const data = box.querySelector('.photo-data').value;
-    const filename = box.querySelector('.photo-filename').value;
-    const desc = box.querySelector('.photo-desc').value;
-    const missing = box.querySelector('.photo-missing')?.value === 'true';
-    if (!data && !filename && !desc) return;
-    const photo = {img_data:data, photo_filename:filename, desc};
-    if (missing) photo.photo_missing = true;
-    photos.push(photo);
-  });
-  return photos;
-}
-
-function collectAreaData(areaBlock) {
-  const selector = areaBlock.querySelector('.area-sel');
-  const customArea = areaBlock.querySelector('.area-custom');
-  return {
-    id: selector.value === '__custom__' ? customArea.value : selector.value,
-    activities_today: collectActivityValues(areaBlock, '.acts-today .act-item input'),
-    activities_tomorrow: collectActivityValues(areaBlock, '.acts-tmr .act-item input'),
-    manpower: collectManpowerRows(areaBlock, '.dm-row', true),
-    indirect_manpower: collectManpowerRows(areaBlock, '.area-ind-row'),
-    constraints: (areaBlock.querySelector('.area-const') || {}).value || '',
-    remarks: (areaBlock.querySelector('.area-rem') || {}).value || '',
-    photos: collectAreaPhotos(areaBlock),
-  };
-}
-
 const KN_CONCLUSION_KEYS = ['description','bq_contract','progress_today','total_accum','progress_percent'];
 function addKNConclusion(data={}) {
   const row = document.createElement('tr');
@@ -2621,14 +2289,7 @@ function collectKNConclusion() {
     const result={};row.querySelectorAll('[data-key]').forEach(input=>result[input.dataset.key]=input.value.trim());return result;
   }).filter(row=>Object.values(row).some(Boolean));
 }
-function syncKNLayout() {
-  const enabled=document.getElementById('pdf_layout').value==='kn';
-  document.getElementById('kn_fields').hidden=!enabled;
-  const progressCard=document.getElementById('showOverallProgress')?.closest('.card');
-  if(progressCard) progressCard.hidden=enabled;
-}
 function populateKNFields(data={}) {
-  document.getElementById('pdf_layout').value=data.pdf_layout || 'kn';
   document.getElementById('f_work_package').value=data.work_package || '';
   const hourly=document.getElementById('kn_hourly_fields');hourly.replaceChildren();
   for(let i=0;i<11;i++) {
@@ -2639,33 +2300,122 @@ function populateKNFields(data={}) {
     input.setAttribute('aria-label',label.textContent);col.append(label,input);hourly.appendChild(col);
   }
   document.getElementById('kn_conclusion_rows').replaceChildren();
-  (data.kn_conclusion || []).forEach(addKNConclusion);syncKNLayout();
+  (data.kn_conclusion || []).forEach(addKNConclusion);
 }
 
 function collectData() {
+  const v = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+
+  // Weather
+  const weather = {};
+  const wxFields = [
+    ['Morning',     'wx_morning'],
+    ['Afternoon',   'wx_afternoon'],
+    ['Evening',     'wx_evening'],
+    ['Wind',        'wx_wind'],
+    ['Temperature', 'wx_temp'],
+    ['Impact',      'wx_impact'],
+  ];
+  wxFields.forEach(([label, eid]) => { const el = document.getElementById(eid); if (el) weather[label] = el.value; });
+
+  // Global indirect manpower
+  const indirect_manpower = [];
+  document.querySelectorAll('#indirectContainer .indirect-row').forEach(row => {
+    indirect_manpower.push({
+      name:  row.querySelector('.mp-name').value,
+      role:  row.querySelector('.mp-role').value,
+      hours: row.querySelector('.mp-hours').value,
+    });
+  });
+
+  // Overall progress
+  const overall_progress = [];
+  document.querySelectorAll('#overallProgressContainer .overall-progress-row').forEach(row => {
+    const item = {};
+    OVERALL_PROGRESS_INPUTS.forEach(([field, selector]) => {
+      item[field] = row.querySelector(selector).value.trim();
+    });
+    if (Object.values(item).some(value => value)) overall_progress.push(item);
+  });
+
+  // Areas
+  const areas = [];
+  document.querySelectorAll('#areasContainer .area-card').forEach(block => {
+    const sel = block.querySelector('.area-sel');
+    const custom = block.querySelector('.area-custom');
+    const areaId = sel.value === '__custom__' ? custom.value : sel.value;
+
+    const activities_today = [];
+    block.querySelectorAll('.acts-today .act-item input').forEach(inp => {
+      if (inp.value.trim()) activities_today.push(inp.value.trim());
+    });
+    const activities_tomorrow = [];
+    block.querySelectorAll('.acts-tmr .act-item input').forEach(inp => {
+      if (inp.value.trim()) activities_tomorrow.push(inp.value.trim());
+    });
+
+    const manpower = [];
+    block.querySelectorAll('.dm-row').forEach(row => {
+      manpower.push({
+        name:  row.querySelector('.mp-name').value,
+        role:  row.querySelector('.mp-role').value,
+        hours: row.querySelector('.mp-hours').value,
+      });
+    });
+
+    const indirect_manpower_area = [];
+    block.querySelectorAll('.area-ind-row').forEach(row => {
+      indirect_manpower_area.push({
+        name:  row.querySelector('.mp-name').value,
+        role:  row.querySelector('.mp-role').value,
+        hours: row.querySelector('.mp-hours').value,
+      });
+    });
+
+    const photos = [];
+    block.querySelectorAll('.photo-box').forEach(box => {
+      const data     = box.querySelector('.photo-data').value;
+      const filename = box.querySelector('.photo-filename').value;
+      const desc     = box.querySelector('.photo-desc').value;
+      if (data || filename || desc) photos.push({ img_data: data, photo_filename: filename, desc });
+    });
+
+    const swapBtn = block.querySelector('.acts-swap-btn');
+    areas.push({
+      id: areaId,
+      activities_today,
+      activities_tomorrow,
+      activities_swapped: swapBtn?.dataset.swapped === '1',
+      manpower,
+      indirect_manpower: indirect_manpower_area,
+      constraints: (block.querySelector('.area-const') || {}).value || '',
+      remarks:     (block.querySelector('.area-rem')   || {}).value || '',
+      photos,
+    });
+  });
+
   return {
     section_order:  getSectionOrder(),
-    date:           formFieldValue('f_date'),
-    day_no:         formFieldValue('f_day_no'),
-    project_no:     formFieldValue('f_project_no'),
-    location:       formFieldValue('f_location'),
-    customer:       formFieldValue('f_customer'),
-    equipment:      formFieldValue('f_equipment'),
-    project_title:  formFieldValue('f_project_title'),
-    photo_documentation_title: formFieldValue('f_photo_documentation_title'),
-    prepared_by:    formFieldValue('f_prepared_by'),
-    checked_by:     formFieldValue('f_checked_by'),
-    approved_by:    formFieldValue('f_approved_by'),
-    global_remarks: formFieldValue('f_global_remarks'),
-    pdf_layout: formFieldValue('pdf_layout'),
-    work_package: formFieldValue('f_work_package'),
+    date:           v('f_date'),
+    day_no:         v('f_day_no'),
+    project_no:     v('f_project_no'),
+    location:       v('f_location'),
+    customer:       v('f_customer'),
+    equipment:      v('f_equipment'),
+    project_title:  v('f_project_title'),
+    photo_documentation_title: v('f_photo_documentation_title'),
+    prepared_by:    v('f_prepared_by'),
+    checked_by:     v('f_checked_by'),
+    approved_by:    v('f_approved_by'),
+    global_remarks: v('f_global_remarks'),
+    work_package: v('f_work_package'),
     kn_conclusion: collectKNConclusion(),
     kn_weather_hourly: Array.from(document.querySelectorAll('#kn_hourly_fields input')).map(input=>input.value.trim()),
-    weather: collectWeatherData(),
-    indirect_manpower: collectManpowerRows(document, '#indirectContainer .indirect-row'),
+    weather,
+    indirect_manpower,
     show_overall_progress: document.getElementById('showOverallProgress')?.checked === true,
-    overall_progress: collectOverallProgressData(),
-    areas: Array.from(document.querySelectorAll('#areasContainer .area-card')).map(collectAreaData),
+    overall_progress,
+    areas,
     sign_offs: collectSignOffs(),
   };
 }
@@ -2690,7 +2440,9 @@ function populateForm(d) {
   set('f_photo_documentation_title', d.photo_documentation_title);
 
   const wx = d.weather || {};
-  Object.entries(WEATHER_FIELD_IDS).forEach(([k,id]) => { if (wx[k] !== undefined) set(id, wx[k]); });
+  const wxMap = { Morning:'wx_morning', Afternoon:'wx_afternoon', Evening:'wx_evening',
+                  Wind:'wx_wind', Temperature:'wx_temp', Impact:'wx_impact' };
+  Object.entries(wxMap).forEach(([k,id]) => { if (wx[k] !== undefined) set(id, wx[k]); });
 
   // Global indirect manpower
   document.getElementById('indirectContainer').innerHTML = '';
@@ -2721,33 +2473,11 @@ function populateForm(d) {
 // ════════════════════════════════════════════════════════════
 // GENERATE PDF
 // ════════════════════════════════════════════════════════════
-async function uploadArchivedPdfToDrive(filename, archiveId='', reportId='') {
-  const response = await fetch('/reports/drive-upload', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename, archive_id:archiveId, report_id:reportId}),
-  });
-  let payload = {};
-  try { payload = await response.json(); } catch (_) {}
-  if (!response.ok) {
-    const error = new Error(payload.error || `Google Drive upload failed (${response.status}).`);
-    error.code = payload.code || 'drive_upload_failed';
-    throw error;
-  }
-  return payload;
-}
-
-let _pdfGenerationInFlight = false;
-
 async function generatePDF() {
-  if (_pdfGenerationInFlight) return;
-  if (!validateForm()) return;
+  if (_pdfGenerationInFlight || !validateForm()) return;
   _pdfGenerationInFlight = true;
-
-  if (!await _ensureMediaReady('generate the PDF')) {
-    _pdfGenerationInFlight = false;
-    return;
-  }
+  try {
+  if (!await _ensureMediaReady('generate the PDF')) return;
 
   // Check for duplicate report date
   const reportDate = (document.getElementById('f_date') || {}).value;
@@ -2758,26 +2488,18 @@ async function generatePDF() {
         const chkData = await chk.json();
         if (chkData.exists) {
           const go = confirm(`⚠ A report for ${reportDate} already exists (${chkData.filename}).\n\nGenerate a new one anyway?`);
-          if (!go) {
-            _pdfGenerationInFlight = false;
-            return;
-          }
+          if (!go) return;
         }
       }
     } catch(e) { /* non-fatal — proceed if check fails */ }
   }
 
-  const generateButtons = Array.from(
-    document.querySelectorAll('[onclick="generatePDF()"]')
-  );
-  const originalButtonHtml = generateButtons.map(button => button.innerHTML);
-  generateButtons.forEach(button => {
-    button.innerHTML = '⏳ Generating…';
-    button.disabled = true;
-  });
+  const btn = document.querySelector('[onclick="generatePDF()"]');
+  const orig = btn ? btn.innerHTML : '';
+  if (btn) { btn.innerHTML = '⏳ Generating…'; btn.disabled = true; }
 
   try {
-    // Media is ready; send compact filename references to the server.
+    // Step 2 — send to server and animate progress while waiting
     _setProgress('⚙️ Building PDF on server…', 20);
     _animateProgress(20, 85, 12000);   // animate over 12 s (covers most reports)
 
@@ -2789,9 +2511,6 @@ async function generatePDF() {
     const archiveStatus = r.headers.get('X-Report-Archive-Status');
     const pdfArchiveStatus = r.headers.get('X-Report-Pdf-Archive-Status');
     const jsonArchiveStatus = r.headers.get('X-Report-Json-Archive-Status');
-    const archiveId = r.headers.get('X-Report-Archive-ID') || '';
-    const reportId = r.headers.get('X-Report-ID') || '';
-    const driveConfigured = r.headers.get('X-GDrive-Configured') === 'true';
 
     if (_genTimer) { clearInterval(_genTimer); _genTimer = null; }
 
@@ -2808,29 +2527,13 @@ async function generatePDF() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     const d = collectData();
-    const fallbackName = `Daily Report - PT GPA - KN - ${d.date||'Report'} (Day ${d.day_no||''}).pdf`;
-    let fname = fallbackName;
-    const encodedFilename = r.headers.get('X-Report-Filename');
-    if (encodedFilename) {
-      try { fname = decodeURIComponent(encodedFilename); } catch (_) {}
-    }
+    const fname = `Daily Report - PT GPA - KN - ${d.date||'Report'} (Day ${d.day_no||''}).pdf`;
     a.href = url;
     a.download = fname;
     a.click();
     URL.revokeObjectURL(url);
 
     _storeLastPdf(blob, fname, d.date, d.day_no);
-
-    let driveResult = null;
-    let driveError = null;
-    if (driveConfigured && pdfArchiveStatus !== 'failed') {
-      _setProgress('☁ Uploading PDF to Google Drive…', 97);
-      try {
-        driveResult = await uploadArchivedPdfToDrive(fname, archiveId, reportId);
-      } catch (err) {
-        driveError = err;
-      }
-    }
 
     _setProgress('✅ PDF ready!', 100);
     setTimeout(_hideProgress, 1500);
@@ -2840,10 +2543,6 @@ async function generatePDF() {
       toast('PDF saved, but its Monthly Report JSON could not be archived. Please tell the admin.', 'warning');
     } else if (archiveStatus === 'failed') {
       toast('PDF downloaded, but part of the report archive could not be saved.', 'warning');
-    } else if (driveError) {
-      toast('PDF downloaded, but Google Drive upload failed: ' + driveError.message, 'warning');
-    } else if (driveResult) {
-      toast('✅ PDF downloaded and uploaded to Google Drive!', 'success');
     } else {
       toast('✅ PDF generated and downloaded!', 'success');
     }
@@ -2852,10 +2551,9 @@ async function generatePDF() {
     _hideProgress();
     toast('❌ Error generating PDF: ' + err.message, 'danger');
   } finally {
-    generateButtons.forEach((button, index) => {
-      button.innerHTML = originalButtonHtml[index];
-      button.disabled = false;
-    });
+    if (btn) { btn.innerHTML = orig; btn.disabled = false; }
+  }
+  } finally {
     _pdfGenerationInFlight = false;
   }
 }
@@ -2866,38 +2564,10 @@ async function generatePDF() {
 // ════════════════════════════════════════════════════════════
 // GENERATION PROGRESS BAR
 // ════════════════════════════════════════════════════════════
-let _pendingUploads = 0;
 let _mediaUploadSequence = 0;
+let _pdfGenerationInFlight = false;
+let _pendingUploads = 0;   // tracks in-flight photo uploads
 let _genTimer = null;
-
-function _hasMediaUploadFailures() {
-  return Array.from(document.querySelectorAll('.photo-box, .sig-box'))
-    .some(box => box.dataset.uploadState === 'failed');
-}
-
-async function _ensureMediaReady(action, timeoutMs=27000) {
-  let showedProgress = false;
-  if (_pendingUploads > 0) {
-    _setProgress('Finishing media uploads…', 10);
-    showedProgress = true;
-    const deadline = Date.now() + timeoutMs;
-    while (_pendingUploads > 0 && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 200));
-    }
-  }
-  if (_pendingUploads > 0) {
-    _hideProgress();
-    toast(`Media upload is taking too long. Retry before you ${action}.`, 'warning');
-    return false;
-  }
-  if (_hasMediaUploadFailures()) {
-    _hideProgress();
-    toast(`A photo or signature upload failed. Retry or replace it before you ${action}.`, 'warning');
-    return false;
-  }
-  if (showedProgress) _hideProgress();
-  return true;
-}
 
 function _setProgress(msg, pct) {
   document.getElementById('gen-progress').style.display = '';
@@ -2929,6 +2599,7 @@ function previewPDF() {
 }
 
 async function renderPDFPreview() {
+  if (!await _ensureMediaReady('preview the PDF')) return;
   if (!_previewModal) _previewModal = new bootstrap.Modal(document.getElementById('previewModal'));
   const frame = document.getElementById('previewFrame');
   const loading = document.getElementById('previewLoading');
@@ -2937,9 +2608,6 @@ async function renderPDFPreview() {
   loading.innerHTML = '<div class="spinner-border mb-2"></div><br>Generating preview…';
   _previewModal.show();
   try {
-    if (!await _ensureMediaReady('preview the PDF')) {
-      throw new Error('Complete or retry the media upload first.');
-    }
     const r = await fetch('/preview', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
@@ -2963,84 +2631,35 @@ async function renderPDFPreview() {
 // ════════════════════════════════════════════════════════════
 // EXPORT / IMPORT / CLEAR DRAFT
 // ════════════════════════════════════════════════════════════
-async function exportDraft() {
+function exportDraft() {
   const data = collectData();
-  try {
-    if (!await _ensureMediaReady('export the draft')) return;
-    _hideProgress();
-    const response = await fetch('/export_draft_bundle', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(collectData()),
-    });
-    if (!response.ok) {
-      let message = `Export failed (${response.status})`;
-      try { const body = await response.json(); if (body.error) message = body.error; } catch (_) {}
-      throw new Error(message);
-    }
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `GPA_Report_Draft_${data.date || 'draft'}.zip`;
-    a.click();
-    URL.revokeObjectURL(url);
-    const photoCount = Number(response.headers.get('X-Draft-Photo-Count') || 0);
-    const missingCount = Number(response.headers.get('X-Draft-Missing-Photos') || 0);
-    const signatureCount = Number(response.headers.get('X-Draft-Signature-Count') || 0);
-    const missingSignatureCount = Number(response.headers.get('X-Draft-Missing-Signatures') || 0);
-    if (missingCount > 0 || missingSignatureCount > 0) {
-      toast(`Draft exported with ${photoCount} photo(s) and ${signatureCount} signature(s); ${missingCount + missingSignatureCount} media file(s) were unavailable.`, 'warning');
-    } else {
-      toast(`✓ Draft exported with ${photoCount} photo(s) and ${signatureCount} signature(s)`, 'success');
-    }
-  } catch (err) {
-    toast('Export failed: ' + err.message, 'danger');
-  }
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `GPA_Report_Draft_${data.date || 'draft'}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
-async function importDraft(input) {
+function importDraft(input) {
   const file = input.files[0]; if (!file) return;
-  try {
-    const form = new FormData();
-    form.append('file', file, file.name);
-    const response = await fetch('/import_draft_bundle', {method:'POST', body:form});
-    let result = {};
-    try { result = await response.json(); } catch (_) {}
-    if (!response.ok) throw new Error(result.error || `Import failed (${response.status})`);
-
-    populateForm(result.data || {});
-    const importedCount = Number(result.imported_photos || 0);
-    const missing = Array.isArray(result.missing_photos) ? result.missing_photos : [];
-    const importedSignatures = Number(result.imported_signatures || 0);
-    const missingSignatures = Array.isArray(result.missing_signatures) ? result.missing_signatures : [];
-    const missingMedia = [...missing, ...missingSignatures];
-    if (missingMedia.length) {
-      const details = missingMedia.slice(0, 10).map(item => {
-        const location = item.signature
-          ? `${item.label || 'Sign-off'} / signature ${item.signature}`
-          : `${item.area || 'Area'} / photo ${item.photo || '?'}`;
-        return `• ${location}: ${item.filename || '(inline image)'} — ${item.reason || 'file unavailable'}`;
-      }).join('\n');
-      const remainder = missingMedia.length > 10 ? `\n…and ${missingMedia.length - 10} more.` : '';
-      alert(
-        `Draft imported, but ${missingMedia.length} media file(s) were not available.\n` +
-        `The report data was preserved; replace the missing media before generating the PDF.\n\n` +
-        details + remainder
-      );
-      toast(`Draft imported: ${importedCount} photo(s), ${importedSignatures} signature(s), ${missingMedia.length} missing.`, 'warning');
-    } else {
-      toast(`✓ Draft imported with ${importedCount} photo(s) and ${importedSignatures} signature(s)`, 'success');
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const data = JSON.parse(e.target.result);
+      populateForm(data);
+    } catch(err) {
+      alert('Invalid draft file: ' + err.message);
     }
-  } catch(err) {
-    alert('Invalid draft file: ' + err.message);
-  } finally {
-    input.value = '';
-  }
+  };
+  reader.readAsText(file);
+  input.value = '';
 }
 
 function clearFormConfirm() {
   if (!confirm('Clear the entire form? This cannot be undone.')) return;
+  populateKNFields();
   applySectionOrder(DEFAULT_PDF_SECTION_ORDER);
   document.getElementById('areasContainer').innerHTML = '';
   document.getElementById('indirectContainer').innerHTML = '';
@@ -3105,6 +2724,9 @@ function loadSettings() {
   localProjects = normalizeProjectList(APP_CONFIG.projects || []);
   renderProjectTable();
 
+  // AI key
+  const aiKeyEl = document.getElementById('cfg_ai_key');
+  if (aiKeyEl) aiKeyEl.value = c.ai_api_key || '';
 }
 
 function saveSettings() {
@@ -3163,6 +2785,10 @@ function saveSettings() {
   });
   localMpDB = mpRows;
   payload.manpower_db = mpRows;
+
+  // AI key
+  const aiKeyVal = (document.getElementById('cfg_ai_key') || {}).value || '';
+  if (aiKeyVal) payload.ai_api_key = aiKeyVal;
 
   fetch('/save_config', {
     method: 'POST',
@@ -3309,27 +2935,7 @@ function checkLogoStatus() {
 // ════════════════════════════════════════════════════════════
 // PHOTO PASTE
 // ════════════════════════════════════════════════════════════
-function pastePhoto(btn) {
-  const box = btn.closest('.photo-box');
-  if (!navigator.clipboard || !navigator.clipboard.read) {
-    alert('Clipboard paste not supported. Please use Browse.');
-    return;
-  }
-  navigator.clipboard.read().then(items => {
-    for (const item of items) {
-      const type = item.types.find(t => t.startsWith('image/'));
-      if (type) {
-        item.getType(type).then(blob => {
-          const reader = new FileReader();
-          reader.onload = e => setPhoto(box, e.target.result);
-          reader.readAsDataURL(blob);
-        });
-        return;
-      }
-    }
-    alert('No image in clipboard.');
-  }).catch(() => alert('Clipboard access denied.'));
-}
+
 
 // ════════════════════════════════════════════════════════════
 // DEFAULTS ON FRESH FORM
@@ -3353,22 +2959,12 @@ function initDefaults() {
 }
 
 function initSignOffDefaults() {
-  if (formFieldValue('pdf_layout') === 'kn') {
-    populateSignOffs([
-      {label:'Prepared by', name:APP_CONFIG.prepared_by || '', role:''},
-      {label:'Checked by', name:APP_CONFIG.checked_by || '', role:'PT. Kertas Nusantara'},
-      {label:'Approved by', name:APP_CONFIG.approved_by || '', role:'PT. Kertas Nusantara'},
-      {label:'Approved by PMO', name:'', role:'PT. Kertas Nusantara'},
-    ]);
-    return;
-  }
-  const cfg = APP_CONFIG;
-  [
-    { label:'Prepared By',       name: cfg.prepared_by||'', role:'HSE / Administration' },
-    { label:'Checked By',        name: cfg.checked_by ||'', role:'Project Control'       },
-    { label:'Approved By',       name: cfg.approved_by||'', role:'Project Manager'       },
-    { label:'KN Representative', name: '',                   role:'PT. Kertas Nusantara'  },
-  ].forEach(d => addSignOffCol(d));
+  populateSignOffs([
+    {label:'Prepared by', name:APP_CONFIG.prepared_by || '', role:''},
+    {label:'Checked by', name:APP_CONFIG.checked_by || '', role:'PT. Kertas Nusantara'},
+    {label:'Approved by', name:APP_CONFIG.approved_by || '', role:'PT. Kertas Nusantara'},
+    {label:'Approved by PMO', name:'', role:'PT. Kertas Nusantara'},
+  ]);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -3409,15 +3005,8 @@ function showAutosaveStatus(message, type='info', autoHide=true) {
 }
 
 function _payloadContainsInlineMedia(payload) {
-  const hasPhoto = (payload.areas || []).some(area =>
-    (area.photos || []).some(photo =>
-      typeof photo.img_data === 'string' && photo.img_data.includes(',')
-    )
-  );
-  const hasSignature = (payload.sign_offs || []).some(signOff =>
-    typeof signOff.sig === 'string' && signOff.sig.includes(',')
-  );
-  return hasPhoto || hasSignature;
+  return (payload.areas || []).some(area => (area.photos || []).some(photo =>
+    typeof photo.img_data === 'string' && photo.img_data.includes(',')));
 }
 
 async function _drainDraftSaves() {
@@ -3813,19 +3402,14 @@ function toggleAIChat() {
 function clearAIChat() {
   _aiHistory = [];
   const msgs = document.getElementById('aiChatMessages');
-  msgs.replaceChildren();
-  const welcome = document.createElement('div');
-  welcome.className = 'chat-msg system';
-  welcome.textContent = "Describe today's work naturally — I'll fill the form for you.";
-  msgs.appendChild(welcome);
+  msgs.innerHTML = '<div class="chat-msg system">Describe today\'s work naturally — I\'ll fill the form for you.</div>';
 }
 
-function _addChatMsg(role, text) {
+function _addChatMsg(role, html) {
   const msgs = document.getElementById('aiChatMessages');
   const div = document.createElement('div');
   div.className = 'chat-msg ' + role;
-  div.textContent = String(text || '');
-  div.style.whiteSpace = 'pre-wrap';
+  div.innerHTML = html;
   msgs.appendChild(div);
   msgs.scrollTop = msgs.scrollHeight;
   return div;
@@ -3838,7 +3422,7 @@ async function sendAIMessage() {
   if (!msg) return;
 
   box.value = '';
-  _addChatMsg('user', msg);
+  _addChatMsg('user', msg.replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'));
 
   _aiSending = true;
   const btn = document.getElementById('aiSendBtn');
@@ -3878,33 +3462,23 @@ async function sendAIMessage() {
     _aiHistory.push({role:'user', content: msg});
     _aiHistory.push({role:'assistant', content: JSON.stringify(data)});
 
-    // Claude output is untrusted. Build the response with DOM nodes and
-    // textContent; never insert provider text through innerHTML.
-    const reply = _addChatMsg('bot', data.reply || '');
+    // Build reply HTML
+    let replyHtml = (data.reply || '').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
 
     if (data.updates && Object.keys(data.updates).length > 0) {
       const count = Object.keys(data.updates).length;
-      const badge = document.createElement('span');
-      badge.className = 'updates-badge';
-      badge.dataset.updates = JSON.stringify(data.updates);
-      badge.textContent = `📝 Apply ${count} update(s) to form`;
-      badge.addEventListener('click', () => applyAIUpdates(badge));
-      reply.append(document.createElement('br'), badge);
+      replyHtml += `<br><span class="updates-badge" onclick="applyAIUpdates(this)" data-updates='${JSON.stringify(data.updates).replace(/'/g,"&#39;")}'>📝 Apply ${count} update(s) to form</span>`;
     }
 
-    if (Array.isArray(data.missing) && data.missing.length > 0) {
-      const missing = document.createElement('span');
-      missing.style.cssText = 'font-size:.7rem;color:#888;margin-top:4px;display:inline-block;';
-      missing.textContent = `Missing: ${data.missing.join(', ')}`;
-      reply.append(document.createElement('br'), missing);
+    if (data.missing && data.missing.length > 0) {
+      replyHtml += `<br><span style="font-size:.7rem;color:#888;margin-top:4px;display:inline-block;">Missing: ${data.missing.join(', ')}</span>`;
     }
 
     if (data.ready) {
-      const ready = document.createElement('span');
-      ready.style.cssText = 'font-size:.72rem;color:green;font-weight:600;margin-top:4px;display:inline-block;';
-      ready.textContent = '✅ Report looks ready — review the form and click Generate PDF!';
-      reply.append(document.createElement('br'), ready);
+      replyHtml += `<br><span style="font-size:.72rem;color:green;font-weight:600;margin-top:4px;display:inline-block;">✅ Report looks ready — review the form and click Generate PDF!</span>`;
     }
+
+    _addChatMsg('bot', replyHtml);
 
   } catch(err) {
     typing.remove();
@@ -3916,25 +3490,36 @@ async function sendAIMessage() {
   }
 }
 
-function setAIFormField(id, value) {
-  const field = document.getElementById(id);
-  if (field && value !== undefined && value !== '') field.value = value;
-}
+function applyAIUpdates(badge) {
+  let updates;
+  try {
+    updates = JSON.parse(badge.dataset.updates);
+  } catch { return; }
 
-function applyAIWeatherUpdates(weather) {
-  if (!weather) return;
-  Object.entries(WEATHER_FIELD_IDS).forEach(([key, id]) => {
-    if (weather[key] !== undefined) setAIFormField(id, weather[key]);
-  });
-}
+  const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined && val !== '') el.value = val; };
 
-function applyAIIndirectManpower(manpower) {
-  if (!manpower || manpower.length === 0) return;
-  document.getElementById('indirectContainer').innerHTML = '';
-  manpower.forEach(item => addIndirectRow(item));
-}
+  // Simple fields
+  set('f_date', updates.date);
+  set('f_day_no', updates.day_no);
+  set('f_global_remarks', updates.global_remarks);
+  set('f_photo_documentation_title', updates.photo_documentation_title);
 
-function applyAIProgressUpdates(updates) {
+  // Weather
+  if (updates.weather) {
+    const wxMap = { Morning:'wx_morning', Afternoon:'wx_afternoon', Evening:'wx_evening',
+                    Wind:'wx_wind', Temperature:'wx_temp', Impact:'wx_impact' };
+    Object.entries(wxMap).forEach(([k,id]) => {
+      if (updates.weather[k] !== undefined) set(id, updates.weather[k]);
+    });
+  }
+
+  // Global indirect manpower
+  if (updates.indirect_manpower && updates.indirect_manpower.length > 0) {
+    document.getElementById('indirectContainer').innerHTML = '';
+    updates.indirect_manpower.forEach(m => addIndirectRow(m));
+  }
+
+  // Overall progress
   if (updates.show_overall_progress !== undefined) {
     const overallProgressToggle = document.getElementById('showOverallProgress');
     if (overallProgressToggle) {
@@ -3947,29 +3532,13 @@ function applyAIProgressUpdates(updates) {
     updates.overall_progress.forEach(row => addOverallProgressRow(row));
     updateOverallProgressTotals();
   }
-}
 
-function applyAIAreaUpdates(areas) {
-  if (!areas || areas.length === 0) return;
-  document.getElementById('areasContainer').innerHTML = '';
-  _aidx = 0;
-  areas.forEach(area => addAreaBlock(area));
-}
-
-function applyAIUpdates(badge) {
-  let updates;
-  try {
-    updates = JSON.parse(badge.dataset.updates);
-  } catch { return; }
-
-  setAIFormField('f_date', updates.date);
-  setAIFormField('f_day_no', updates.day_no);
-  setAIFormField('f_global_remarks', updates.global_remarks);
-  setAIFormField('f_photo_documentation_title', updates.photo_documentation_title);
-  applyAIWeatherUpdates(updates.weather);
-  applyAIIndirectManpower(updates.indirect_manpower);
-  applyAIProgressUpdates(updates);
-  applyAIAreaUpdates(updates.areas);
+  // Areas
+  if (updates.areas && updates.areas.length > 0) {
+    document.getElementById('areasContainer').innerHTML = '';
+    _aidx = 0;
+    updates.areas.forEach(a => addAreaBlock(a));
+  }
 
   updateHeadcount();
   badge.textContent = '✅ Applied!';
@@ -4032,16 +3601,15 @@ document.addEventListener('DOMContentLoaded', () => {
   if (dateField) dateField.addEventListener('change', updateAutoDay);
   updateAutoDay();
 
-  // Save only compact filename-based data. Visibility events run early enough
-  // for browsers to finish the small keepalive request.
+  // Auto-save draft every 90s
   setInterval(() => saveDraft({automatic:true}), 90000);
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') {
-      saveDraft({automatic:true, keepalive:true});
+
+  // Save on page unload
+  window.addEventListener('beforeunload', event => {
+    if (_pendingUploads > 0 || _hasMediaUploadFailures() || _draftSaveInFlight) {
+      event.preventDefault();
+      event.returnValue = '';
     }
-  });
-  window.addEventListener('pagehide', () => {
-    saveDraft({automatic:true, keepalive:true});
   });
 
   // Hint update

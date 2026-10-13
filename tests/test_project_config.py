@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from daily_report_app import DEFAULT_PROJECTS, app, load_config, normalize_projects
+from daily_report_app import DEFAULT_PROJECTS, app, load_config
 
 
 class ProjectConfigTests(unittest.TestCase):
@@ -27,10 +27,7 @@ class ProjectConfigTests(unittest.TestCase):
 
     def test_default_config_contains_requested_project_pairs(self):
         self.assertEqual(
-            [
-                {"title": row["title"], "project_no": row["project_no"]}
-                for row in DEFAULT_PROJECTS
-            ],
+            DEFAULT_PROJECTS,
             [
                 {
                     'title': 'Electrical Construction and Installation - Manpower Supply',
@@ -46,58 +43,6 @@ class ProjectConfigTests(unittest.TestCase):
                 },
             ],
         )
-        self.assertIn(
-            "Electrical Installation and Construction - Manpower Supply",
-            DEFAULT_PROJECTS[0]["title_aliases"],
-        )
-        self.assertIn(
-            "RE-ACTIVATION TURBINES AND GENERATORS",
-            DEFAULT_PROJECTS[2]["title_aliases"],
-        )
-        self.assertIn(
-            "REACTIVATION FOR TURBINES AND GENERATORS",
-            DEFAULT_PROJECTS[2]["title_aliases"],
-        )
-
-    def test_existing_default_project_pairs_gain_compatibility_aliases(self):
-        legacy_projects = [
-            {"title": row["title"], "project_no": row["project_no"]}
-            for row in DEFAULT_PROJECTS
-        ]
-        with open(self.config_path, 'w', encoding='utf-8') as config_file:
-            json.dump({'projects': legacy_projects}, config_file)
-
-        projects = load_config()['projects']
-
-        self.assertIn(
-            "Electrical Installation and Construction - Manpower Supply",
-            projects[0]["title_aliases"],
-        )
-        self.assertIn(
-            "REACTIVATION FOR TURBINES AND GENERATORS",
-            projects[2]["title_aliases"],
-        )
-
-    def test_project_aliases_and_work_hours_policy_round_trip(self):
-        projects = [{
-            "title": "Canonical Project",
-            "project_no": "P-001",
-            "title_aliases": ["Legacy Daily Title"],
-            "work_hours_policy": {
-                "mode": "elapsed_less_break",
-                "break_minutes": 60,
-                "deduct_when_elapsed_gte_minutes": 360,
-                "allow_overnight": True,
-            },
-        }]
-
-        response = self.client.post('/save_config', json={'projects': projects})
-
-        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
-        saved = load_config()['projects'][0]
-        self.assertEqual(saved['title_aliases'], ["Legacy Daily Title"])
-        self.assertEqual(saved['work_hours_policy']['mode'], "elapsed_less_break")
-        self.assertEqual(saved['work_hours_policy']['break_minutes'], 60)
 
     def test_legacy_config_gains_projects_without_losing_old_defaults(self):
         with open(self.config_path, 'w', encoding='utf-8') as config_file:
@@ -111,39 +56,6 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(config['project_title'], 'Legacy Project')
         self.assertEqual(config['project_no'], 'LEGACY-001')
         self.assertEqual(config['projects'], DEFAULT_PROJECTS)
-
-    def test_legacy_ai_key_is_removed_from_memory_disk_and_config_endpoint(self):
-        with open(self.config_path, 'w', encoding='utf-8') as config_file:
-            json.dump(
-                {
-                    'project_title': 'Legacy Project',
-                    'project_no': 'LEGACY-001',
-                    'ai_api_key': 'sk-ant-must-not-leak',
-                },
-                config_file,
-            )
-
-        config = load_config()
-
-        self.assertNotIn('ai_api_key', config)
-        with open(self.config_path, encoding='utf-8') as config_file:
-            persisted = json.load(config_file)
-        self.assertNotIn('ai_api_key', persisted)
-
-        response = self.client.get('/get_config')
-        self.assertEqual(response.status_code, 200)
-        self.assertNotIn('ai_api_key', response.get_json())
-        self.assertNotIn('sk-ant-must-not-leak', response.get_data(as_text=True))
-
-    def test_ai_key_cannot_be_saved_in_application_config(self):
-        response = self.client.post(
-            '/save_config',
-            json={'ai_api_key': 'sk-ant-browser-secret'},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertIn('ANTHROPIC_API_KEY', response.get_json()['error'])
-        self.assertNotIn('ai_api_key', load_config())
 
     def test_admin_can_save_same_title_with_different_numbers(self):
         projects = [
@@ -181,67 +93,6 @@ class ProjectConfigTests(unittest.TestCase):
                 response = self.client.post('/save_config', json={'projects': projects})
                 self.assertEqual(response.status_code, 400)
 
-    def test_invalid_project_metadata_is_rejected_in_strict_admin_mode(self):
-        invalid_entries = [
-            {
-                'title': 'Invalid Aliases',
-                'project_no': 'ALIAS-001',
-                'title_aliases': {'not': 'a list'},
-            },
-            {
-                'title': 'Invalid Mode',
-                'project_no': 'MODE-001',
-                'work_hours_policy': {'mode': 'unsupported'},
-            },
-            {
-                'title': 'Invalid Break',
-                'project_no': 'BREAK-001',
-                'work_hours_policy': {
-                    'mode': 'elapsed_less_break',
-                    'break_minutes': 999,
-                },
-            },
-        ]
-
-        for project in invalid_entries:
-            with self.subTest(project=project['title']):
-                response = self.client.post(
-                    '/save_config',
-                    json={'projects': [project]},
-                )
-                self.assertEqual(response.status_code, 400)
-
-    def test_legacy_project_normalization_remains_lenient_and_deduplicated(self):
-        projects = normalize_projects([
-            None,
-            {
-                'title': ' Canonical Project ',
-                'number': ' LEGACY-001 ',
-                'aliases': 'Old Daily Name; old daily name; Canonical Project',
-                'work_hours_policy': {
-                    'mode': 'unsupported',
-                    'break_minutes': 'invalid',
-                },
-            },
-            {'title': 'canonical project', 'project_no': 'legacy-001'},
-            {'title': '', 'project_no': 'EMPTY'},
-        ])
-
-        self.assertEqual(len(projects), 1)
-        self.assertEqual(projects[0]['title'], 'Canonical Project')
-        self.assertEqual(projects[0]['project_no'], 'LEGACY-001')
-        self.assertEqual(projects[0]['title_aliases'], ['Old Daily Name'])
-        self.assertEqual(
-            projects[0]['work_hours_policy'],
-            {
-                'mode': 'elapsed_no_break',
-                'break_minutes': 0,
-                'deduct_when_elapsed_gte_minutes': 360,
-                'allow_overnight': True,
-                'version': 'work-hours-policy/1',
-            },
-        )
-
     def test_non_admin_cannot_change_master_projects(self):
         self.set_session(is_admin=False)
 
@@ -260,19 +111,6 @@ class ProjectConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-
-    def test_save_config_updates_only_exposed_fields_and_merges_theme(self):
-        response = self.client.post('/save_config', json={
-            'company_name': 'PT. Updated Company',
-            'theme': {'primary': '#112233'},
-            'unexpected_setting': 'must not be persisted',
-        })
-
-        self.assertEqual(response.status_code, 200)
-        config = load_config()
-        self.assertEqual(config['company_name'], 'PT. Updated Company')
-        self.assertEqual(config['theme']['primary'], '#112233')
-        self.assertNotIn('unexpected_setting', config)
 
     def test_project_titles_are_safely_serialized_into_page(self):
         malicious = '</script><script>alert("project")</script>'

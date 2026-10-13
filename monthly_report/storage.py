@@ -30,8 +30,6 @@ _DATA_URI_BASE64 = re.compile(
 )
 _PLAIN_BASE64 = re.compile(r"^[A-Za-z0-9+/\r\n]+={0,2}$")
 _DROP_INLINE_KEYS = {"img_data", "image_data", "signature_data"}
-_DROP_PATH_KEYS = {"photo_path", "sig_path", "_photo_path", "_sig_path"}
-_MEDIA_FILENAME_KEYS = ("photo_filename", "sig_filename")
 
 
 def _safe_component(value: Any, label: str) -> str:
@@ -227,16 +225,14 @@ class _Sanitizer:
                 if key in _DROP_INLINE_KEYS or _is_inline_base64(raw_value, key=key):
                     continue
                 # Filesystem paths are accepted only through trusted function args.
-                if key in _DROP_PATH_KEYS:
+                if key == "photo_path":
                     continue
                 cleaned[key] = self.clean(raw_value)
 
-            for filename_key in _MEDIA_FILENAME_KEYS:
-                if filename_key not in value:
-                    continue
-                filename = _safe_photo_filename(value.get(filename_key))
+            if "photo_filename" in value:
+                filename = _safe_photo_filename(value.get("photo_filename"))
                 if filename:
-                    cleaned[filename_key] = filename
+                    cleaned["photo_filename"] = filename
                     source = self._photo_source(filename)
                     if source is not None:
                         asset = _copy_hashed_asset(source, self.canonical_dir / "assets")
@@ -288,65 +284,6 @@ def _next_revision(
     return maximum + 1
 
 
-
-def _normalise_activity_text(value: Any) -> str:
-    text = str(value or "").casefold()
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
-
-
-def _enrich_photo_links(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Add stable area/activity provenance to Daily Report photo entries.
-
-    Existing explicit metadata wins. Legacy ``desc`` captions are matched only
-    against activities from the same area. This makes future Weekly/Monthly
-    reports independent of PDF image order for canonical JSON sources.
-    """
-    result = copy.deepcopy(dict(payload))
-    report_date = str(result.get("date") or "")[:10]
-    areas = result.get("areas")
-    if not isinstance(areas, list):
-        return result
-    for area in areas:
-        if not isinstance(area, dict):
-            continue
-        area_id = str(area.get("id") or area.get("name") or "").strip()
-        statuses: dict[str, str] = {}
-        for row in area.get("activity_statuses", []) if isinstance(area.get("activity_statuses"), list) else []:
-            if isinstance(row, Mapping):
-                key = _normalise_activity_text(row.get("description"))
-                if key:
-                    statuses[key] = str(row.get("status") or "").strip()
-        activities: list[tuple[str, str, str]] = []
-        for description in area.get("activities_today", []) if isinstance(area.get("activities_today"), list) else []:
-            text = " ".join(str(description or "").split()).strip()
-            key = _normalise_activity_text(text)
-            if not key:
-                continue
-            stable = hashlib.sha256(f"{report_date}|{area_id}|{key}".encode("utf-8")).hexdigest()[:24]
-            activities.append((key, text, stable))
-        photos = area.get("photos")
-        if not isinstance(photos, list):
-            continue
-        enriched = []
-        for photo in photos:
-            if not isinstance(photo, Mapping):
-                enriched.append(copy.deepcopy(photo))
-                continue
-            row = copy.deepcopy(dict(photo))
-            row.setdefault("area_id", area_id)
-            caption_key = _normalise_activity_text(row.get("activity_description") or row.get("desc"))
-            match = next((item for item in activities if caption_key and (caption_key == item[0] or item[0] in caption_key or caption_key in item[0])), None)
-            if match:
-                key, description, stable = match
-                row.setdefault("activity_id", stable)
-                row.setdefault("activity_description", description)
-                status = statuses.get(key)
-                if status:
-                    row.setdefault("activity_status", status)
-            enriched.append(row)
-        area["photos"] = enriched
-    return result
-
 def archive_final_daily_record(
     data_dir: os.PathLike[str] | str,
     username: str,
@@ -361,8 +298,8 @@ def archive_final_daily_record(
     """Archive an immutable canonical JSON record for a generated daily report.
 
     Inline base64 images/signatures are removed.  If ``photo_base_dir`` or a
-    ``photo_paths`` mapping is supplied, referenced photos and signatures are
-    copied once to a content-addressed asset directory and hashed.
+    ``photo_paths`` mapping is supplied, referenced photos are copied once to a
+    content-addressed asset directory and their hashes are recorded.
     """
 
     if not isinstance(payload, Mapping):
@@ -404,7 +341,7 @@ def archive_final_daily_record(
         photo_base_dir=photo_base_dir,
         photo_paths=photo_paths,
     )
-    clean_payload = sanitizer.clean(_enrich_photo_links(payload))
+    clean_payload = sanitizer.clean(payload)
 
     record = {
         "schema_version": CANONICAL_SCHEMA_VERSION,
@@ -520,11 +457,6 @@ def list_canonical_records(
                 str(_record_metadata(record, "project_title"))
             ) != wanted_title:
                 continue
-            # Bind ownership to the directory we actually traversed.  This is
-            # intentionally added only to the in-memory representation; old
-            # canonical JSON files remain immutable on disk.
-            record["_canonical_owner"] = current_username
-            record["username"] = current_username
             records.append(record)
 
     def sort_key(record: Mapping[str, Any]) -> tuple[Any, ...]:

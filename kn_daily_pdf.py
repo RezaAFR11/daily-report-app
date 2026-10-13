@@ -22,6 +22,8 @@ NORMAL = ParagraphStyle('kn-normal', fontName='Helvetica', fontSize=8, leading=1
 BOLD = ParagraphStyle('kn-bold', parent=NORMAL, fontName='Helvetica-Bold')
 SMALL = ParagraphStyle('kn-small', parent=NORMAL, fontSize=7, leading=8.5)
 PHOTO_CAPTION = ParagraphStyle('kn-photo-caption', parent=SMALL, fontName='Helvetica-Oblique')
+DOCUMENTATION_TITLE = ParagraphStyle('documentation-title', parent=BOLD, fontSize=16, leading=19, alignment=1)
+DOCUMENTATION_GREEN = colors.HexColor('#d6e3bc')
 CENTER = ParagraphStyle('kn-center', parent=SMALL, alignment=1)
 
 
@@ -141,11 +143,13 @@ def photo_tables(report):
             elif photo.get('photo_filename') or photo.get('desc'):
                 raise ValueError('A documentation photo is unavailable. Upload it again before generating.')
     if not photos:
-        return [numbered('DOCUMENTATION PHOTO',[])]
+        empty=table([[cell('DOCUMENTATION PHOTO',DOCUMENTATION_TITLE)], [cell('-')]], [WIDTH],
+                    commands=[('BACKGROUND',(0,0),(-1,0),DOCUMENTATION_GREEN)])
+        return [empty]
     result=[];cw=WIDTH/3;card_w=cw-6;image_h=34*mm
     for start in range(0,len(photos),12):
         if result: result.append(PageBreak())
-        rows=[[cell('DOCUMENTATION PHOTO',BOLD),'','']]
+        rows=[[cell('DOCUMENTATION PHOTO',DOCUMENTATION_TITLE),'','']]
         for r in range(start,min(start+12,len(photos)),3):
             prepared=[]
             for area,desc,source in photos[r:min(r+3,start+12)]:
@@ -179,6 +183,7 @@ def photo_tables(report):
                 cards.append(card)
             rows.append(cards+['']*(3-len(cards)))
         grid=table(rows,[cw]*3,1,[('SPAN',(0,0),(-1,0)),
+                   ('BACKGROUND',(0,0),(-1,0),DOCUMENTATION_GREEN),
                    ('LEFTPADDING',(0,1),(-1,-1),3),('RIGHTPADDING',(0,1),(-1,-1),3),
                    ('TOPPADDING',(0,1),(-1,-1),3),('BOTTOMPADDING',(0,1),(-1,-1),3)])
         grid.splitInRow=0  # Keep each photo and its caption together.
@@ -228,7 +233,23 @@ def build_story(report, signature_cell):
     return story
 
 
-def generate_kn_pdf(report, output_path, logos, signature_cell):
+def signature_image(source, width):
+    if not source:
+        return Spacer(1,20*mm)
+    if isinstance(source,str) and source.startswith('data:'):
+        source=io.BytesIO(base64.b64decode(source.split(',',1)[1]))
+    try:
+        with PILImage.open(source) as raw:
+            image=ImageOps.exif_transpose(raw).convert('RGBA')
+            scale=min((width-10*mm)/image.width,20*mm/image.height)
+            buf=io.BytesIO();image.save(buf,'PNG');buf.seek(0)
+            return Image(buf,width=image.width*scale,height=image.height*scale)
+    except (OSError,ValueError) as exc:
+        raise ValueError('A signature image cannot be read. Please upload it again.') from exc
+
+
+def generate_kn_pdf(report, output_path, logos, signature_cell=None):
+    signature_cell = signature_cell or signature_image
     identity=header_table(report)
     _,identity_h=identity.wrap(WIDTH,PAGE_H)
     header_bottom=PAGE_H-35*mm-identity_h
