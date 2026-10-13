@@ -100,6 +100,8 @@ def manpower(people):
         if not any(str(p.get(k) or '').strip() for k in ('name','role','hours','qty')):
             continue
         label = ' / '.join(str(p[k]).strip() for k in ('name','role') if p.get(k))
+        if p.get('_display_scope'):
+            label = f"{label or '-'} / {p['_display_scope']}"
         # Each named entry represents one person, unless an explicit quantity is supplied.
         qty = p.get('qty', 1 if p.get('name') else '-')
         out.append([len(out)+1,label or '-',qty,p.get('hours')])
@@ -286,10 +288,11 @@ def progress_table(report):
 
 def build_story(report, signature_cell):
     today=named_lines(report,'activities_today'); tomorrow=named_lines(report,'activities_tomorrow')
-    indirect=list(report.get('indirect_manpower') or [])
+    indirect=[dict(p, _display_scope='Global') for p in (report.get('indirect_manpower') or [])]
     direct=[]
     for area in report.get('areas',[]):
-        indirect.extend(area.get('indirect_manpower') or [])
+        indirect.extend(dict(p, _display_scope=str(area.get('id') or '').strip() or 'Area not specified')
+                        for p in (area.get('indirect_manpower') or []))
         direct.extend(area.get('manpower') or [])
     story=[weather(report),Spacer(1,4*mm),
            paired('B. ACTIVITY TODAY','C. ACTIVITY TOMMOROW',['No.','Description'],
