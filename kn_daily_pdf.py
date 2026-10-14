@@ -300,7 +300,8 @@ def build_story(report, signature_cell):
     for area in report.get('areas',[]):
         indirect.extend(dict(p, _display_scope=str(area.get('id') or '').strip() or 'Area not specified')
                         for p in (area.get('indirect_manpower') or []))
-        direct.extend(area.get('manpower') or [])
+        direct.extend(dict(p, _display_scope=str(area.get('id') or '').strip() or 'Area not specified')
+                      for p in (area.get('manpower') or []))
     story=[weather(report),Spacer(1,4*mm),
            paired('B. ACTIVITY TODAY','C. ACTIVITY TOMMOROW',['No.','Description'],
                   [[i,v] for i,v in enumerate(today,1)],[[i,v] for i,v in enumerate(tomorrow,1)],
