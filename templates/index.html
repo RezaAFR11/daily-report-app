@@ -1073,7 +1073,7 @@ const DEFAULT_PDF_SECTION_ORDER = [
 ];
 const PDF_SECTION_DEFINITIONS = {
   report_information: { label:'Report Information', description:'Project, date, customer, and report details' },
-  weather:             { label:'Weather Report', description:'Morning, afternoon, evening, and work impact' },
+  weather:             { label:'Weather Report', description:'Morning, midday, afternoon, late afternoon, and work impact' },
   indirect_manpower:   { label:'Indirect Manpower', description:'Global indirect manpower list' },
   overall_progress:    { label:'Overall Progress', description:'Included only when the Overall Progress toggle is ON' },
   area_activities:     { label:'Daily Activities', description:'Activity today and tomorrow for each area' },
@@ -2275,7 +2275,7 @@ function collectKNConclusion() {
 function populateWeatherIntervals(values=[]) {
   const container=document.getElementById('kn_weather_interval_fields');container.replaceChildren();
   const choices={Sunny:'sunny',Cloud:'cloud',Rain:'rain',Lightning:'lightning'};
-  ['Morning (07.00–10.00)','Afternoon (10.00–13.00)','Evening (13.00–16.00)','Dusk (16.00–18.00)'].forEach((interval,i)=>{
+  ['Morning (07.00–10.00)','Midday (10.00–13.00)','Afternoon (13.00–16.00)','Late Afternoon (16.00–18.00)'].forEach((interval,i)=>{
     const col=document.createElement('div');col.className='col-6 col-md-3';
     const card=document.createElement('div');card.className='border rounded p-2 text-center h-100';
     const label=document.createElement('label');label.className='fld-lbl d-block';label.textContent=interval;

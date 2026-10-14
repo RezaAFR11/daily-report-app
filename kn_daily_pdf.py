@@ -124,13 +124,15 @@ def weather_cell(value, max_width=12*mm, max_height=8*mm):
 
 def weather(report):
     legacy=report.get('weather') or {}
+    # Keep legacy weather keys for saved reports; labels follow the time slots.
     periods=['Morning','Afternoon','Evening','Dusk']
+    labels=['Morning','Midday','Afternoon','Late Afternoon']
     values=report.get('kn_weather_intervals')
     if values is None:
         values=[legacy.get(k,'') for k in periods]
     values=(list(values)+['']*4)[:4]
     times=['07.00–10.00','10.00–13.00','13.00–16.00','16.00–18.00']
-    headings=[cell(f'{name}\n{time}',HEADER_CENTER) for name,time in zip(periods,times)]
+    headings=[cell(f'{name}\n{time}',HEADER_CENTER) for name,time in zip(labels,times)]
     headings += [cell(v,HEADER_CENTER) for v in ['Wind','Temperature (°C)','Impact on Work']]
     rows=[[cell('A. WEATHER REPORT',BOLD)]+['']*6,headings,
           [weather_cell(v,18*mm,13*mm) for v in values]+
