@@ -597,7 +597,8 @@ def _prepare_pdf_photo(raw, target_width, target_height):
 def generate_pdf(d, output_path, cfg):
     """Generate the Daily Activity Report using the single report layout."""
     from kn_daily_pdf import generate_kn_pdf
-    logos = {'kn': (resolve_logo_path(cfg['logo_kn'], 'kn') if cfg.get('logo_kn')
+    logos = {'gpa': resolve_logo_path(cfg.get('logo_gpa', ''), 'gpa'),
+             'kn': (resolve_logo_path(cfg['logo_kn'], 'kn') if cfg.get('logo_kn')
                     else os.path.join(PDF_ASSET_DIR, 'kn_word_logo.png'))}
     return generate_kn_pdf(d, output_path, logos)
 
